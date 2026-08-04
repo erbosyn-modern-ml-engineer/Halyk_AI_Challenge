@@ -1,30 +1,28 @@
 # Status
 
-Current stage: 1  
+Current stage: 2  
 Stage status: VERIFIED
 
 ## Completed
 
-- repository bootstrap
-- shared domain models
-- shared Protocol contracts
-- FAST/FULL configuration declarations
-- FastAPI `/health` stub
-- Docker Compose declaration for PostgreSQL (pgvector) and Redis
-- architecture import-boundary tests
-- domain unit tests
+- safe ZIP archive ingestion
+- deterministic manifest generation
+- CSV/JSON/JSONL/XLSX schema profiling
+- deterministic role classification
+- CLI inspection command
 
 ## Not implemented
 
-- ingestion
-- parsing
-- durable workers
+- PDF text extraction
+- OCR
+- document version resolution
 - retrieval
 - DeepSeek
-- calculations beyond domain DTOs
+- transaction calculations
+- durable workers
 - workflows
-- submission adapter implementation
+- submission generation
 
 ## Next gate
 
-Stage 2 — Archive ingestion and schema profiling
+Stage 3 — Document parsing and canonical evidence spans
