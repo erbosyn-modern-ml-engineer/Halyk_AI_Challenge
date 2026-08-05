@@ -1,0 +1,37 @@
+{
+  "models": [
+    {
+      "logical_name": "fast-embedding",
+      "repository_or_model_id": "intfloat/multilingual-e5-small",
+      "revision": "614241f622f53c4eeff9890bdc4f31cfecc418b3",
+      "license": "MIT",
+      "dimension": 384,
+      "max_input_tokens": 512,
+      "query_prefix": "query: ",
+      "passage_prefix": "passage: ",
+      "purpose": "FAST dense embeddings"
+    },
+    {
+      "logical_name": "full-embedding",
+      "repository_or_model_id": "BAAI/bge-m3",
+      "revision": "5617a9f61b028005a4858fdac845db406aefb181",
+      "license": "MIT",
+      "dimension": 1024,
+      "max_input_tokens": 8192,
+      "query_prefix": "",
+      "passage_prefix": "",
+      "purpose": "FULL dense embeddings (dense only in Stage 4)"
+    },
+    {
+      "logical_name": "full-reranker",
+      "repository_or_model_id": "BAAI/bge-reranker-v2-m3",
+      "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+      "license": "Apache-2.0",
+      "dimension": null,
+      "max_input_tokens": null,
+      "query_prefix": "",
+      "passage_prefix": "",
+      "purpose": "FULL cross-encoder reranking after hybrid fusion"
+    }
+  ]
+}
