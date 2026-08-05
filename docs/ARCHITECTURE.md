@@ -60,6 +60,18 @@ Stage 2 inspection directory
   → documents/*.json + evidence_catalog.jsonl + parse_report.json + parsing_summary.md
 ```
 
+## Stage 4 data flow
+
+```text
+Stage 3 parse output
+  → StructureAwareChunker (parent / child / table / atomic)
+  → pinned SentenceTransformer embeddings (E5-small FAST / BGE-M3 FULL)
+  → FAST: SQLite FTS5 + float32 local vectors + shared RRF
+  → FULL: PostgreSQL FTS (simple) + exact pgvector cosine + shared RRF
+  → optional FULL cross-encoder rerank (BGE-reranker-v2-m3)
+  → chunks.jsonl + chunk_manifest.json + index_report.json + retrieval_summary.md
+```
+
 ## Stage 2 security invariants
 
 1. Reject absolute, drive, UNC, NUL, and `..` archive paths.
@@ -80,6 +92,15 @@ Stage 2 inspection directory
 6. PyMuPDF / fitz is intentionally excluded (AGPL).
 7. OCR defaults to disabled; do not claim scanned-PDF production support unless proven.
 
+## Stage 4 retrieval invariants
+
+1. Every chunk retains at least one evidence span; synthetic retrieval text is not primary evidence.
+2. Hard filters precede ranking (OR within field, AND across fields).
+3. Shared RRF fusion for FAST and FULL; no silent hybrid→lexical downgrade.
+4. Exact pgvector cosine search by default; HNSW not required and not claimed.
+5. Model revisions pinned in `model-lock.json`; offline after explicit prewarm.
+6. Base package imports without Docling / SQLAlchemy / sentence-transformers.
+
 ## Non-negotiable decision invariants
 
 1. **Evidence** — every `ExplicitFact` references at least one `EvidenceSpan`.
@@ -94,3 +115,5 @@ Stage 2 inspection directory
 - Stage 1: contracts and domain models only.
 - Stage 2: safe archive inventory + schema profiling only. Documents are inventoried, not content-parsed.
 - Stage 3: document parsing to canonical evidence spans. No embeddings, retrieval, LLM extraction, or workers.
+- Stage 4: structure-aware chunking and hybrid retrieval only. No DeepSeek, fact extraction, version resolver, or workers.
+- Stage 5+: model gateway, extraction, decisions, submission (not started).

@@ -69,7 +69,20 @@ This file records upstream sources reviewed for the Halyk Decision Agent.
 - Source files inspected:
   - `examples/hybrid_search/rrf.py`
   - `examples/hybrid_search/cross_encoder.py`
-- Modifications: none in Stage 1
+- Stage 4 adapted file: `src/halyk_agent/adapters/retrieval/rrf.py`
+- Modifications:
+  - retained RRF formula `score = Σ 1/(k + rank)` with configurable `k` (default 60);
+  - pure in-memory fusion over ranked chunk-id lists (no SQL / connection / table setup copied);
+  - returns per-list 1-based ranks with the fused score;
+  - deterministic tie-break by `chunk_id` ascending;
+  - cross-encoder example used as behavioral reference only — local `CrossEncoderReranker` uses sentence-transformers without copying upstream connection or model wiring.
+
+### FlagEmbedding (reference only)
+
+- Repository: https://github.com/FlagOpen/FlagEmbedding
+- Upstream commit inspected (default branch `master` at Stage 4): `7ed43d67ec03fbe5c31c0992dbfa941fb1860549`
+- License: MIT
+- Use: architectural / model-card reference for BGE-M3 and BGE-reranker-v2-m3; package not vendored
 
 ### Docling
 
