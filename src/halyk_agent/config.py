@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     profile: ProfileName = Field(default=ProfileName.FAST)
     app_name: str = Field(default="halyk-agent")
-    stage: int = Field(default=2, ge=1)
+    stage: int = Field(default=3, ge=1)
     postgres_dsn: str | None = Field(default=None)
     redis_url: str | None = Field(default=None)
 
@@ -37,6 +37,27 @@ class Settings(BaseSettings):
     max_sample_rows: int = Field(default=200, ge=1)
     max_sample_value_length: int = Field(default=200, ge=1)
     connector_batch_size: int = Field(default=50, ge=1)
+
+    # Parser limits / routing (Stage 3)
+    parser_backend: Literal["pypdf", "auto"] = Field(default="pypdf")
+    parser_primary: Literal["pypdf"] = Field(default="pypdf")
+    parser_fallback: Literal["none", "docling"] = Field(default="none")
+    force_docling: bool = Field(default=False)
+    docling_ocr_enabled: bool = Field(default=False)
+    docling_table_structure_enabled: bool = Field(default=True)
+    max_pdf_pages: int = Field(default=500, ge=1)
+    max_page_characters: int = Field(default=500_000, ge=1)
+    max_document_characters: int = Field(default=5_000_000, ge=1)
+    max_parser_warnings: int = Field(default=200, ge=1)
+
+    # Quality thresholds
+    quality_min_total_characters: int = Field(default=1, ge=0)
+    quality_max_empty_page_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
+    quality_max_replacement_character_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
+    quality_min_alphanumeric_ratio: float = Field(default=0.2, ge=0.0, le=1.0)
+    quality_max_control_character_count: int = Field(default=100, ge=0)
+    quality_max_duplicate_line_ratio: float = Field(default=0.9, ge=0.0, le=1.0)
+    quality_max_pages_without_text_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
 
     def execution_profile(self) -> ExecutionProfile:
         """Return the configured FAST or FULL profile declaration."""
