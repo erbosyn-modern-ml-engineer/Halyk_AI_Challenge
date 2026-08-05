@@ -36,9 +36,9 @@ def test_cli_outputs_overwrite_and_unsafe(tmp_path: Path) -> None:
     assert main(["inspect", "--input", str(bad), "--output", str(tmp_path / "bad-out")]) == 1
 
 
-def test_health_remains_valid_for_stage_2() -> None:
-    settings = Settings(profile=ProfileName.FAST, stage=2, app_name="halyk-agent")
+def test_health_remains_valid_for_stage_3() -> None:
+    settings = Settings(profile=ProfileName.FAST, stage=3, app_name="halyk-agent")
     client = TestClient(create_app(settings))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "stage": 2, "profile": "fast"}
+    assert response.json() == {"status": "ok", "stage": 3, "profile": "fast"}
