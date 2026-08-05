@@ -10,8 +10,8 @@ from halyk_agent.profiles import ProfileName
 
 
 def test_health_endpoint_reports_stage_and_profile() -> None:
-    settings = Settings(profile=ProfileName.FAST, stage=4, app_name="halyk-agent")
+    settings = Settings(profile=ProfileName.FULL, stage=4, app_name="halyk-agent")
     client = TestClient(create_app(settings))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "stage": 4, "profile": "fast"}
+    assert response.json() == {"status": "ok", "stage": 4, "profile": "full"}

@@ -77,13 +77,13 @@ def test_fast_identity_pinned_with_e5_prefixes() -> None:
     assert identity.license == "MIT"
 
 
-def test_full_identity_pinned_empty_prefixes() -> None:
+def test_full_identity_pinned_e5_prefixes() -> None:
     identity = resolve_embedding_identity(FULL_EMBEDDING_LOGICAL_NAME)
-    assert identity.model_id == "BAAI/bge-m3"
-    assert identity.revision == "5617a9f61b028005a4858fdac845db406aefb181"
-    assert identity.dimension == 1024
-    assert identity.query_prefix == ""
-    assert identity.passage_prefix == ""
+    assert identity.model_id == "intfloat/multilingual-e5-small"
+    assert identity.revision == "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+    assert identity.dimension == 384
+    assert identity.query_prefix == "query: "
+    assert identity.passage_prefix == "passage: "
 
 
 @pytest.mark.asyncio
@@ -100,13 +100,13 @@ async def test_fake_provider_applies_e5_prefixes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fake_provider_bge_has_empty_prefixes() -> None:
+async def test_fake_provider_full_uses_e5_prefixes() -> None:
     identity = resolve_embedding_identity(FULL_EMBEDDING_LOGICAL_NAME)
     provider = FakeProvider(identity)
     docs = await provider.embed_documents(["hello"])
     query = await provider.embed_query("world")
-    assert docs[0].values[0] == float(len("hello"))
-    assert query.values[0] == float(len("world"))
+    assert docs[0].values[0] == float(len("passage: hello"))
+    assert query.values[0] == float(len("query: world"))
 
 
 def test_apply_prefix_idempotent() -> None:

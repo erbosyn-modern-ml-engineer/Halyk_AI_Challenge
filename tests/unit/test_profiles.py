@@ -30,8 +30,13 @@ def test_fast_profile_loads_from_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert profile.evidence_depth is EvidenceDepth.STANDARD
 
 
-def test_full_profile_declaration_without_service_connections() -> None:
+def test_full_profile_declaration_without_service_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """FULL profile is a pure declaration and must not open DB/Redis connections."""
+    monkeypatch.delenv("HALYK_POSTGRES_DSN", raising=False)
+    monkeypatch.delenv("HALYK_REDIS_URL", raising=False)
+    get_settings.cache_clear()
     profile = load_profile(ProfileName.FULL)
     settings = Settings(profile=ProfileName.FULL)
     assert settings.execution_profile() == profile

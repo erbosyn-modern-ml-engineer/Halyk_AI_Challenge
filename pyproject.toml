@@ -67,7 +67,8 @@ testpaths = ["tests"]
 pythonpath = ["src", "."]
 markers = [
   "docling: tests that require the optional Docling full extra",
-  "postgres: tests that require PostgreSQL (HALYK_POSTGRES_DSN / docker)",
+  "postgres: tests that require PostgreSQL (HALYK_POSTGRES_DSN; never start Docker)",
+  "retrieval_models: tests that resolve pinned embedding/reranker model-lock entries",
 ]
 
 [tool.ruff]
@@ -108,6 +109,13 @@ module = [
   "numpy.*",
   "torch",
   "torch.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+# When installed, use real SQLAlchemy/pgvector types (do not follow_imports=skip).
+[[tool.mypy.overrides]]
+module = [
   "asyncpg",
   "asyncpg.*",
   "pgvector",
@@ -118,12 +126,4 @@ module = [
   "sqlalchemy.*",
 ]
 ignore_missing_imports = true
-follow_imports = "skip"
 
-# Optional FULL retrieval stack: SQLAlchemy symbols are Any under follow_imports=skip.
-[[tool.mypy.overrides]]
-module = [
-  "halyk_agent.adapters.retrieval.postgres",
-  "halyk_agent.adapters.retrieval.postgres.*",
-]
-ignore_errors = true
