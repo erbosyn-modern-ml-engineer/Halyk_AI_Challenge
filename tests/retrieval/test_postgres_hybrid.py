@@ -53,9 +53,10 @@ async def _postgres_reachable(dsn: str) -> bool:
 async def postgres_dsn() -> AsyncIterator[str]:
     dsn = _dsn()
     if not dsn:
-        pytest.skip("HALYK_POSTGRES_DSN not set")
+        pytest.fail("HALYK_POSTGRES_DSN not set — cannot verify live PostgreSQL")
     if not await _postgres_reachable(dsn):
-        pytest.skip("PostgreSQL unavailable (docker down or DSN unreachable)")
+        pytest.fail("PostgreSQL unreachable via HALYK_POSTGRES_DSN")
+    os.environ["HALYK_VECTOR_BACKEND"] = "postgres_numpy_exact"
     yield dsn
 
 

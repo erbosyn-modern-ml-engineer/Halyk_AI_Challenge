@@ -1,9 +1,11 @@
-"""Initial retrieval schema: chunks, embeddings, indexes (exact cosine, no HNSW).
+"""Initial retrieval schema: BYTEA embeddings (postgres_numpy_exact).
 
 Revision ID: 0001_retrieval_schema
 Revises:
 Create Date: 2026-08-05
 
+Docker-free default: float32 vectors in BYTEA. Does not CREATE EXTENSION vector.
+Optional pgvector remains a separate runtime path when the extension already exists.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
@@ -23,8 +24,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-
+    # Intentionally no CREATE EXTENSION vector — postgres_numpy_exact is authoritative.
     op.create_table(
         "retrieval_chunks",
         sa.Column("chunk_id", sa.Text(), primary_key=True, nullable=False),
@@ -82,7 +82,6 @@ def upgrade() -> None:
     )
     op.create_index("ix_retrieval_chunks_kind", "retrieval_chunks", ["kind"])
     op.create_index("ix_retrieval_chunks_level", "retrieval_chunks", ["level"])
-    # Language-neutral FTS for mixed KK/RU/EN (no English stemming).
     op.execute(
         """
         CREATE INDEX ix_retrieval_chunks_fts
@@ -97,7 +96,7 @@ def upgrade() -> None:
         sa.Column("model_id", sa.Text(), nullable=False),
         sa.Column("model_revision", sa.Text(), nullable=False),
         sa.Column("dimension", sa.Integer(), nullable=False),
-        sa.Column("embedding", Vector(), nullable=False),
+        sa.Column("embedding_blob", sa.LargeBinary(), nullable=False),
         sa.Column("vector_checksum", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("chunk_id", "model_id", "model_revision"),
         sa.UniqueConstraint(
@@ -112,7 +111,6 @@ def upgrade() -> None:
             ondelete="CASCADE",
         ),
     )
-    # Intentionally no HNSW / IVFFlat index — exact cosine search is the default.
 
     op.create_table(
         "retrieval_indexes",
@@ -135,6 +133,12 @@ def upgrade() -> None:
         ),
         sa.Column("chunk_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("vector_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "vector_backend",
+            sa.String(length=64),
+            nullable=False,
+            server_default="postgres_numpy_exact",
+        ),
     )
 
 

@@ -38,7 +38,8 @@ def test_full_profile_declaration_without_service_connections(
     monkeypatch.delenv("HALYK_REDIS_URL", raising=False)
     get_settings.cache_clear()
     profile = load_profile(ProfileName.FULL)
-    settings = Settings(profile=ProfileName.FULL)
+    # Ignore local .env so this unit test does not pick up operator DSNs.
+    settings = Settings(_env_file=None, profile=ProfileName.FULL)
     assert settings.execution_profile() == profile
     assert profile.storage_backend is StorageBackend.POSTGRES
     assert profile.job_backend is JobBackend.REDIS_LEASE
