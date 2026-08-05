@@ -229,9 +229,7 @@ def parse_inspection_directory(
         # FULL force-docling bypasses FAST pre-pass for Docling-supported formats.
         # TXT remains on the FAST/plain-text path even when force_docling is set.
         run_fast = not (
-            profile_norm == "full"
-            and force_docling
-            and artifact.format is not ArtifactFormat.TXT
+            profile_norm == "full" and force_docling and artifact.format is not ArtifactFormat.TXT
         )
         run_docling = False
 

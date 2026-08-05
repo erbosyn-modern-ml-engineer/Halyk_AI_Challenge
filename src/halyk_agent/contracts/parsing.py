@@ -1,63 +1,54 @@
-"""Document parsing contracts."""
+"""Document parsing contracts — single authoritative parser Protocol."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from halyk_agent.domain.common import JsonObject, NonEmptyStr
-from halyk_agent.domain.evidence import EvidenceSpan
+from halyk_agent.domain.common import NonEmptyStr
+from halyk_agent.domain.datasets import ArtifactFormat
+from halyk_agent.domain.parsing import (
+    CanonicalDocument,
+    ParseResult,
+    QualityDecision,
+)
 
 
-class ParsedTable(BaseModel):
-    """Minimal table representation produced by a parser."""
+class ParseRequest(BaseModel):
+    """Input shared by FAST and FULL document parsers."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-    table_id: NonEmptyStr
-    page_number: int = Field(ge=1)
-    headers: list[str] = Field(default_factory=list)
-    rows: list[list[str]] = Field(default_factory=list)
-
-
-class ParsedDocument(BaseModel):
-    """Parser output carrying text, tables, and provenance spans."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    document_id: NonEmptyStr
+    artifact_id: NonEmptyStr
+    source_path: Path
+    format: ArtifactFormat
     source_file: NonEmptyStr
-    page_count: int = Field(ge=0)
-    text: NonEmptyStr
-    tables: list[ParsedTable] = Field(default_factory=list)
-    spans: list[EvidenceSpan] = Field(default_factory=list)
-    metadata: JsonObject = Field(default_factory=dict)
+    source_sha256: NonEmptyStr
+    document_id: NonEmptyStr | None = None
+    document_version_id: NonEmptyStr | None = None
+    mime_type: NonEmptyStr | None = None
 
 
 class ParseQualityReport(BaseModel):
-    """Quality metrics used to accept or reject a parse result."""
+    """Quality metrics used to accept, fallback, or reject a parse result."""
 
     model_config = ConfigDict(extra="forbid")
 
+    decision: QualityDecision
     accepted: bool
     score: float = Field(ge=0.0, le=1.0)
+    triggered_rules: list[NonEmptyStr] = Field(default_factory=list)
     reasons: list[NonEmptyStr] = Field(default_factory=list)
 
 
 @runtime_checkable
 class DocumentParser(Protocol):
-    """Parses raw document bytes into a structured representation."""
+    """Parses a source file into a canonical ParseResult."""
 
-    async def parse(
-        self,
-        data: bytes,
-        *,
-        source_file: str,
-        document_id: str,
-        media_type: str | None = None,
-    ) -> ParsedDocument:
-        """Parse document bytes into text, tables, and spans."""
+    async def parse(self, request: ParseRequest) -> ParseResult:
+        """Parse using the request's source path and identity fields."""
         ...
 
 
@@ -65,6 +56,11 @@ class DocumentParser(Protocol):
 class ParseQualityGate(Protocol):
     """Accepts or rejects parse output based on quality thresholds."""
 
-    def evaluate(self, document: ParsedDocument) -> ParseQualityReport:
-        """Return a quality report for the parsed document."""
+    def evaluate(
+        self,
+        document: CanonicalDocument,
+        *,
+        profile: str,
+    ) -> ParseQualityReport:
+        """Return a quality report for the canonical document."""
         ...

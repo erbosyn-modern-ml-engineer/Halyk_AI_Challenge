@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from halyk_agent.contracts.parsing import ParsedDocument, ParseQualityReport
+from halyk_agent.contracts.parsing import ParseQualityReport
 from halyk_agent.domain.parsing import (
     CanonicalDocument,
     ParseStatus,
@@ -148,11 +148,19 @@ class DeterministicParseQualityGate:
             return QualityEvaluation(QualityDecision.FALLBACK_REQUIRED, triggered, warnings)
         return QualityEvaluation(QualityDecision.HUMAN_REVIEW_REQUIRED, triggered, warnings)
 
-    def evaluate(self, document: ParsedDocument) -> ParseQualityReport:
-        """Legacy Stage 1 protocol adapter."""
-        accepted = bool(document.text.strip()) and document.page_count > 0
+    def evaluate(
+        self,
+        document: CanonicalDocument,
+        *,
+        profile: str,
+    ) -> ParseQualityReport:
+        """ParseQualityGate Protocol over canonical documents."""
+        evaluation = self.evaluate_canonical(document, profile=profile)
+        accepted = evaluation.decision is QualityDecision.ACCEPT
         return ParseQualityReport(
+            decision=evaluation.decision,
             accepted=accepted,
             score=1.0 if accepted else 0.0,
-            reasons=[] if accepted else ["empty_or_missing_text"],
+            triggered_rules=list(evaluation.triggered_rules),
+            reasons=list(evaluation.triggered_rules),
         )

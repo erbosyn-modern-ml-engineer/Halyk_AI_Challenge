@@ -14,15 +14,17 @@ from halyk_agent.adapters.parsing.errors import (
     UnsupportedDocumentFormatError,
 )
 from halyk_agent.adapters.parsing.limits import ParserLimits
-from halyk_agent.contracts.parsing import ParsedDocument
-from halyk_agent.domain.evidence_factory import build_evidence_catalog
+from halyk_agent.contracts.parsing import ParseRequest
 from halyk_agent.domain.parsing import (
     CanonicalDocument,
+    ParseAttempt,
+    ParseResult,
     ParserIdentity,
     ParserKind,
     ParseStatus,
     ParseWarning,
     ParseWarningCode,
+    QualityDecision,
     compute_metrics,
     configuration_hash,
     document_identity,
@@ -197,35 +199,51 @@ class DoclingDocumentParser:
             warnings=warnings,
         )
 
-    async def parse(
+    def _to_parse_result(
         self,
-        data: bytes,
+        document: CanonicalDocument,
         *,
-        source_file: str,
-        document_id: str,
-        media_type: str | None = None,
-    ) -> ParsedDocument:
-        """DocumentParser protocol adapter."""
-        from halyk_agent.adapters.archive.hashing import sha256_bytes
+        duration_ms: int = 0,
+        quality_decision: QualityDecision | None = None,
+    ) -> ParseResult:
+        """Wrap a CanonicalDocument as the authoritative ParseResult."""
+        if quality_decision is None:
+            if document.status is ParseStatus.SUCCESS:
+                quality_decision = QualityDecision.ACCEPT
+            elif document.status is ParseStatus.PARTIAL:
+                quality_decision = QualityDecision.HUMAN_REVIEW_REQUIRED
+            elif document.status in {ParseStatus.ENCRYPTED, ParseStatus.UNSUPPORTED}:
+                quality_decision = QualityDecision.REJECT
+            else:
+                quality_decision = QualityDecision.HUMAN_REVIEW_REQUIRED
+        attempt = ParseAttempt(
+            parser=document.parser,
+            status=document.status,
+            metrics=document.metrics,
+            warnings=list(document.warnings),
+            duration_ms=duration_ms,
+        )
+        return ParseResult(
+            artifact_id=document.artifact_id,
+            selected_document=document,
+            attempts=[attempt],
+            quality_decision=quality_decision,
+            cache_hit=False,
+        )
 
-        canonical = self.parse_canonical(
+    async def parse(self, request: ParseRequest) -> ParseResult:
+        """DocumentParser Protocol: parse from request.source_path."""
+        import time
+
+        data = request.source_path.read_bytes()
+        started = time.perf_counter()
+        document = self.parse_canonical(
             data,
-            source_file=source_file,
-            artifact_id=document_id,
-            source_sha256=sha256_bytes(data),
-            document_id=document_id,
-            media_type=media_type,
+            source_file=request.source_file,
+            artifact_id=request.artifact_id,
+            source_sha256=request.source_sha256,
+            document_id=request.document_id,
+            media_type=request.mime_type,
         )
-        text = "\n\n".join(page.raw_text for page in canonical.pages) or " "
-        spans = (
-            build_evidence_catalog(canonical) if canonical.status is not ParseStatus.FAILED else []
-        )
-        return ParsedDocument(
-            document_id=canonical.document_id,
-            source_file=source_file,
-            page_count=len(canonical.pages),
-            text=text if text.strip() else " ",
-            tables=[],
-            spans=spans,
-            metadata={"status": canonical.status.value, "parser": canonical.parser.kind.value},
-        )
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        return self._to_parse_result(document, duration_ms=duration_ms)
