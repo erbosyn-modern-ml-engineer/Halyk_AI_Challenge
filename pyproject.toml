@@ -14,11 +14,17 @@ dependencies = [
   "openpyxl>=3.1.0",
   "pydantic>=2.9.0",
   "pydantic-settings>=2.5.0",
+  "pypdf>=6.0.0",
   "uvicorn[standard]>=0.30.0",
 ]
 
 [project.scripts]
 halyk-agent = "halyk_agent.app.cli:main"
+
+[project.optional-dependencies]
+full = [
+    "docling==2.118.0",
+]
 
 [dependency-groups]
 dev = [
@@ -26,6 +32,7 @@ dev = [
   "mypy>=1.11.0",
   "pytest>=8.3.0",
   "pytest-asyncio>=0.24.0",
+  "reportlab>=4.0.0",
   "ruff>=0.6.0",
   "types-openpyxl>=3.1.0",
 ]
@@ -46,6 +53,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+markers = [
+  "docling: tests that require the optional Docling full extra",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -74,3 +84,11 @@ warn_unused_configs = true
 mypy_path = "src"
 packages = ["halyk_agent"]
 exclude = ["tests/"]
+
+[[tool.mypy.overrides]]
+module = [
+  "docling",
+  "docling.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"

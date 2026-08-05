@@ -77,12 +77,32 @@ This file records upstream sources reviewed for the Halyk Decision Agent.
 - Upstream commit: `9b454c9e88454d95fd04d538c552a3c07bc3c04d`
 - License: MIT
 - Source files inspected:
-  - `pyproject.toml`
+  - `pyproject.toml` (declares version `2.118.0` at pin)
   - `docling/document_converter.py`
   - `docling/datamodel/document.py`
-  - `docs/concepts/docling_document.md`
   - `docs/examples/batch_convert.py`
-- Modifications: none in Stage 1 (planned as a dependency, not a code copy)
+  - `docs/examples/export_tables.py`
+  - DoclingDocument / provenance / BoundingBox (`CoordOrigin`) definitions via `docling-core`
+- Package installed: `docling==2.118.0` as optional extra `full`
+- Modifications: none — dependency adapter only (`DoclingDocumentParser` + mapping)
+
+### pypdf
+
+- Repository: https://github.com/py-pdf/pypdf
+- Upstream commit inspected: `8b6f6fdd1478b142c688501a0d3a093cca539ba8`
+- License: BSD-style (see upstream LICENSE)
+- Package installed: `pypdf>=6.0.0` (resolved `6.14.2`)
+- Use: FAST PDF text extraction dependency — internals not copied
+
+### reportlab
+
+- Package: `reportlab` (BSD) — **dev/test only**
+- Use: generate tiny synthetic PDFs for Stage 3 tests
+
+### Intentionally excluded: PyMuPDF / fitz
+
+- AGPL / commercial licensing is incompatible with the project's Apache-2.0 distribution model unless a separate commercial license is acquired.
+- Regression tests fail if `pymupdf` / `fitz` appear in `pyproject.toml` or under `src/`.
 
 ### LangGraph
 

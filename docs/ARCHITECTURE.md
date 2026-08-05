@@ -9,6 +9,7 @@
 - rule references and decisions
 - applicable version sets and proof bundles
 - dataset manifests and schema profiles (Stage 2)
+- canonical documents, pages, blocks, tables, parse metrics (Stage 3)
 
 Domain code must not import contracts, adapters, profiles, FastAPI, SQLAlchemy, Redis, LangGraph, Docling, or provider SDKs.
 
@@ -18,7 +19,7 @@ Domain code must not import contracts, adapters, profiles, FastAPI, SQLAlchemy, 
 |---------|------|------|
 | Storage | local / SQLite or memory | PostgreSQL |
 | Jobs | direct asyncio | Redis lease + heartbeat + recovery |
-| Parsing | fast (PyMuPDF planned) | quality / Docling fallback planned |
+| Parsing | pypdf (FAST) | pypdf pre-pass + Docling fallback |
 | Retrieval | local lexical/vector | PostgreSQL FTS + pgvector |
 | Evidence depth | standard | deep |
 | Workflow checkpoints | in-process (later) | LangGraph Postgres checkpointer (later) |
@@ -45,6 +46,20 @@ ZIP input
   → atomic write: manifest.json / schema_profile.json / inspection_summary.md
 ```
 
+## Stage 3 data flow
+
+```text
+Stage 2 inspection directory
+  → select DOCUMENT / supported formats
+  → FAST: pypdf (PDF/TXT)
+  → quality gate
+  → FULL: Docling fallback only when needed (or --force-docling)
+  → CanonicalDocument (pages / blocks / tables)
+  → exact EvidenceSpan catalog
+  → content-addressed local JSON parse cache
+  → documents/*.json + evidence_catalog.jsonl + parse_report.json + parsing_summary.md
+```
+
 ## Stage 2 security invariants
 
 1. Reject absolute, drive, UNC, NUL, and `..` archive paths.
@@ -54,6 +69,16 @@ ZIP input
 5. Never recursively extract nested archives.
 6. Never evaluate spreadsheet formulas.
 7. No LLM calls and no network access during inspection.
+
+## Stage 3 parsing invariants
+
+1. FAST never imports Docling.
+2. Canonical bounding boxes use TOP_LEFT origin only.
+3. Block offsets are half-open and must equal exact page raw substrings.
+4. Evidence spans are exact quotes — no fuzzy alignment.
+5. Parse cache keys include source hash, parser package/version, config hash, schema and normalization versions.
+6. PyMuPDF / fitz is intentionally excluded (AGPL).
+7. OCR defaults to disabled; do not claim scanned-PDF production support unless proven.
 
 ## Non-negotiable decision invariants
 
@@ -68,3 +93,4 @@ ZIP input
 
 - Stage 1: contracts and domain models only.
 - Stage 2: safe archive inventory + schema profiling only. Documents are inventoried, not content-parsed.
+- Stage 3: document parsing to canonical evidence spans. No embeddings, retrieval, LLM extraction, or workers.
