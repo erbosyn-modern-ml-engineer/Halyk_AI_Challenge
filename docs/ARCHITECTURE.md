@@ -20,7 +20,7 @@ Domain code must not import contracts, adapters, profiles, FastAPI, SQLAlchemy, 
 | Storage | local / SQLite or memory | PostgreSQL |
 | Jobs | direct asyncio | Redis lease + heartbeat + recovery |
 | Parsing | pypdf (FAST) | pypdf pre-pass + Docling fallback |
-| Retrieval | local lexical/vector | PostgreSQL FTS + pgvector |
+| Retrieval | local lexical/vector (frozen) | PostgreSQL FTS + postgres_numpy_exact (optional pgvector) |
 | Evidence depth | standard | deep |
 | Workflow checkpoints | in-process (later) | LangGraph Postgres checkpointer (later) |
 | Archive inspection | shared Stage 2 pipeline | shared Stage 2 pipeline |
@@ -65,12 +65,17 @@ Stage 2 inspection directory
 ```text
 Stage 3 parse output
   → StructureAwareChunker (parent / child / table / atomic)
-  → pinned SentenceTransformer embeddings (E5-small FAST / BGE-M3 FULL)
-  → FAST: SQLite FTS5 + float32 local vectors + shared RRF
-  → FULL: PostgreSQL FTS (simple) + exact pgvector cosine + shared RRF
-  → optional FULL cross-encoder rerank (BGE-reranker-v2-m3)
+  → pinned SentenceTransformer embeddings (multilingual-e5-small, 384-d; FULL default)
+  → FULL: PostgreSQL FTS (simple, OR lexemes)
+       + postgres_numpy_exact (BYTEA float32 + exact NumPy cosine)
+       OR optional pgvector when extension already installed
+       + shared RRF
+  → optional cross-encoder rerank (disabled by default; large-model approval required)
+  → FAST (frozen): SQLite FTS5 + float32 local vectors + shared RRF
   → chunks.jsonl + chunk_manifest.json + index_report.json + retrieval_summary.md
 ```
+
+Docker is never required for runtime. Compose/Dockerfile files are optional references only (unverified unless explicitly validated outside Stage 4.2).
 
 ## Stage 2 security invariants
 

@@ -2,31 +2,32 @@
 
 Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
-One shared domain core drives two runtime profiles:
+One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
-- **FAST** — local storage, asyncio jobs, pypdf parsing, SQLite FTS5 + local vectors
-- **FULL** — PostgreSQL, Redis lease workers (later), pypdf + Docling parsing, PostgreSQL FTS + pgvector + optional reranker
+- **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
+- **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
 
 ## Requirements
 
 - Python 3.12
 - [uv](https://github.com/astral-sh/uv)
+- Optional: an already-installed local PostgreSQL for live FULL retrieval (`HALYK_POSTGRES_DSN`)
+- Docker is **not** required and is **not** used by the competition runtime
 
 ## Quick start
 
 ```bash
-uv sync
+uv sync --group dev --extra full --extra retrieval-full
 uv run pytest
 uv run uvicorn halyk_agent.app.main:app --reload
 uv run python -m halyk_agent --help
-uv run halyk-agent --help
 ```
 
-Health check:
+Health check (default profile FULL):
 
 ```text
 GET /health
--> {"status":"ok","stage":4,"profile":"fast"}
+-> {"status":"ok","stage":4,"profile":"full"}
 ```
 
 ## Stage 2 — archive inspection
@@ -38,43 +39,47 @@ uv run python -m halyk_agent inspect --input archive.zip --output ./work/inspect
 ## Stage 3 — document parsing
 
 ```bash
-uv run python -m halyk_agent parse --inspection ./work/inspection --output ./work/parsed --profile fast
-uv sync --extra full
-uv run python -m halyk_agent parse --inspection ./work/inspection --output ./work/parsed-full --profile full --force-docling
+uv run python -m halyk_agent parse --inspection ./work/inspection --output ./work/parsed-full --profile full
 ```
 
-## Stage 4 — indexing and search
+## Stage 4 — FULL indexing and search (authoritative)
 
-```bash
-uv sync --extra retrieval-fast
-uv run python -m halyk_agent models prewarm --profile fast --components embeddings
-uv run python -m halyk_agent index --parsed ./work/parsed --output ./work/retrieval --profile fast
-uv run python -m halyk_agent search --index ./work/retrieval --query "лимит по договору" --top-k 5 --profile fast --json-output
-```
+Requires a reachable local PostgreSQL DSN (never start Docker from this project):
 
-FULL (after Compose Postgres + `uv sync --extra full --extra retrieval-full`):
+```powershell
+$env:HALYK_POSTGRES_DSN = "postgresql+asyncpg://USER@HOST:PORT/DB"
+$env:TORCHDYNAMO_DISABLE = "1"
+$env:TORCH_COMPILE_DISABLE = "1"
+$env:HF_HUB_OFFLINE = "1"
+$env:TRANSFORMERS_OFFLINE = "1"
 
-```bash
-uv run python -m halyk_agent models prewarm --profile full --components parser,embeddings,reranker
+# Default embeddings = multilingual-e5-small (already cached after first successful load)
+uv run python -m halyk_agent models prewarm --profile full --components embeddings
+
 uv run python -m halyk_agent index --parsed ./work/parsed-full --output ./work/retrieval-full --profile full
-uv run python -m halyk_agent search --index ./work/retrieval-full --query "лимит по договору" --top-k 5 --profile full --rerank --json-output
+uv run python -m halyk_agent search --index ./work/retrieval-full --query "лимит по договору" --top-k 5 --profile full --json-output
 ```
 
-Offline after prewarm: set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`.
+Do **not** pass `--rerank` for the competition path. Large optional models (BGE-M3 / BGE reranker) require `--approve-large-models` or `HALYK_ALLOW_LARGE_MODEL_DOWNLOAD=1`.
 
 Pinned models: [docs/MODEL_PINS.md](docs/MODEL_PINS.md) / [model-lock.json](model-lock.json).
 
+### Docker (optional reference only)
+
+`docker-compose.yml` and related files are **passive deployment references**. They are **not verified** in Stage 4.2 and must not be launched for competition setup.
+
 ## Profiles
 
-Set `HALYK_PROFILE=fast` (default) or `HALYK_PROFILE=full`.
+Set `HALYK_PROFILE=full` (default) or `HALYK_PROFILE=fast` (frozen experimental fallback only).
 
-Constructing FULL settings does not import Docling. The FULL parse path lazy-imports Docling and raises `ParserDependencyMissingError` if the `full` extra is missing. Retrieval extras are separate: `retrieval-fast` / `retrieval-full`.
+Optional vector backend override: `HALYK_VECTOR_BACKEND=postgres_numpy_exact` (default portable) or `pgvector` (only if the extension is already installed).
 
 ## Licensing notes
 
 - pypdf: dependency, BSD-style license
 - Docling: optional dependency, MIT
-- sentence-transformers / E5 / BGE: optional retrieval extras (see MODEL_PINS)
+- sentence-transformers / E5-small: retrieval extras (see MODEL_PINS)
+- BGE-M3 / BGE reranker: optional large models (approval required)
 - PyMuPDF: intentionally excluded due AGPL/commercial licensing
 
 ## Documentation

@@ -1,3 +1,8 @@
+# OPTIONAL REFERENCE ONLY — not part of the competition runtime.
+# Stage 4.2: Docker is never required and was not executed to verify this file.
+# Prefer an already-installed local PostgreSQL via HALYK_POSTGRES_DSN.
+# Default vector backend is postgres_numpy_exact (pgvector optional if already installed).
+
 services:
   postgres:
     image: pgvector/pgvector:pg16

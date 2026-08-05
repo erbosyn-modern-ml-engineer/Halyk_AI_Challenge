@@ -82,7 +82,17 @@ This file records upstream sources reviewed for the Halyk Decision Agent.
 - Repository: https://github.com/FlagOpen/FlagEmbedding
 - Upstream commit inspected (default branch `master` at Stage 4): `7ed43d67ec03fbe5c31c0992dbfa941fb1860549`
 - License: MIT
-- Use: architectural / model-card reference for BGE-M3 and BGE-reranker-v2-m3; package not vendored
+- Use: architectural / model-card reference for optional BGE-M3 and BGE-reranker-v2-m3; package not vendored
+- Stage 4.2: BGE models are `optional_large_model` / `requires_explicit_user_approval` / `not_preverified` and are not competition defaults
+
+### intfloat/multilingual-e5-small (authoritative competition embedding)
+
+- Hub id: `intfloat/multilingual-e5-small`
+- Pinned revision: `614241f622f53c4eeff9890bdc4f31cfecc418b3`
+- License: MIT
+- Dimension: 384
+- Required prefixes: `query: ` / `passage: `
+- Use: default FULL / competition dense embeddings via sentence-transformers
 
 ### Docling
 
