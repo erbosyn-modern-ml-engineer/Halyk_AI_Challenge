@@ -82,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Comma-separated: embeddings,reranker,parser",
     )
+    prewarm.add_argument(
+        "--approve-large-models",
+        action="store_true",
+        help=(
+            "Required to download optional large models (BGE-M3 / BGE reranker). "
+            "Default competition path uses multilingual-e5-small only."
+        ),
+    )
     return parser
 
 
@@ -203,7 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "models" and args.models_command == "prewarm":
         components = [part.strip() for part in str(args.components).split(",") if part.strip()]
         try:
-            lines = asyncio.run(prewarm_components(profile=args.profile, components=components))
+            lines = asyncio.run(
+                prewarm_components(
+                    profile=args.profile,
+                    components=components,
+                    approve_large_models=bool(args.approve_large_models),
+                )
+            )
         except Exception as exc:
             print(f"prewarm failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
             return 1

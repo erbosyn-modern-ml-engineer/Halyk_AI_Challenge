@@ -16,6 +16,8 @@ from halyk_agent.adapters.embeddings.cache import LocalEmbeddingCache
 from halyk_agent.adapters.embeddings.model_registry import (
     FAST_EMBEDDING_LOGICAL_NAME,
     FULL_EMBEDDING_LOGICAL_NAME,
+    OPTIONAL_BGE_M3_LOGICAL_NAME,
+    default_embedding_logical_name,
 )
 from halyk_agent.adapters.embeddings.sentence_transformer_provider import (
     SentenceTransformerEmbeddingProvider,
@@ -55,11 +57,12 @@ def _logical_embedding_name(profile: str, embedding_model: str | None) -> str:
         aliases = {
             "fast": FAST_EMBEDDING_LOGICAL_NAME,
             "full": FULL_EMBEDDING_LOGICAL_NAME,
-            "intfloat/multilingual-e5-small": FAST_EMBEDDING_LOGICAL_NAME,
-            "BAAI/bge-m3": FULL_EMBEDDING_LOGICAL_NAME,
+            "intfloat/multilingual-e5-small": FULL_EMBEDDING_LOGICAL_NAME,
+            "BAAI/bge-m3": OPTIONAL_BGE_M3_LOGICAL_NAME,
+            "optional-bge-m3": OPTIONAL_BGE_M3_LOGICAL_NAME,
         }
         return aliases.get(embedding_model, embedding_model)
-    return FAST_EMBEDDING_LOGICAL_NAME if profile == "fast" else FULL_EMBEDDING_LOGICAL_NAME
+    return default_embedding_logical_name(profile)
 
 
 async def index_parsed_directory(
@@ -171,7 +174,12 @@ async def index_parsed_directory(
         chunker_identity=chunker_identity,
         embedding_model=model_identity,
         lexical_configuration={
-            "backend": "sqlite_fts5" if profile_norm == "fast" else "postgres_simple"
+            "backend": "sqlite_fts5" if profile_norm == "fast" else "postgres_simple",
+            "fts_config": "simple",
+            "policy": "or_lexemes",
+            "vector_backend": (
+                "local_float32" if profile_norm == "fast" else "postgres_numpy_exact"
+            ),
         },
         rrf_configuration={"rrf_k": 60},
         reranker_model=None,

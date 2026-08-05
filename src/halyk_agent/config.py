@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    profile: ProfileName = Field(default=ProfileName.FAST)
+    profile: ProfileName = Field(default=ProfileName.FULL)
     app_name: str = Field(default="halyk-agent")
     stage: int = Field(default=4, ge=1)
     postgres_dsn: str | None = Field(default=None)
