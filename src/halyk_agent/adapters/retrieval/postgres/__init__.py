@@ -1,4 +1,4 @@
-"""FULL PostgreSQL hybrid retrieval (FTS + pgvector + RRF)."""
+"""FULL PostgreSQL hybrid retrieval (FTS + exact vectors + RRF)."""
 
 from __future__ import annotations
 

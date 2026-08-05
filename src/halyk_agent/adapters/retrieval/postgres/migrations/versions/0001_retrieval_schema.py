@@ -93,12 +93,19 @@ def upgrade() -> None:
 
     op.create_table(
         "retrieval_embeddings",
-        sa.Column("chunk_id", sa.Text(), primary_key=True, nullable=False),
+        sa.Column("chunk_id", sa.Text(), nullable=False),
         sa.Column("model_id", sa.Text(), nullable=False),
         sa.Column("model_revision", sa.Text(), nullable=False),
         sa.Column("dimension", sa.Integer(), nullable=False),
         sa.Column("embedding", Vector(), nullable=False),
         sa.Column("vector_checksum", sa.Text(), nullable=False),
+        sa.PrimaryKeyConstraint("chunk_id", "model_id", "model_revision"),
+        sa.UniqueConstraint(
+            "chunk_id",
+            "model_id",
+            "model_revision",
+            name="uq_retrieval_embeddings_chunk_model_revision",
+        ),
         sa.ForeignKeyConstraint(
             ["chunk_id"],
             ["retrieval_chunks.chunk_id"],

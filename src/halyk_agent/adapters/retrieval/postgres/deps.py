@@ -6,7 +6,10 @@ from halyk_agent.adapters.retrieval.errors import PostgresDependencyMissingError
 
 
 def ensure_postgres_available() -> None:
-    """Raise a typed error when retrieval-full dependencies are missing."""
+    """Raise when core PostgreSQL retrieval deps are missing (no Docker required).
+
+    ``pgvector`` Python package is optional — required only for the pgvector backend.
+    """
     missing: list[str] = []
     try:
         import sqlalchemy  # noqa: F401
@@ -17,9 +20,9 @@ def ensure_postgres_available() -> None:
     except ImportError:
         missing.append("asyncpg")
     try:
-        import pgvector  # noqa: F401
+        import numpy  # noqa: F401
     except ImportError:
-        missing.append("pgvector")
+        missing.append("numpy")
     if missing:
         raise PostgresDependencyMissingError(
             "PostgreSQL retrieval dependencies are not installed "
@@ -28,4 +31,18 @@ def ensure_postgres_available() -> None:
         )
 
 
-__all__ = ["ensure_postgres_available"]
+def ensure_pgvector_package() -> None:
+    """Raise when the optional pgvector Python package is missing."""
+    ensure_postgres_available()
+    try:
+        import pgvector  # noqa: F401
+    except ImportError as exc:
+        raise PostgresDependencyMissingError(
+            "pgvector Python package is not installed. "
+            "Install with: uv sync --extra retrieval-full "
+            "(extension must already exist on the PostgreSQL instance; "
+            "this project never installs/compiles pgvector automatically)."
+        ) from exc
+
+
+__all__ = ["ensure_pgvector_package", "ensure_postgres_available"]

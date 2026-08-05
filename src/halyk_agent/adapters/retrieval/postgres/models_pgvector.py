@@ -1,22 +1,19 @@
-"""SQLAlchemy ORM models for FULL PostgreSQL hybrid retrieval.
-
-Default vector storage is BYTEA float32 (``postgres_numpy_exact``).
-Optional pgvector ``VECTOR`` column is used only when the extension exists.
-"""
+"""Optional pgvector ORM models (only when extension already installed)."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from halyk_agent.adapters.retrieval.postgres.deps import ensure_postgres_available
+from halyk_agent.adapters.retrieval.postgres.deps import ensure_pgvector_package
 
-ensure_postgres_available()
+ensure_pgvector_package()
 
+from pgvector.sqlalchemy import VECTOR  # noqa: E402
 from sqlalchemy import (  # noqa: E402
     Boolean,
+    Dialect,
     ForeignKey,
     Integer,
-    LargeBinary,
     String,
     Text,
     false,
@@ -25,18 +22,39 @@ from sqlalchemy.dialects.postgresql import JSONB  # noqa: E402
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship  # noqa: E402
 
 DEFAULT_INDEX_KEY = "default"
-FTS_CONFIG = "simple"
-VECTOR_BACKEND_NUMPY = "postgres_numpy_exact"
-VECTOR_BACKEND_PGVECTOR = "pgvector"
 
 
-class Base(DeclarativeBase):
-    """Declarative base for retrieval tables."""
+class AsyncpgCompatibleVector(VECTOR):
+    """VECTOR bind that keeps lists for asyncpg codecs (avoids string round-trip).
+
+    pgvector.sqlalchemy.VECTOR.bind_processor always stringifies via Vector._to_db.
+    asyncpg+register_vector expects list/ndarray. Narrow dialect-specific override.
+    """
+
+    cache_ok = True
+
+    def bind_processor(self, dialect: Dialect) -> Any:
+        if dialect.name == "postgresql" and dialect.driver == "asyncpg":
+
+            def process(value: Any) -> Any:
+                if value is None:
+                    return None
+                if isinstance(value, list):
+                    return [float(item) for item in value]
+                return value
+
+            return process
+        return super().bind_processor(dialect)
 
 
-class RetrievalChunkRow(Base):
-    """Indexed retrieval chunk with filterable metadata and FTS source text."""
+Vector = AsyncpgCompatibleVector
 
+
+class PgvectorBase(DeclarativeBase):
+    """Declarative base for optional pgvector-backed tables."""
+
+
+class PgvectorChunkRow(PgvectorBase):
     __tablename__ = "retrieval_chunks"
 
     chunk_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -60,16 +78,14 @@ class RetrievalChunkRow(Base):
     estimated_token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
-    embeddings: Mapped[list[RetrievalEmbeddingRow]] = relationship(
-        "RetrievalEmbeddingRow",
+    embeddings: Mapped[list[PgvectorEmbeddingRow]] = relationship(
+        "PgvectorEmbeddingRow",
         back_populates="chunk",
         cascade="all, delete-orphan",
     )
 
 
-class RetrievalEmbeddingRow(Base):
-    """Dense embedding stored as float32 BYTEA (portable Docker-free default)."""
-
+class PgvectorEmbeddingRow(PgvectorBase):
     __tablename__ = "retrieval_embeddings"
 
     chunk_id: Mapped[str] = mapped_column(
@@ -80,15 +96,13 @@ class RetrievalEmbeddingRow(Base):
     model_id: Mapped[str] = mapped_column(Text, primary_key=True)
     model_revision: Mapped[str] = mapped_column(Text, primary_key=True)
     dimension: Mapped[int] = mapped_column(Integer, nullable=False)
-    embedding_blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    embedding: Mapped[Any] = mapped_column(Vector(), nullable=False)
     vector_checksum: Mapped[str] = mapped_column(Text, nullable=False)
 
-    chunk: Mapped[RetrievalChunkRow] = relationship(back_populates="embeddings")
+    chunk: Mapped[PgvectorChunkRow] = relationship(back_populates="embeddings")
 
 
-class RetrievalIndexRow(Base):
-    """Index identity / readiness metadata (failed builds must not set ready)."""
-
+class PgvectorIndexRow(PgvectorBase):
     __tablename__ = "retrieval_indexes"
 
     index_key: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -100,18 +114,17 @@ class RetrievalIndexRow(Base):
     vector_backend: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
-        default=VECTOR_BACKEND_NUMPY,
-        server_default=VECTOR_BACKEND_NUMPY,
+        default="pgvector",
+        server_default="pgvector",
     )
 
 
 __all__ = [
     "DEFAULT_INDEX_KEY",
-    "FTS_CONFIG",
-    "VECTOR_BACKEND_NUMPY",
-    "VECTOR_BACKEND_PGVECTOR",
-    "Base",
-    "RetrievalChunkRow",
-    "RetrievalEmbeddingRow",
-    "RetrievalIndexRow",
+    "AsyncpgCompatibleVector",
+    "PgvectorBase",
+    "PgvectorChunkRow",
+    "PgvectorEmbeddingRow",
+    "PgvectorIndexRow",
+    "Vector",
 ]
