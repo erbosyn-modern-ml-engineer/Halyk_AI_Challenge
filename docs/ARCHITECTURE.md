@@ -75,7 +75,9 @@ Stage 3 parse output
   → chunks.jsonl + chunk_manifest.json + index_report.json + retrieval_summary.md
 ```
 
-Docker is never required for runtime. Compose/Dockerfile files are optional references only (unverified unless explicitly validated outside Stage 4.2).
+Docker is never required for runtime. Compose/Dockerfile files are optional references only.
+
+Stage 4.3 verified the competition path against local PostgreSQL 18.4 with `postgres_numpy_exact` (pgvector absent and not required). BGE-M3 and the BGE reranker remain optional large models — disabled and not verified.
 
 ## Stage 2 security invariants
 

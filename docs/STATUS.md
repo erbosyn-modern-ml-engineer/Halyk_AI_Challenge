@@ -1,55 +1,48 @@
 # Status
 
 Current stage: 4  
-Stage status: IMPLEMENTED — Docker-free stabilization in progress
+Stage status: VERIFIED
 
 Authoritative profile: **FULL** (competition)
 
-## Completed (implemented; live PostgreSQL verification may still be pending)
-
-- secure dataset inspection
-- canonical document parsing
-- exact evidence spans
-- deterministic structure-aware chunking
-- FULL multilingual embeddings (**multilingual-e5-small**, 384-d)
-- PostgreSQL FTS plus exact vector retrieval (`postgres_numpy_exact` default; optional pgvector)
-- RRF hybrid fusion
-- optional cross-encoder reranker (disabled by default; large model approval required)
-- offline E5-small embedding from existing cache
-- retrieval evaluation harness
-
-## Authoritative competition path
+## Authoritative competition pipeline
 
 ```text
-Docling/pypdf parsing
-→ structure-aware chunking
-→ multilingual-e5-small dense embeddings (384-d)
-→ PostgreSQL Full-Text Search (simple, OR lexemes)
-→ postgres_numpy_exact (or optional pgvector when already installed)
-→ RRF fusion
-→ evidence-backed ranked results
+Docker-free
+→ local PostgreSQL
+→ PostgreSQL FTS (simple, OR lexemes)
+→ postgres_numpy_exact
+→ multilingual-e5-small (384-d)
+→ RRF
+→ no reranker by default
 ```
 
-Reranking is **off by default**. Docker is **never required** and is **never launched** by the application.
+## Completed and verified (Stage 4.3)
 
-## Docker
+- secure dataset inspection
+- canonical document parsing with exact EvidenceSpan lineage
+- deterministic structure-aware chunking
+- FULL embeddings: **intfloat/multilingual-e5-small** @ pinned revision (offline cache)
+- PostgreSQL FTS on local PostgreSQL 18.4
+- exact vector retrieval via **postgres_numpy_exact** (BYTEA float32 + NumPy cosine)
+- shared RRF hybrid fusion
+- live migration, rollback, idempotent rebuild, metadata filters
+- end-to-end inspect → parse → index → search without Docker
 
-- never required for the competition runtime
-- never launched automatically
-- `docker-compose.yml` / `Dockerfile` are reference-only and **unverified** in Stage 4.2 (Docker commands were not executed)
+## Optional / not required for competition
 
-## Large models (frozen)
-
-| Model | Status |
-|-------|--------|
-| BAAI/bge-m3 | `optional_large_model` / `requires_explicit_user_approval` / `not_preverified` |
-| BAAI/bge-reranker-v2-m3 | same — disabled by default |
+| Component | Status |
+|-----------|--------|
+| pgvector | optional, not required, used only when already installed |
+| BAAI/bge-m3 | optional large model, disabled and not verified |
+| BAAI/bge-reranker-v2-m3 | optional large model, disabled and not verified |
+| Docker Compose | reference-only, never required, not launched for Stage 4 |
 
 ## FAST retrieval
 
 Status: **experimental fallback — frozen — not the competition default — not actively developed**
 
-## Not implemented
+## Not implemented (Stage 5+)
 
 - DeepSeek
 - LLM fact extraction
@@ -71,16 +64,6 @@ TORCHDYNAMO_DISABLE=1
 TORCH_COMPILE_DISABLE=1
 ```
 
-## Retrieval notes
-
-- Synthetic / context-enriched retrieval text is **not** primary evidence.
-- Hard filters apply **before** ranking (OR within a field, AND across fields).
-- Default vector backend is **postgres_numpy_exact** (BYTEA float32 + exact NumPy cosine).
-- Optional **pgvector** only when the extension is already installed (never auto-installed).
-- PostgreSQL FTS default lexical policy is recall-oriented **OR** across lexemes (`simple` config).
-- Offline competition runs: use cached E5-small with `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`.
-
 ## Next gate
 
-Stage 5 — DeepSeek model gateway and structured evidence extraction  
-(only after Stage 4 Docker-free verification)
+Stage 5 — DeepSeek model gateway and structured evidence extraction

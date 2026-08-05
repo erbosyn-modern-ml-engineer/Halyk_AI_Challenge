@@ -4,6 +4,8 @@ Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
 One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
+**Stage 4 status: VERIFIED** (Docker-free local PostgreSQL + `postgres_numpy_exact` + multilingual-e5-small + RRF).
+
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
 
