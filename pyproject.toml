@@ -25,6 +25,18 @@ halyk-agent = "halyk_agent.app.cli:main"
 full = [
     "docling==2.118.0",
 ]
+retrieval-fast = [
+    "numpy>=1.26.0",
+    "sentence-transformers>=3.0.0",
+]
+retrieval-full = [
+    "alembic>=1.13.0",
+    "asyncpg>=0.29.0",
+    "numpy>=1.26.0",
+    "pgvector>=0.3.0",
+    "sentence-transformers>=3.0.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+]
 
 [dependency-groups]
 dev = [
@@ -55,6 +67,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "."]
 markers = [
   "docling: tests that require the optional Docling full extra",
+  "postgres: tests that require PostgreSQL (HALYK_POSTGRES_DSN / docker)",
 ]
 
 [tool.ruff]
@@ -89,6 +102,28 @@ exclude = ["tests/"]
 module = [
   "docling",
   "docling.*",
+  "sentence_transformers",
+  "sentence_transformers.*",
+  "numpy",
+  "numpy.*",
+  "torch",
+  "torch.*",
+  "asyncpg",
+  "asyncpg.*",
+  "pgvector",
+  "pgvector.*",
+  "alembic",
+  "alembic.*",
+  "sqlalchemy",
+  "sqlalchemy.*",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# Optional FULL retrieval stack: SQLAlchemy symbols are Any under follow_imports=skip.
+[[tool.mypy.overrides]]
+module = [
+  "halyk_agent.adapters.retrieval.postgres",
+  "halyk_agent.adapters.retrieval.postgres.*",
+]
+ignore_errors = true

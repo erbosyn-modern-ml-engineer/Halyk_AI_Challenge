@@ -41,6 +41,8 @@ Thumbs.db
 data/
 scratch/
 tmp/
+work/
+.venv-fast-verification/
 *.sqlite3
 *.db
 

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     profile: ProfileName = Field(default=ProfileName.FAST)
     app_name: str = Field(default="halyk-agent")
-    stage: int = Field(default=3, ge=1)
+    stage: int = Field(default=4, ge=1)
     postgres_dsn: str | None = Field(default=None)
     redis_url: str | None = Field(default=None)
 
