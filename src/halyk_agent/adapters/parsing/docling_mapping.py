@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from halyk_agent.adapters.parsing.text_normalization import normalize_text
+from halyk_agent.domain.page_quality import ImageVisibility, PageVisualSignals
 from halyk_agent.domain.parsing import (
     BlockKind,
     CanonicalBlock,
@@ -412,3 +413,86 @@ def map_docling_document(
             )
         )
     return canonical_pages, warnings
+
+
+def extract_docling_page_visuals(
+    docling_doc: Any,
+    *,
+    page_numbers: list[int],
+) -> list[PageVisualSignals]:
+    """Map DoclingDocument.pictures provenance into per-page visual metadata.
+
+    Does not export image bytes, render pages, or run OCR.
+    """
+    if not hasattr(docling_doc, "pictures"):
+        return [
+            PageVisualSignals(
+                page_number=n,
+                image_count=0,
+                image_visibility=ImageVisibility.UNKNOWN,
+                extraction_warnings=["docling_pictures_attr_absent"],
+            )
+            for n in sorted(page_numbers)
+        ]
+
+    pictures = getattr(docling_doc, "pictures", None)
+    if pictures is None:
+        return [
+            PageVisualSignals(
+                page_number=n,
+                image_count=0,
+                image_visibility=ImageVisibility.UNKNOWN,
+                extraction_warnings=["docling_pictures_none"],
+            )
+            for n in sorted(page_numbers)
+        ]
+
+    counts: dict[int, int] = {}
+    unlocated = 0
+    for picture in pictures:
+        prov_list = getattr(picture, "prov", None) or []
+        page_nos: set[int] = set()
+        for prov in prov_list:
+            page_no = getattr(prov, "page_no", None)
+            if page_no is None:
+                continue
+            try:
+                page_nos.add(int(page_no))
+            except (TypeError, ValueError):
+                continue
+        if not page_nos:
+            unlocated += 1
+            continue
+        for page_no in sorted(page_nos):
+            counts[page_no] = counts.get(page_no, 0) + 1
+
+    visuals: list[PageVisualSignals] = []
+    for page_number in sorted(page_numbers):
+        if page_number in counts:
+            visuals.append(
+                PageVisualSignals(
+                    page_number=page_number,
+                    image_count=counts[page_number],
+                    image_visibility=ImageVisibility.KNOWN,
+                    displayed_image_count=counts[page_number],
+                )
+            )
+        elif unlocated > 0:
+            visuals.append(
+                PageVisualSignals(
+                    page_number=page_number,
+                    image_count=0,
+                    image_visibility=ImageVisibility.UNKNOWN,
+                    extraction_warnings=[f"unlocated_pictures={unlocated}"],
+                )
+            )
+        else:
+            visuals.append(
+                PageVisualSignals(
+                    page_number=page_number,
+                    image_count=0,
+                    image_visibility=ImageVisibility.KNOWN,
+                    displayed_image_count=0,
+                )
+            )
+    return visuals
