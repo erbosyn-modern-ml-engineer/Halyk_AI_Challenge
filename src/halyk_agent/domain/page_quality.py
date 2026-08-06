@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from halyk_agent.domain.parsing import CanonicalPage, ParseStatus
 
 # Cyrillic capitals are intentional for KK/RU heading detection.
@@ -26,12 +28,47 @@ class PageQualityState(StrEnum):
     UNREADABLE = "UNREADABLE"
 
 
+class ImageVisibility(StrEnum):
+    """Whether image_count is a verified observation."""
+
+    KNOWN = "KNOWN"
+    UNKNOWN = "UNKNOWN"
+
+
+class PageVisualSignals(BaseModel):
+    """Per-page visual metadata for trust gating (no image bytes)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    page_number: int = Field(ge=1)
+    image_count: int = Field(ge=0, default=0)
+    image_visibility: ImageVisibility = ImageVisibility.UNKNOWN
+    displayed_image_count: int | None = Field(default=None, ge=0)
+    extraction_warnings: list[str] = Field(default_factory=list)
+
+
+BLOCKING_PAGE_QUALITY_STATES: frozenset[PageQualityState] = frozenset(
+    {
+        PageQualityState.OCR_REQUIRED,
+        PageQualityState.IMAGE_DOMINANT,
+        PageQualityState.HEADING_WITHOUT_BODY,
+        PageQualityState.UNREADABLE,
+    }
+)
+
+
+def is_blocking_page_quality(state: PageQualityState) -> bool:
+    """Canonical predicate used by gate, cache validation, and tests."""
+    return state in BLOCKING_PAGE_QUALITY_STATES
+
+
 @dataclass(frozen=True)
 class PageSignals:
     char_count: int
     alphanumeric_ratio: float
     replacement_ratio: float
     image_count: int
+    image_visibility: ImageVisibility
     heading_without_body: bool
     empty_table_near_heading: bool
     parser_status: str | None
@@ -58,15 +95,37 @@ def _heading_without_body(text: str) -> bool:
 
 
 def classify_signals(signals: PageSignals) -> PageQualityState:
-    if signals.char_count == 0 and signals.image_count >= 1:
+    """Classify page quality from text + visual metadata."""
+    known_images = signals.image_visibility is ImageVisibility.KNOWN and signals.image_count >= 1
+    unknown_visuals = signals.image_visibility is ImageVisibility.UNKNOWN
+
+    # Verified images with empty / insufficient text → blocking.
+    if known_images and signals.char_count == 0:
         return PageQualityState.OCR_REQUIRED
     if signals.heading_without_body and signals.char_count < 120:
         return PageQualityState.OCR_REQUIRED
-    if signals.image_count >= 1 and signals.char_count < 40:
+    if known_images and signals.char_count < 40:
         return PageQualityState.IMAGE_DOMINANT
+
+    # Conservative: UNKNOWN visuals + no usable text must not be trusted SUCCESS.
+    if unknown_visuals and signals.char_count == 0:
+        return PageQualityState.OCR_REQUIRED
+    if unknown_visuals and signals.char_count < 25 and signals.alphanumeric_ratio < 0.15:
+        return PageQualityState.OCR_REQUIRED
+
+    # Verified zero images + completely empty page is not a usable text page.
+    if (
+        signals.image_visibility is ImageVisibility.KNOWN
+        and signals.image_count == 0
+        and signals.char_count == 0
+    ):
+        return PageQualityState.UNREADABLE
+
     if signals.heading_without_body:
         return PageQualityState.HEADING_WITHOUT_BODY
     if signals.char_count < 25 or signals.alphanumeric_ratio < 0.15:
+        # LOW_TEXT is non-blocking only when visuals are KNOWN with zero images
+        # and some short text remains (verified text-only short page).
         return PageQualityState.LOW_TEXT
     if signals.replacement_ratio > 0.2:
         return PageQualityState.UNREADABLE
@@ -76,17 +135,26 @@ def classify_signals(signals: PageSignals) -> PageQualityState:
 def diagnose_canonical_page(
     page: CanonicalPage,
     *,
-    image_count: int = 0,
+    visual: PageVisualSignals | None = None,
+    image_count: int | None = None,
+    image_visibility: ImageVisibility | None = None,
     parser_status: ParseStatus | None = None,
 ) -> tuple[PageQualityState, PageSignals]:
     chars, alnum, repl = _ratios(page.raw_text)
     heading = _heading_without_body(page.raw_text)
     empty_table = bool(page.tables) and chars < 40
+    if visual is not None:
+        vis = visual.image_visibility
+        img = visual.image_count
+    else:
+        vis = image_visibility or ImageVisibility.KNOWN
+        img = int(image_count or 0)
     signals = PageSignals(
         char_count=chars,
         alphanumeric_ratio=alnum,
         replacement_ratio=repl,
-        image_count=image_count,
+        image_count=img,
+        image_visibility=vis,
         heading_without_body=heading,
         empty_table_near_heading=empty_table and heading,
         parser_status=parser_status.value if parser_status else None,
@@ -94,40 +162,41 @@ def diagnose_canonical_page(
     return classify_signals(signals), signals
 
 
-_BLOCKING = frozenset(
-    {
-        PageQualityState.OCR_REQUIRED,
-        PageQualityState.IMAGE_DOMINANT,
-        PageQualityState.HEADING_WITHOUT_BODY,
-        PageQualityState.UNREADABLE,
-    }
-)
+def page_image_count_from_pypdf(page: object) -> tuple[int, ImageVisibility, list[str]]:
+    """Count displayed/inline images on a pypdf page without writing bytes.
 
+    Returns (count, visibility, warnings). UNKNOWN when inspection fails entirely.
+    """
+    warnings: list[str] = []
+    counts: list[int] = []
 
-def trusted_success_blocked(status: ParseStatus, page_states: list[PageQualityState]) -> bool:
-    """SUCCESS is not trusted when any page has a blocking quality state."""
-    if status is not ParseStatus.SUCCESS:
-        return False
-    return any(state in _BLOCKING for state in page_states)
+    # Prefer page.images when available (pypdf >= 3.x).
+    try:
+        images = getattr(page, "images", None)
+        if images is not None:
+            counts.append(len(list(images)))
+    except Exception as exc:
+        warnings.append(f"page.images_failed:{exc.__class__.__name__}")
 
-
-def page_image_count_from_pypdf(page: object) -> int:
-    """Best-effort image XObject count for a pypdf page object."""
-    count = 0
+    # XObject /Image subtypes (inline + referenced).
     try:
         resources = page.get("/Resources")  # type: ignore[attr-defined]
-        if resources is None:
-            return 0
-        resolved = resources.get_object() if hasattr(resources, "get_object") else resources
-        xobject = resolved.get("/XObject") if resolved else None
-        if xobject is None:
-            return 0
-        xobj = xobject.get_object() if hasattr(xobject, "get_object") else xobject
-        for key in xobj:
-            item = xobj[key]
-            item_obj = item.get_object() if hasattr(item, "get_object") else item
-            if str(item_obj.get("/Subtype", "")) == "/Image":
-                count += 1
-    except Exception:
-        return count
-    return count
+        if resources is not None:
+            resolved = resources.get_object() if hasattr(resources, "get_object") else resources
+            xobject = resolved.get("/XObject") if resolved else None
+            if xobject is not None:
+                xobj = xobject.get_object() if hasattr(xobject, "get_object") else xobject
+                count = 0
+                for key in xobj:
+                    item = xobj[key]
+                    item_obj = item.get_object() if hasattr(item, "get_object") else item
+                    if str(item_obj.get("/Subtype", "")) == "/Image":
+                        count += 1
+                counts.append(count)
+    except Exception as exc:
+        warnings.append(f"xobject_images_failed:{exc.__class__.__name__}")
+
+    if not counts:
+        return 0, ImageVisibility.UNKNOWN, warnings or ["image_inspection_unavailable"]
+    # Deterministic: take max of available methods (covers both inline and referenced).
+    return max(counts), ImageVisibility.KNOWN, warnings

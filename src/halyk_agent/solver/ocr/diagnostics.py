@@ -56,7 +56,7 @@ def diagnose_pdf(path: Path) -> list[dict[str, Any]]:
             text = page.extract_text() or ""
         except Exception:
             text = ""
-        image_count = page_image_count_from_pypdf(page)
+        image_count, visibility, _warns = page_image_count_from_pypdf(page)
         chars = len(text)
         alnum = (sum(1 for ch in text if ch.isalnum()) / chars) if chars else 0.0
         repl = (text.count("\ufffd") / chars) if chars else 0.0
@@ -69,6 +69,7 @@ def diagnose_pdf(path: Path) -> list[dict[str, Any]]:
             alphanumeric_ratio=alnum,
             replacement_ratio=repl,
             image_count=image_count,
+            image_visibility=visibility,
             heading_without_body=heading,
             empty_table_near_heading=False,
             parser_status=None,
@@ -82,6 +83,7 @@ def diagnose_pdf(path: Path) -> list[dict[str, Any]]:
                 "alphanumeric_ratio": alnum,
                 "replacement_ratio": repl,
                 "image_count": image_count,
+                "image_visibility": visibility.value,
                 "heading_without_body": heading,
             }
         )

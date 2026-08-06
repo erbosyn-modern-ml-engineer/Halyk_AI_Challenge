@@ -13,15 +13,20 @@ from pypdf.errors import PdfReadError
 from halyk_agent.adapters.parsing.errors import (
     UnsupportedDocumentFormatError,
 )
+from halyk_agent.adapters.parsing.finalize import to_authoritative_parse_result
 from halyk_agent.adapters.parsing.limits import ParserLimits
 from halyk_agent.adapters.parsing.text_normalization import normalize_text
 from halyk_agent.contracts.parsing import ParseRequest
+from halyk_agent.domain.page_quality import (
+    ImageVisibility,
+    PageVisualSignals,
+    page_image_count_from_pypdf,
+)
 from halyk_agent.domain.parsing import (
     BlockKind,
     CanonicalBlock,
     CanonicalDocument,
     CanonicalPage,
-    ParseAttempt,
     ParseMetrics,
     ParseResult,
     ParserIdentity,
@@ -29,7 +34,6 @@ from halyk_agent.domain.parsing import (
     ParseStatus,
     ParseWarning,
     ParseWarningCode,
-    QualityDecision,
     block_identity,
     compute_metrics,
     configuration_hash,
@@ -197,6 +201,46 @@ class PyPdfDocumentParser:
         media = media_type or ""
         return bool(name.endswith(".txt") or media in {"text/plain", "text/plain; charset=utf-8"})
 
+    def parse_with_visuals(
+        self,
+        data: bytes,
+        *,
+        source_file: str,
+        artifact_id: str,
+        source_sha256: str,
+        document_id: str | None = None,
+        media_type: str | None = None,
+    ) -> tuple[CanonicalDocument, list[PageVisualSignals]]:
+        """Parse bytes into an intermediate candidate plus page visual metadata."""
+        _ = document_id
+        name = source_file.lower()
+        if name.endswith(".txt") or (media_type or "").startswith("text/plain"):
+            document = self._parse_plain_text(
+                data,
+                source_file=source_file,
+                artifact_id=artifact_id,
+                source_sha256=source_sha256,
+                media_type=media_type or "text/plain",
+            )
+            visuals = [
+                PageVisualSignals(
+                    page_number=1,
+                    image_count=0,
+                    image_visibility=ImageVisibility.KNOWN,
+                    displayed_image_count=0,
+                )
+            ]
+            return document, visuals
+        if name.endswith(".pdf") or (media_type or "").endswith("pdf"):
+            return self._parse_pdf(
+                data,
+                source_file=source_file,
+                artifact_id=artifact_id,
+                source_sha256=source_sha256,
+                media_type=media_type or "application/pdf",
+            )
+        raise UnsupportedDocumentFormatError("FAST parser supports PDF and TXT only")
+
     def parse_canonical(
         self,
         data: bytes,
@@ -207,26 +251,16 @@ class PyPdfDocumentParser:
         document_id: str | None = None,
         media_type: str | None = None,
     ) -> CanonicalDocument:
-        """Parse bytes into a CanonicalDocument."""
-        _ = document_id  # Stage 1 contract compatibility; identity is derived.
-        name = source_file.lower()
-        if name.endswith(".txt") or (media_type or "").startswith("text/plain"):
-            return self._parse_plain_text(
-                data,
-                source_file=source_file,
-                artifact_id=artifact_id,
-                source_sha256=source_sha256,
-                media_type=media_type or "text/plain",
-            )
-        if name.endswith(".pdf") or (media_type or "").endswith("pdf"):
-            return self._parse_pdf(
-                data,
-                source_file=source_file,
-                artifact_id=artifact_id,
-                source_sha256=source_sha256,
-                media_type=media_type or "application/pdf",
-            )
-        raise UnsupportedDocumentFormatError("FAST parser supports PDF and TXT only")
+        """Parse bytes into a CanonicalDocument (intermediate; not final trust)."""
+        document, _visuals = self.parse_with_visuals(
+            data,
+            source_file=source_file,
+            artifact_id=artifact_id,
+            source_sha256=source_sha256,
+            document_id=document_id,
+            media_type=media_type,
+        )
+        return document
 
     def _parse_plain_text(
         self,
@@ -293,11 +327,12 @@ class PyPdfDocumentParser:
         artifact_id: str,
         source_sha256: str,
         media_type: str,
-    ) -> CanonicalDocument:
+    ) -> tuple[CanonicalDocument, list[PageVisualSignals]]:
         parser = pypdf_parser_identity(self.limits)
         warnings: list[ParseWarning] = []
         started = time.perf_counter()
         _ = started
+        empty_visuals: list[PageVisualSignals] = []
         try:
             reader = PdfReader(io.BytesIO(data), strict=False)
         except PdfReadError as exc:
@@ -307,15 +342,18 @@ class PyPdfDocumentParser:
                     message=f"malformed PDF: {exc.__class__.__name__}",
                 )
             )
-            return _build_document(
-                artifact_id=artifact_id,
-                source_file=source_file,
-                source_sha256=source_sha256,
-                mime_type=media_type,
-                parser=parser,
-                status=ParseStatus.FAILED,
-                pages=[],
-                warnings=warnings,
+            return (
+                _build_document(
+                    artifact_id=artifact_id,
+                    source_file=source_file,
+                    source_sha256=source_sha256,
+                    mime_type=media_type,
+                    parser=parser,
+                    status=ParseStatus.FAILED,
+                    pages=[],
+                    warnings=warnings,
+                ),
+                empty_visuals,
             )
         except Exception as exc:
             warnings.append(
@@ -324,19 +362,21 @@ class PyPdfDocumentParser:
                     message=f"PDF open failed: {exc.__class__.__name__}",
                 )
             )
-            return _build_document(
-                artifact_id=artifact_id,
-                source_file=source_file,
-                source_sha256=source_sha256,
-                mime_type=media_type,
-                parser=parser,
-                status=ParseStatus.FAILED,
-                pages=[],
-                warnings=warnings,
+            return (
+                _build_document(
+                    artifact_id=artifact_id,
+                    source_file=source_file,
+                    source_sha256=source_sha256,
+                    mime_type=media_type,
+                    parser=parser,
+                    status=ParseStatus.FAILED,
+                    pages=[],
+                    warnings=warnings,
+                ),
+                empty_visuals,
             )
 
         if getattr(reader, "is_encrypted", False):
-            # Do not brute-force passwords.
             unlocked: object = 0
             try:
                 unlocked = reader.decrypt("")
@@ -349,15 +389,18 @@ class PyPdfDocumentParser:
                         message="encrypted PDF rejected",
                     )
                 )
-                return _build_document(
-                    artifact_id=artifact_id,
-                    source_file=source_file,
-                    source_sha256=source_sha256,
-                    mime_type=media_type,
-                    parser=parser,
-                    status=ParseStatus.ENCRYPTED,
-                    pages=[],
-                    warnings=warnings,
+                return (
+                    _build_document(
+                        artifact_id=artifact_id,
+                        source_file=source_file,
+                        source_sha256=source_sha256,
+                        mime_type=media_type,
+                        parser=parser,
+                        status=ParseStatus.ENCRYPTED,
+                        pages=[],
+                        warnings=warnings,
+                    ),
+                    empty_visuals,
                 )
 
         page_count = len(reader.pages)
@@ -374,10 +417,12 @@ class PyPdfDocumentParser:
 
         doc_id = document_identity(artifact_id, source_sha256)
         pages: list[CanonicalPage] = []
+        visuals: list[PageVisualSignals] = []
         total_chars = 0
         for index in range(page_count):
             page_number = index + 1
             page_warnings: list[ParseWarning] = []
+            page_obj = None
             try:
                 page_obj = reader.pages[index]
                 extracted = page_obj.extract_text()
@@ -439,6 +484,26 @@ class PyPdfDocumentParser:
                     )
                 )
 
+            if page_obj is not None:
+                img_count, visibility, img_warnings = page_image_count_from_pypdf(page_obj)
+            else:
+                img_count, visibility, img_warnings = (
+                    0,
+                    ImageVisibility.UNKNOWN,
+                    ["page_object_unavailable"],
+                )
+            visuals.append(
+                PageVisualSignals(
+                    page_number=page_number,
+                    image_count=img_count,
+                    image_visibility=visibility,
+                    displayed_image_count=img_count
+                    if visibility is ImageVisibility.KNOWN
+                    else None,
+                    extraction_warnings=img_warnings,
+                )
+            )
+
             total_chars += len(raw_text)
             pages.append(
                 _page_from_text(
@@ -455,8 +520,7 @@ class PyPdfDocumentParser:
         if not pages and status is ParseStatus.SUCCESS:
             status = ParseStatus.PARTIAL
 
-        # Intermediate candidate only — PostParseQualityGate owns final trust status.
-        return _build_document(
+        document = _build_document(
             artifact_id=artifact_id,
             source_file=source_file,
             source_sha256=source_sha256,
@@ -466,46 +530,15 @@ class PyPdfDocumentParser:
             pages=pages,
             warnings=_trim_warnings(warnings, self.limits.max_parser_warnings),
         )
-
-    def _to_parse_result(
-        self,
-        document: CanonicalDocument,
-        *,
-        duration_ms: int = 0,
-        quality_decision: QualityDecision | None = None,
-    ) -> ParseResult:
-        """Wrap a CanonicalDocument as the authoritative ParseResult."""
-        if quality_decision is None:
-            if document.status is ParseStatus.SUCCESS:
-                quality_decision = QualityDecision.ACCEPT
-            elif document.status is ParseStatus.PARTIAL:
-                quality_decision = QualityDecision.HUMAN_REVIEW_REQUIRED
-            elif document.status in {ParseStatus.ENCRYPTED, ParseStatus.UNSUPPORTED}:
-                quality_decision = QualityDecision.REJECT
-            else:
-                quality_decision = QualityDecision.HUMAN_REVIEW_REQUIRED
-        attempt = ParseAttempt(
-            parser=document.parser,
-            status=document.status,
-            metrics=document.metrics,
-            warnings=list(document.warnings),
-            duration_ms=duration_ms,
-        )
-        return ParseResult(
-            artifact_id=document.artifact_id,
-            selected_document=document,
-            attempts=[attempt],
-            quality_decision=quality_decision,
-            cache_hit=False,
-        )
+        return document, visuals
 
     async def parse(self, request: ParseRequest) -> ParseResult:
-        """DocumentParser Protocol: parse from request.source_path."""
+        """DocumentParser Protocol: gated authoritative ParseResult."""
         import time
 
         data = request.source_path.read_bytes()
         started = time.perf_counter()
-        document = self.parse_canonical(
+        candidate, visuals = self.parse_with_visuals(
             data,
             source_file=request.source_file,
             artifact_id=request.artifact_id,
@@ -514,7 +547,12 @@ class PyPdfDocumentParser:
             media_type=request.mime_type,
         )
         duration_ms = int((time.perf_counter() - started) * 1000)
-        return self._to_parse_result(document, duration_ms=duration_ms)
+        result, _summary = to_authoritative_parse_result(
+            candidate,
+            page_visuals=visuals,
+            duration_ms=duration_ms,
+        )
+        return result
 
 
 def open_pdf_stream(stream: BinaryIO) -> PdfReader:

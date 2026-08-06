@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from halyk_agent.domain.page_quality import PageQualityState, diagnose_canonical_page
+from halyk_agent.domain.page_quality import (
+    ImageVisibility,
+    PageQualityState,
+    PageVisualSignals,
+    diagnose_canonical_page,
+    is_blocking_page_quality,
+)
 from halyk_agent.domain.parsing import (
     CanonicalDocument,
     ParseStatus,
@@ -15,7 +22,8 @@ from halyk_agent.domain.parsing import (
     compute_metrics,
 )
 
-PAGE_QUALITY_GATE_VERSION = "halyk.page_quality_gate.v1"
+# Bump: Stage 5A.2 requires visual metadata (KNOWN/UNKNOWN) in trust decisions.
+PAGE_QUALITY_GATE_VERSION = "halyk.page_quality_gate.v2"
 OCR_POLICY_NONE = "ocr_disabled"
 OCR_BACKEND_NONE = "NONE"
 
@@ -28,6 +36,7 @@ class PageQualityIssue(BaseModel):
     reason_code: str
     char_count: int
     image_count: int
+    image_visibility: ImageVisibility = ImageVisibility.UNKNOWN
 
 
 class PageQualitySummary(BaseModel):
@@ -36,6 +45,7 @@ class PageQualitySummary(BaseModel):
     gate_version: str = PAGE_QUALITY_GATE_VERSION
     page_states: list[PageQualityState]
     issues: list[PageQualityIssue] = Field(default_factory=list)
+    page_visuals: list[PageVisualSignals] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,47 +54,80 @@ class PostParseGateResult:
     summary: PageQualitySummary
 
 
-_BLOCKING_STATES = frozenset(
-    {
-        PageQualityState.OCR_REQUIRED,
-        PageQualityState.IMAGE_DOMINANT,
-        PageQualityState.HEADING_WITHOUT_BODY,
-        PageQualityState.UNREADABLE,
-    }
-)
-
-
-def blocks_trusted_success(state: PageQualityState) -> bool:
-    return state in _BLOCKING_STATES
-
-
 def page_quality_configuration_hash() -> str:
     """Deterministic config identity for cache keys (no timestamps)."""
-    return "page-quality-default-v1"
+    return "page-quality-visual-v2"
+
+
+def _visual_map(
+    page_visuals: Sequence[PageVisualSignals] | None,
+    page_numbers: Sequence[int],
+) -> dict[int, PageVisualSignals]:
+    if page_visuals:
+        return {item.page_number: item for item in page_visuals}
+    # Missing visuals → UNKNOWN (never silently zero-known).
+    return {
+        n: PageVisualSignals(
+            page_number=n,
+            image_count=0,
+            image_visibility=ImageVisibility.UNKNOWN,
+            extraction_warnings=["visual_metadata_not_provided"],
+        )
+        for n in page_numbers
+    }
 
 
 def apply_post_parse_quality_gate(
     document: CanonicalDocument,
     *,
+    page_visuals: Sequence[PageVisualSignals] | None = None,
     page_image_counts: dict[int, int] | None = None,
 ) -> PostParseGateResult:
-    """Evaluate every page and downgrade trusted SUCCESS when required.
+    """Evaluate every page and set authoritative trust status.
 
     Parsers must not publish final trusted status; this gate owns it.
+    Idempotent: re-running on an already-gated document does not duplicate issues
+    when warnings already carry the same page QUALITY_SIGNAL codes.
     """
-    image_counts = page_image_counts or {}
+    visuals = _visual_map(
+        page_visuals,
+        [page.page_number for page in document.pages],
+    )
+    # Backward-compat shim: explicit known counts override UNKNOWN placeholders.
+    if page_image_counts:
+        for page_no, count in page_image_counts.items():
+            visuals[page_no] = PageVisualSignals(
+                page_number=page_no,
+                image_count=count,
+                image_visibility=ImageVisibility.KNOWN,
+            )
+
     page_states: list[PageQualityState] = []
     issues: list[PageQualityIssue] = []
+    existing_quality_pages = {
+        w.page_number
+        for w in document.warnings
+        if w.code is ParseWarningCode.QUALITY_SIGNAL and w.page_number is not None
+    }
     warnings = list(document.warnings)
+    ordered_visuals: list[PageVisualSignals] = []
 
     for page in document.pages:
+        visual = visuals.get(
+            page.page_number,
+            PageVisualSignals(
+                page_number=page.page_number,
+                image_visibility=ImageVisibility.UNKNOWN,
+            ),
+        )
+        ordered_visuals.append(visual)
         state, signals = diagnose_canonical_page(
             page,
-            image_count=image_counts.get(page.page_number, 0),
+            visual=visual,
             parser_status=document.status,
         )
         page_states.append(state)
-        if blocks_trusted_success(state):
+        if is_blocking_page_quality(state):
             issues.append(
                 PageQualityIssue(
                     page_number=page.page_number,
@@ -92,23 +135,51 @@ def apply_post_parse_quality_gate(
                     reason_code=state.value,
                     char_count=signals.char_count,
                     image_count=signals.image_count,
+                    image_visibility=signals.image_visibility,
                 )
             )
-            warnings.append(
-                ParseWarning(
-                    code=ParseWarningCode.QUALITY_SIGNAL,
-                    message=f"{state.value}: page lacks trusted complete text extract",
-                    page_number=page.page_number,
+            if page.page_number not in existing_quality_pages:
+                warnings.append(
+                    ParseWarning(
+                        code=ParseWarningCode.QUALITY_SIGNAL,
+                        message=f"{state.value}: page lacks trusted complete text extract",
+                        page_number=page.page_number,
+                    )
                 )
-            )
 
-    summary = PageQualitySummary(page_states=page_states, issues=issues)
+    summary = PageQualitySummary(
+        page_states=page_states,
+        issues=issues,
+        page_visuals=ordered_visuals,
+    )
+
+    usable_text = any(
+        page.raw_text.strip() and not is_blocking_page_quality(state)
+        for page, state in zip(document.pages, page_states, strict=False)
+    )
+    # Also treat TEXT_OK / LOW_TEXT with content as usable even if somehow listed.
+    usable_text = usable_text or any(
+        page.raw_text.strip()
+        and state
+        in {PageQualityState.TEXT_OK, PageQualityState.LOW_TEXT, PageQualityState.OCR_SUCCEEDED}
+        for page, state in zip(document.pages, page_states, strict=False)
+    )
+
     status = document.status
-    if any(blocks_trusted_success(s) for s in page_states):
-        if status is ParseStatus.SUCCESS:
-            status = ParseStatus.PARTIAL
-        if page_states and not any(page.raw_text.strip() for page in document.pages):
-            status = ParseStatus.FAILED
+    has_blocking = any(is_blocking_page_quality(s) for s in page_states)
+    if has_blocking:
+        if usable_text:
+            if status is ParseStatus.SUCCESS:
+                status = ParseStatus.PARTIAL
+        else:
+            # No trusted usable text → FAILED (empty pages are allowed on FAILED).
+            if not any(page.raw_text.strip() for page in document.pages):
+                status = ParseStatus.FAILED
+            elif status is ParseStatus.SUCCESS:
+                status = ParseStatus.PARTIAL
+    elif not usable_text and status is ParseStatus.SUCCESS:
+        # No blocking labels but also no trusted extract → never SUCCESS.
+        status = ParseStatus.FAILED
 
     if status is document.status and warnings == list(document.warnings):
         return PostParseGateResult(document=document, summary=summary)
@@ -134,7 +205,7 @@ def validate_cached_trust(
     if summary.gate_version != PAGE_QUALITY_GATE_VERSION:
         return "page_quality_gate_version_mismatch"
     if document.status is ParseStatus.SUCCESS and any(
-        blocks_trusted_success(state) for state in summary.page_states
+        is_blocking_page_quality(state) for state in summary.page_states
     ):
         return "success_with_blocking_page_quality"
     if len(summary.page_states) != len(document.pages):
