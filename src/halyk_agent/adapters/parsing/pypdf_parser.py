@@ -16,6 +16,12 @@ from halyk_agent.adapters.parsing.errors import (
 from halyk_agent.adapters.parsing.limits import ParserLimits
 from halyk_agent.adapters.parsing.text_normalization import normalize_text
 from halyk_agent.contracts.parsing import ParseRequest
+from halyk_agent.domain.page_quality import (
+    PageQualityState,
+    diagnose_canonical_page,
+    page_image_count_from_pypdf,
+    trusted_success_blocked,
+)
 from halyk_agent.domain.parsing import (
     BlockKind,
     CanonicalBlock,
@@ -453,6 +459,28 @@ class PyPdfDocumentParser:
                 break
 
         if not pages and status is ParseStatus.SUCCESS:
+            status = ParseStatus.PARTIAL
+
+        page_states: list[PageQualityState] = []
+        for index, page in enumerate(pages):
+            image_count = 0
+            if index < len(reader.pages):
+                image_count = page_image_count_from_pypdf(reader.pages[index])
+            state, _signals = diagnose_canonical_page(
+                page,
+                image_count=image_count,
+                parser_status=status,
+            )
+            page_states.append(state)
+            if state is PageQualityState.OCR_REQUIRED:
+                warnings.append(
+                    ParseWarning(
+                        code=ParseWarningCode.QUALITY_SIGNAL,
+                        message="OCR_REQUIRED: load-bearing page lacks trusted text extract",
+                        page_number=page.page_number,
+                    )
+                )
+        if trusted_success_blocked(status, page_states):
             status = ParseStatus.PARTIAL
 
         return _build_document(
