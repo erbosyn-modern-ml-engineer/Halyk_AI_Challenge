@@ -160,6 +160,7 @@ def test_cache_writes_are_atomic_and_json_only(tmp_path: Path) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["cache_schema_version"] == PARSE_CACHE_SCHEMA_VERSION
     assert payload["page_quality_gate_version"] == PAGE_QUALITY_GATE_VERSION
+    assert PAGE_QUALITY_GATE_VERSION == "halyk.page_quality_gate.v2"
     assert_no_pickle_files(tmp_path / "cache")
 
 

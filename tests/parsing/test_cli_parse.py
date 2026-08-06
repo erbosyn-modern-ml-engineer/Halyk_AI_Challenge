@@ -108,6 +108,9 @@ def test_full_without_extra_exits_clearly(tmp_path: Path, monkeypatch: pytest.Mo
         def parse_canonical(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
             raise ParserDependencyMissingError("Docling is not installed")
 
+        def parse_with_visuals(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            raise ParserDependencyMissingError("Docling is not installed")
+
     monkeypatch.setattr(dp, "DoclingDocumentParser", BoomParser)
     with pytest.raises(ParserDependencyMissingError):
         parse_inspection_directory(
