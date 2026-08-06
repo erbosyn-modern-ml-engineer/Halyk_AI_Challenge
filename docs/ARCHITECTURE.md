@@ -123,20 +123,23 @@ Stage 4.3 verified the competition path against local PostgreSQL 18.4 with `post
 - Stage 2: safe archive inventory + schema profiling only. Documents are inventoried, not content-parsed.
 - Stage 3: document parsing to canonical evidence spans. No embeddings, retrieval, LLM extraction, or workers.
 - Stage 4: structure-aware chunking and hybrid retrieval only. No DeepSeek, fact extraction, version resolver, or workers.
-- Stage 5A + 5A′ / 5A.1: preflight quarantine, sanitized-manifest solver, baseline submission, isolated training scorer, shared PostParseQualityGate, parse-cache v2. No covenant calculation, no DeepSeek, no Stage 5B+.
+- Stage 5A + 5A′ / 5A.1 / 5A.2: preflight quarantine, sanitized-manifest solver, baseline submission, isolated training scorer, shared PostParseQualityGate with page visual metadata (KNOWN|UNKNOWN), parse-cache v2 gate identity. No covenant calculation, no DeepSeek, no Stage 5B+.
 - Stage 5B+: model gateway, extraction, decisions, calculated submission (not started).
 
-## Stage 5A.1 data flow
+## Stage 5A.2 data flow
 
 ```text
 raw dataset root
-  → preflight (halyk_agent.preflight)
-      ignore technical artifacts
+  → preflight composition root (halyk_agent.preflight.service)
+      package __init__ does not eagerly import discover/quarantine/service
       quarantine answer keys (filename or content shape)
       emit SanitizedDatasetManifest + preflight_manifest.json
   → competition solver (halyk_agent.solver)
       accepts ONLY SanitizedDatasetManifest (no dataset-root argument)
+      require_audited_opener (FileOpener.opened_paths mandatory; fail closed)
+      validate allowlist vs quarantine before reads
       opens allowlisted template / ledger / cases via RecordingFileOpener
+      stage outputs then atomically publish after open audit
       schema-valid baseline submission (NULL_FIELDS)
       run_manifest.json lists solver opens only
 
@@ -145,26 +148,39 @@ training (HALYK_MODE=training only):
   (training package must never be imported by solver)
 ```
 
-## Stage 5A.1 parsing trust
+## Stage 5A.2 parsing trust
 
 ```text
-pypdf candidate ──┐
-Docling candidate ┼→ PostParseQualityGate → authoritative CanonicalDocument
-cache envelope ───┘
+pypdf PageVisualSignals (page.images / XObject) ──┐
+Docling pictures[].prov[].page_no (or UNKNOWN) ──┼→ finalize → PostParseQualityGate
+Protocol parse() / app batch / cache hit ────────┘
+
+Authoritative mapping:
+  usable pages, no blocking → SUCCESS
+  some usable text + blocking pages → PARTIAL
+  no trusted usable text → FAILED
+  UNKNOWN visuals + empty/low text → conservative non-SUCCESS
+  verified image_count>=1 + empty text → OCR_REQUIRED (blocking)
+
+Blocking predicate (single source of truth):
+  domain.page_quality.is_blocking_page_quality / BLOCKING_PAGE_QUALITY_STATES
 
 Parse cache v2 identity includes:
   cache_schema_version, parser backend/version, canonical schema,
-  page_quality_gate_version + config hash, OCR policy/backend/config, source sha256
+  page_quality_gate_version=halyk.page_quality_gate.v2,
+  page_quality_configuration_hash=page-quality-visual-v2,
+  OCR policy/backend/config, source sha256
 
-Legacy cache entries without page-quality identity → CACHE_INCOMPATIBLE (reparse; never silent SUCCESS)
+Legacy / pre-visual cache entries → CACHE_INCOMPATIBLE (reparse; never silent SUCCESS)
 ```
 
-## Stage 5A.1 isolation invariants
+## Stage 5A.2 isolation invariants
 
 1. Default `HALYK_MODE=competition`.
-2. Solver must never import `halyk_agent.training` or preflight quarantine/discovery modules.
+2. Solver must never import `halyk_agent.training` or preflight quarantine/discovery/service modules at runtime (subprocess `sys.modules` regression covers this).
 3. Competition solver consumes only a sanitized manifest and never opens, deserializes, or receives answer-key content; raw-dataset preflight may inspect candidate JSON solely for quarantine classification.
 4. Present / deleted / corrupt / renamed answer-key variants yield byte-identical `submission.json`, **and** recorded solver opens exclude quarantine paths.
 5. Quarantined paths may appear in `preflight_manifest.json` as metadata only; never in `run_manifest.json`.
 6. Scorer never feeds expected values back into solver artifacts.
 7. No parser backend publishes final trusted SUCCESS without `PostParseQualityGate`.
+8. Unaudited file openers (missing `opened_paths`) are rejected before reads or submission publish.

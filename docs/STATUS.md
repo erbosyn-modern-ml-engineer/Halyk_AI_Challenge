@@ -1,10 +1,10 @@
 # Status
 
-Current stage: **5A.1** (targeted review fixes for 5A + 5A′)  
-Stage status: **IMPLEMENTED** (awaiting Opus 5 re-review of B1/H1/H2)  
-Previous: Stage 5A + 5A′ IMPLEMENTED; Stage 4 **VERIFIED** (merged)
+Current stage: **5A.2** (final trust-gate and isolation fixes)  
+Stage status: **IMPLEMENTED** (awaiting Opus 5 final read-only review of H2-1/2/3 and B1-a/b)  
+Previous: Stage 5A.1 IMPLEMENTED; Stage 4 **VERIFIED** (merged)
 
-**Not VERIFIED** until re-review passes.
+**Not VERIFIED.** Do not mark Stage 5A VERIFIED until the final Opus gate passes.
 
 Authoritative profile: **FULL** (competition)
 
@@ -14,28 +14,52 @@ Authoritative profile: **FULL** (competition)
 Docker-free
 → local PostgreSQL (Stage 4 retrieval)
 → …
-→ Stage 5A.1:
-    dataset preflight (quarantine answer keys)
+→ Stage 5A.2:
+    dataset preflight (quarantine answer keys; lazy package __init__)
     → sanitized manifest
-    → competition solver (allowlisted inputs only)
+    → competition solver (audited FileOpener; allowlisted inputs only)
     → schema-valid baseline submission
-→ PostParseQualityGate on all parser backends (pypdf + Docling)
-→ parse-cache v2 with page-quality / OCR identity
+→ one PostParseQualityGate on every public parse path
+→ pypdf page-image metadata + Docling picture provenance (KNOWN|UNKNOWN)
+→ parse-cache v2 with page-quality gate v2 / OCR identity
 ```
 
-## Stage 5A.1 review fixes
+## Stage 5A.2 fixes
 
 | Finding | Fix |
 |---------|-----|
-| B1 ground-truth reads in solver | Preflight quarantine + solver consumes only `SanitizedDatasetManifest` |
-| H1 legacy SUCCESS cache | Cache envelope v2; legacy/missing page-quality → `CACHE_INCOMPATIBLE` |
-| H2 Docling bypass | Shared `PostParseQualityGate` after every backend |
+| H2-1 empty `page_image_counts` | pypdf emits `PageVisualSignals` (KNOWN/UNKNOWN); production finalize always receives them |
+| H2-2 direct `parse()` bypass | `finalize_canonical_parse` / `to_authoritative_parse_result` on all Protocol `parse()` and app paths |
+| H2-3 Docling pictures discarded | `extract_docling_page_visuals` from `pictures[].prov[].page_no`; missing → UNKNOWN |
+| B1-a transitive quarantine import | `preflight/__init__.py` has no eager implementation imports |
+| B1-b optional `opened_paths` | `FileOpener` Protocol requires audit; fail closed before reads/writes |
+| Duplicate blocking sets | Domain `is_blocking_page_quality` / `BLOCKING_PAGE_QUALITY_STATES` |
+| Dead `trusted_success_blocked` | Removed; OCR facade re-exports domain helpers only |
 
-### Truthful isolation invariant
+### Trust / cache identity
 
-The competition solver process and solver package never open, deserialize, or receive ground-truth / answer-key content.
+- Gate version: `halyk.page_quality_gate.v2`
+- Config hash: `page-quality-visual-v2`
+- Stage 5A.1 cache entries without visual identity → incompatible (reparse)
 
-Raw-dataset preflight may inspect candidate JSON solely for quarantine classification (metadata only; no expected answer values in manifests).
+### Isolation invariants
+
+- Solver runtime must not load `preflight.discover` / `quarantine` / `service` or `halyk_agent.training`.
+- File opens are audited; unaudited openers are rejected before any input read or submission publish.
+- Unknown image visibility is never silently treated as verified zero images.
+
+### Test commands
+
+```bash
+# Offline suite (live PostgreSQL tests skip when DSN absent/unreachable)
+uv run pytest -q
+
+# Live PostgreSQL suite (requires reachable HALYK_POSTGRES_DSN)
+# PowerShell: $env:HALYK_POSTGRES_DSN = "postgresql+asyncpg://..."
+uv run pytest -q -m postgres
+```
+
+Discrepancy note (5A.1 reports): environments with a working DSN reported all tests passed; clean shells without DSN previously hit fixture **errors** (`pytest.fail`). Fixtures now **skip** when DSN is absent/unreachable — errors are not counted as passes.
 
 ### Commands
 
@@ -64,17 +88,17 @@ uv run python -m halyk_agent ocr-diagnose --documents ./agentic-bank-public/docu
 
 ### OCR / cache
 
-- Page quality states unchanged; blocking states prevent trusted `SUCCESS`.
-- Offline OCR remains **unavailable**; no OCR installation in 5A.1.
-- Parse cache schema: `halyk.parse_cache.v2` with page-quality gate version + OCR policy identity.
+- Offline OCR remains **unavailable**; no OCR installation in 5A.2.
+- Authoritative trust gate is `PostParseQualityGate` only (no competing solver OCR trust path).
+- Parse cache schema: `halyk.parse_cache.v2` with page-quality gate **v2** + OCR policy identity.
 
 ### Remaining blockers (before Stage 5B+)
 
-- Opus re-review of B1/H1/H2
+- Opus 5 final read-only review of H2-1/H2-2/H2-3 and B1-a/B1-b
 - Explicit user approval if OCR model/weights install is required
 - Covenant calculation / document authority / DSL (not started)
 - DeepSeek / LLM fact extraction (not started)
 
 ## Next gate
 
-**Opus 5 read-only re-review of B1, H1 and H2** — do not merge until reviewed.
+**Opus 5 final read-only review of H2-1/H2-2/H2-3 and B1-a/B1-b** — do not merge until reviewed. Do not begin Stage 5B.

@@ -4,11 +4,12 @@ Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
 One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
-**Stage 4: VERIFIED.** **Stage 5A + 5A′: IMPLEMENTED** (dataset adapter, baseline solve, training scorer, leakage guards, OCR quality gate — awaiting Opus review).
+**Stage 4: VERIFIED.** **Stage 5A.2: IMPLEMENTED** (trust-gate + isolation fixes — awaiting Opus final review; **not VERIFIED**).
 
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
 - **Modes** — `HALYK_MODE=competition` (default): solver consumes only a sanitized manifest and never opens/deserializes answer-key content (preflight may quarantine candidates). `HALYK_MODE=training` enables the isolated scorer only.
+- **Trust** — one `PostParseQualityGate` for every public parse path; pypdf/Docling page visual metadata uses KNOWN vs UNKNOWN (never silent zero).
 
 ## Requirements
 
@@ -21,7 +22,11 @@ One shared domain core drives two runtime profiles. The **authoritative competit
 
 ```bash
 uv sync --group dev --extra full --extra retrieval-full
-uv run pytest
+# Offline: live PostgreSQL tests skip when HALYK_POSTGRES_DSN is absent/unreachable
+uv run pytest -q
+# Live PostgreSQL only (requires reachable DSN):
+#   $env:HALYK_POSTGRES_DSN = "postgresql+asyncpg://..."
+#   uv run pytest -q -m postgres
 uv run uvicorn halyk_agent.app.main:app --reload
 uv run python -m halyk_agent --help
 ```
@@ -33,7 +38,7 @@ GET /health
 -> {"status":"ok","stage":5,"profile":"full"}
 ```
 
-## Stage 5A / 5A.1 — preflight, baseline solve, training score
+## Stage 5A.2 — preflight, baseline solve, trust gate, training score
 
 ```bash
 # Preflight quarantines answer keys; writes sanitized_manifest.json
