@@ -94,11 +94,21 @@ def diagnose_canonical_page(
     return classify_signals(signals), signals
 
 
+_BLOCKING = frozenset(
+    {
+        PageQualityState.OCR_REQUIRED,
+        PageQualityState.IMAGE_DOMINANT,
+        PageQualityState.HEADING_WITHOUT_BODY,
+        PageQualityState.UNREADABLE,
+    }
+)
+
+
 def trusted_success_blocked(status: ParseStatus, page_states: list[PageQualityState]) -> bool:
-    """SUCCESS is not trusted when any load-bearing page still needs OCR."""
+    """SUCCESS is not trusted when any page has a blocking quality state."""
     if status is not ParseStatus.SUCCESS:
         return False
-    return any(state is PageQualityState.OCR_REQUIRED for state in page_states)
+    return any(state in _BLOCKING for state in page_states)
 
 
 def page_image_count_from_pypdf(page: object) -> int:

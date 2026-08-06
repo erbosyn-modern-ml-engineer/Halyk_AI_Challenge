@@ -8,13 +8,19 @@ import time
 from pathlib import Path
 
 from halyk_agent.adapters.archive.hashing import sha256_file
-from halyk_agent.adapters.parsing.cache import LocalParseCache
+from halyk_agent.adapters.parsing.cache import CacheGetStatus, LocalParseCache
 from halyk_agent.adapters.parsing.errors import (
     DocumentParsingError,
     ParserDependencyMissingError,
     UnsupportedDocumentFormatError,
 )
 from halyk_agent.adapters.parsing.limits import ParserLimits
+from halyk_agent.adapters.parsing.post_parse_gate import (
+    OCR_BACKEND_NONE,
+    OCR_POLICY_NONE,
+    PageQualitySummary,
+    apply_post_parse_quality_gate,
+)
 from halyk_agent.adapters.parsing.pypdf_parser import PyPdfDocumentParser
 from halyk_agent.adapters.parsing.quality import (
     DeterministicParseQualityGate,
@@ -91,6 +97,30 @@ def select_parse_candidates(manifest: DatasetManifest) -> list[DatasetArtifact]:
         if artifact.format in SUPPORTED_PARSE_FORMATS:
             selected.append(artifact)
     return sorted(selected, key=lambda item: item.id)
+
+
+def _finalize_document(
+    candidate: CanonicalDocument,
+    *,
+    page_image_counts: dict[int, int] | None = None,
+) -> tuple[CanonicalDocument, PageQualitySummary]:
+    """Authoritative trust status via backend-independent post-parse gate."""
+    gated = apply_post_parse_quality_gate(candidate, page_image_counts=page_image_counts)
+    return gated.document, gated.summary
+
+
+def _cache_lookup(
+    cache: LocalParseCache,
+    *,
+    source_sha256: str,
+    parser: ParserIdentity,
+) -> tuple[CanonicalDocument | None, PageQualitySummary | None, bool]:
+    """Return (document, summary, cache_hit). Incompatible/legacy never trusted."""
+    lookup = cache.get(source_sha256=source_sha256, parser=parser)
+    if lookup.status is CacheGetStatus.HIT and lookup.document is not None:
+        # cache.get already validated identity + trust (no SUCCESS with OCR_REQUIRED).
+        return lookup.document, lookup.summary, True
+    return None, None, False
 
 
 def _attempt_from_document(
@@ -177,7 +207,14 @@ def parse_inspection_directory(
     output_dir.mkdir(parents=True, exist_ok=True)
     documents_dir = output_dir / "documents"
     documents_dir.mkdir(parents=True, exist_ok=True)
-    cache = LocalParseCache(output_dir / ".parse_cache")
+    ocr_policy = "ocr_enabled" if resolved.docling_ocr_enabled else OCR_POLICY_NONE
+    ocr_backend = "docling" if resolved.docling_ocr_enabled else OCR_BACKEND_NONE
+    cache = LocalParseCache(
+        output_dir / ".parse_cache",
+        ocr_policy=ocr_policy,
+        ocr_backend_identity=ocr_backend,
+        ocr_configuration_hash="docling-ocr" if resolved.docling_ocr_enabled else "none",
+    )
 
     limits = _limits_from_settings(resolved)
     gate = DeterministicParseQualityGate(_thresholds_from_settings(resolved))
@@ -245,23 +282,26 @@ def parse_inspection_directory(
                 if artifact.format is ArtifactFormat.TXT
                 else pypdf_parser_identity(limits)
             )
-            cached = cache.get(source_sha256=source_sha256, parser=peek_identity)
-            if cached is not None and not force_docling:
-                selected = cached
+            cached_doc, _cached_summary, is_hit = _cache_lookup(
+                cache, source_sha256=source_sha256, parser=peek_identity
+            )
+            if cached_doc is not None and is_hit and not force_docling:
+                selected = cached_doc
                 cache_hit = True
                 cache_hits += 1
-                decision = gate.evaluate_canonical(cached, profile=profile_norm).decision
-                attempts.append(_attempt_from_document(cached, duration_ms=0))
+                decision = gate.evaluate_canonical(cached_doc, profile=profile_norm).decision
+                attempts.append(_attempt_from_document(cached_doc, duration_ms=0))
             else:
                 started = time.perf_counter()
                 try:
-                    document = fast_parser.parse_canonical(
+                    candidate = fast_parser.parse_canonical(
                         data,
                         source_file=artifact.normalized_path,
                         artifact_id=artifact.id,
                         source_sha256=source_sha256,
                         media_type=artifact.mime_type,
                     )
+                    document, summary = _finalize_document(candidate)
                     duration_ms = int((time.perf_counter() - started) * 1000)
                     attempts.append(_attempt_from_document(document, duration_ms=duration_ms))
                     evaluation = gate.evaluate_canonical(document, profile=profile_norm)
@@ -275,6 +315,7 @@ def parse_inspection_directory(
                             document,
                             source_sha256=source_sha256,
                             parser=document.parser,
+                            page_quality_summary=summary,
                         )
                     if profile_norm == "full" and decision is QualityDecision.FALLBACK_REQUIRED:
                         run_docling = True
@@ -352,23 +393,26 @@ def parse_inspection_directory(
             if docling_parser is None:
                 raise ParserDependencyMissingError("Docling parser required for FULL profile")
             peek = docling_parser.parser_identity()
-            cached = cache.get(source_sha256=source_sha256, parser=peek)
-            if cached is not None:
-                selected = cached
+            cached_doc, _cached_summary, is_hit = _cache_lookup(
+                cache, source_sha256=source_sha256, parser=peek
+            )
+            if cached_doc is not None and is_hit:
+                selected = cached_doc
                 cache_hit = True
                 cache_hits += 1
-                decision = gate.evaluate_canonical(cached, profile=profile_norm).decision
-                attempts.append(_attempt_from_document(cached, duration_ms=0))
+                decision = gate.evaluate_canonical(cached_doc, profile=profile_norm).decision
+                attempts.append(_attempt_from_document(cached_doc, duration_ms=0))
             else:
                 started = time.perf_counter()
                 try:
-                    document = docling_parser.parse_canonical(
+                    candidate = docling_parser.parse_canonical(
                         data,
                         source_file=artifact.normalized_path,
                         artifact_id=artifact.id,
                         source_sha256=source_sha256,
                         media_type=artifact.mime_type,
                     )
+                    document, summary = _finalize_document(candidate)
                     duration_ms = int((time.perf_counter() - started) * 1000)
                     attempts.append(_attempt_from_document(document, duration_ms=duration_ms))
                     evaluation = gate.evaluate_canonical(document, profile=profile_norm)
@@ -378,6 +422,7 @@ def parse_inspection_directory(
                         document,
                         source_sha256=source_sha256,
                         parser=document.parser,
+                        page_quality_summary=summary,
                     )
                 except ParserDependencyMissingError:
                     raise
