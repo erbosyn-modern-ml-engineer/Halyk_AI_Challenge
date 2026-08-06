@@ -91,11 +91,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    dataset_parser = subparsers.add_parser(
+        "dataset",
+        help="Dataset preflight / quarantine utilities",
+    )
+    dataset_sub = dataset_parser.add_subparsers(dest="dataset_command", required=True)
+    preflight_parser = dataset_sub.add_parser(
+        "preflight",
+        help="Sanitize raw dataset; quarantine answer-key candidates",
+    )
+    preflight_parser.add_argument("--input", required=True, type=Path)
+    preflight_parser.add_argument("--output", required=True, type=Path)
+
     solve_parser = subparsers.add_parser(
         "solve",
-        help="Competition baseline solve (no ground-truth access)",
+        help="Competition baseline solve from sanitized manifest",
     )
-    solve_parser.add_argument("--dataset", required=True, type=Path)
+    solve_parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Path to sanitized_manifest.json (preferred)",
+    )
+    solve_parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Raw dataset root (composition: preflight then solve; solver never walks root)",
+    )
     solve_parser.add_argument("--output", required=True, type=Path)
     solve_parser.add_argument("--team", default=None)
     solve_parser.add_argument("--email", default=None)
@@ -251,17 +274,45 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         return 0
 
-    if args.command == "solve":
-        from halyk_agent.app.solve import run_solve
+    if args.command == "dataset" and args.dataset_command == "preflight":
+        from halyk_agent.app.preflight import run_dataset_preflight
 
         try:
-            solve_result = run_solve(
-                args.dataset,
-                args.output,
-                team=args.team,
-                contact_email=args.email,
-                model_name=args.model,
-            )
+            manifest = run_dataset_preflight(args.input, args.output)
+        except Exception as exc:
+            print(f"preflight failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        print("preflight complete")
+        print(f"quarantined={len(manifest.quarantined)}")
+        print(f"sanitized_manifest={args.output / 'sanitized_manifest.json'}")
+        return 0
+
+    if args.command == "solve":
+        from halyk_agent.app.solve import run_solve, run_solve_from_manifest
+
+        if args.manifest is None and args.dataset is None:
+            print("solve failed: provide --manifest or --dataset", file=sys.stderr)
+            return 1
+        if args.manifest is not None and args.dataset is not None:
+            print("solve failed: use either --manifest or --dataset, not both", file=sys.stderr)
+            return 1
+        try:
+            if args.manifest is not None:
+                solve_result = run_solve_from_manifest(
+                    args.manifest,
+                    args.output,
+                    team=args.team,
+                    contact_email=args.email,
+                    model_name=args.model,
+                )
+            else:
+                solve_result = run_solve(
+                    args.dataset,
+                    args.output,
+                    team=args.team,
+                    contact_email=args.email,
+                    model_name=args.model,
+                )
         except Exception as exc:
             print(f"solve failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
             return 1

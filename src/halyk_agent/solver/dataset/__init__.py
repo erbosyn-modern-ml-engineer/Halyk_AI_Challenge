@@ -1,5 +1,5 @@
-"""Competition dataset discovery adapter."""
+"""Legacy package stub — dataset discovery lives in ``halyk_agent.preflight``."""
 
-from halyk_agent.solver.dataset.adapter import discover_dataset
+from __future__ import annotations
 
-__all__ = ["discover_dataset"]
+__all__: list[str] = []

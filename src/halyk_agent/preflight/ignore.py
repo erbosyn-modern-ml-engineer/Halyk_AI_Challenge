@@ -1,32 +1,18 @@
-"""Technical artifact ignore policies for competition datasets."""
+"""Technical artifact ignore policies for dataset preflight."""
 
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from halyk_agent.preflight.models import IgnoredRef
 
 APPLEDOUBLE_MAGIC = b"\x00\x05\x16\x07"
 TINY_TECHNICAL_MAX_BYTES = 64
 TINY_TECHNICAL_SUFFIXES = frozenset({".db", ".ini", ".tmp", ".bak"})
 
 
-class IgnoredArtifact(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    path: str
-    size: int
-    sha256: str
-    ignore_rule: str
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def classify_ignore(path: Path, data: bytes | None = None) -> str | None:
-    """Return ignore_rule if path/bytes should be ignored, else None."""
     parts = {part.lower() for part in path.parts}
     if "__macosx" in parts:
         return "path_component=__MACOSX"
@@ -51,7 +37,7 @@ def classify_ignore(path: Path, data: bytes | None = None) -> str | None:
     return None
 
 
-def ignore_artifact(path: Path) -> IgnoredArtifact | None:
+def ignore_artifact(path: Path) -> IgnoredRef | None:
     rule = classify_ignore(path)
     if rule is None:
         return None
@@ -59,9 +45,9 @@ def ignore_artifact(path: Path) -> IgnoredArtifact | None:
         data = path.read_bytes() if path.is_file() else b""
     except OSError:
         data = b""
-    return IgnoredArtifact(
+    return IgnoredRef(
         path=str(path.as_posix()),
         size=len(data),
-        sha256=_sha256(data),
+        sha256=hashlib.sha256(data).hexdigest(),
         ignore_rule=rule,
     )
