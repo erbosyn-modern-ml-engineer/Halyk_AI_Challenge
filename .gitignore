@@ -48,3 +48,7 @@ work/
 
 # Logs
 *.log
+
+# Local competition dataset extracts (never commit)
+agentic-bank-public/
+__MACOSX/

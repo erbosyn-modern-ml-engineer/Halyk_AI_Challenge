@@ -75,6 +75,12 @@ markers = [
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+exclude = [
+  ".venv",
+  "__MACOSX",
+  "agentic-bank-public",
+  "work",
+]
 
 [tool.ruff.lint]
 select = [
