@@ -1,22 +1,26 @@
-"""Ground-truth leakage and non-access tests."""
+"""B1: real ground-truth process/memory isolation with recorded opens."""
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 
-from halyk_agent.solver.dataset.answer_key_guard import block_answer_key_read, is_answer_key_payload
-from halyk_agent.solver.errors import AnswerKeyAccessBlockedError
-from halyk_agent.solver.solve import solve_dataset
+from halyk_agent.preflight.models import SanitizedDatasetManifest
+from halyk_agent.preflight.quarantine import is_answer_key_payload
+from halyk_agent.preflight.service import run_preflight
+from halyk_agent.solver.filesystem import RecordingFileOpener
+from halyk_agent.solver.solve import solve_from_manifest
 
 
 def _mini(root: Path, *, with_gt: bool = True, gt_payload: dict | None = None) -> None:
     (root / "CASE.ru.md").write_text("# Case\nCovenant limit scenario\n", encoding="utf-8")
     (root / "CASE.kz.md").write_text("# Case\nCovenant лимит scenario\n", encoding="utf-8")
     (root / "master_ledger_2025.csv").write_text(
-        "txn_id,date,account_id,counterparty,description,amount,currency\nT1,2025-01-01,A,B,d,1,KZT\n",
+        "txn_id,date,account_id,counterparty,description,amount,currency\n"
+        "T1,2025-01-01,A,B,d,1,KZT\n",
         encoding="utf-8",
     )
     template = {
@@ -63,16 +67,46 @@ def test_answer_key_shape_detected() -> None:
     )
 
 
-def test_renamed_answer_key_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_solver_api_has_no_raw_dataset_root_parameter() -> None:
+    params = inspect.signature(solve_from_manifest).parameters
+    assert "dataset_root" not in params
+    assert "dataset" not in params
+    assert "manifest" in params
+
+
+def test_preflight_quarantines_named_and_renamed_answer_keys(tmp_path: Path) -> None:
+    _mini(tmp_path, with_gt=True)
+    renamed = {
+        "scenarios": {
+            "P1": {"covenants": {"6.1": {"status": "BREACH", "actual": 9, "evidence_txn_id": "TX"}}}
+        }
+    }
+    (tmp_path / "answers_secret.json").write_text(json.dumps(renamed), encoding="utf-8")
+    manifest = run_preflight(tmp_path, tmp_path / "pf")
+    reasons = {item.quarantine_reason for item in manifest.quarantined}
+    paths = {Path(item.path).name for item in manifest.quarantined}
+    assert "filename_ground_truth" in reasons
+    assert "content_shape_answer_key" in reasons
+    assert "ground_truth.json" in paths
+    assert "answers_secret.json" in paths
+    dump = json.dumps(manifest.model_dump(mode="json"))
+    assert "BREACH" not in dump
+    assert '"actual": 9' not in dump
+    assert '"actual": 1.0' not in dump
+
+
+def test_solver_opens_only_allowlisted_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("HALYK_MODE", "competition")
-    path = tmp_path / "submission_template.json"
-    path.write_text(
+    _mini(tmp_path, with_gt=True)
+    (tmp_path / "answers_secret.json").write_text(
         json.dumps(
             {
                 "scenarios": {
                     "P1": {
                         "covenants": {
-                            "6.1": {"status": "BREACH", "actual": 1.0, "evidence_txn_id": "T1"}
+                            "6.1": {"status": "BREACH", "actual": 9, "evidence_txn_id": "TX"}
                         }
                     }
                 }
@@ -80,32 +114,86 @@ def test_renamed_answer_key_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         ),
         encoding="utf-8",
     )
-    with pytest.raises(AnswerKeyAccessBlockedError):
-        block_answer_key_read(path)
+    manifest = run_preflight(tmp_path, tmp_path / "pf")
+    opener = RecordingFileOpener()
+    out = tmp_path / "out"
+    solve_from_manifest(manifest, out, run_id="fixed-run", opener=opener)
+
+    opened_names = {p.name for p in opener.opened_paths}
+    assert "ground_truth.json" not in opened_names
+    assert "answers_secret.json" not in opened_names
+    assert "submission_template.json" in opened_names
+    assert "master_ledger_2025.csv" in opened_names
+
+    run_manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    run_names = {Path(f["path"]).name for f in run_manifest["opened_files"]}
+    assert "ground_truth.json" not in run_names
+    assert "answers_secret.json" not in run_names
+    assert all(
+        Path(f["path"]).name
+        in {
+            "submission_template.json",
+            "master_ledger_2025.csv",
+            "CASE.ru.md",
+            "CASE.kz.md",
+            "submission.json",
+        }
+        for f in run_manifest["opened_files"]
+    )
 
 
-def test_solver_output_identical_with_gt_variants(
+def test_solver_output_identical_across_gt_variants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HALYK_MODE", "competition")
     base = tmp_path / "base"
     base.mkdir()
     _mini(base, with_gt=True)
+    (base / "answers_secret.json").write_text(
+        json.dumps(
+            {
+                "scenarios": {
+                    "P1": {
+                        "covenants": {
+                            "6.1": {"status": "BREACH", "actual": 9, "evidence_txn_id": "TX"}
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    out1 = tmp_path / "out1"
-    solve_dataset(base, out1, run_id="fixed-run")
-    sub1 = (out1 / "submission.json").read_bytes()
-    man1 = json.loads((out1 / "run_manifest.json").read_text(encoding="utf-8"))
-    assert all("ground_truth" not in Path(f["path"]).name.lower() for f in man1["opened_files"])
+    def _solve(label: str) -> bytes:
+        pf = tmp_path / f"pf-{label}"
+        manifest = run_preflight(base, pf)
+        # Solver must not receive quarantine answer values — only metadata counts.
+        assert isinstance(manifest, SanitizedDatasetManifest)
+        out = tmp_path / f"out-{label}"
+        opener = RecordingFileOpener()
+        solve_from_manifest(manifest, out, run_id="fixed-run", opener=opener)
+        assert all("ground_truth" not in p.name.lower() for p in opener.opened_paths)
+        assert all(p.name != "answers_secret.json" for p in opener.opened_paths)
+        return (out / "submission.json").read_bytes()
 
-    # delete GT
+    sub1 = _solve("present")
     (base / "ground_truth.json").unlink()
-    out2 = tmp_path / "out2"
-    solve_dataset(base, out2, run_id="fixed-run")
-    assert (out2 / "submission.json").read_bytes() == sub1
-
-    # corrupt / garbage GT
+    (base / "answers_secret.json").unlink()
+    sub2 = _solve("deleted")
     (base / "ground_truth.json").write_text("{not-json", encoding="utf-8")
-    out3 = tmp_path / "out3"
-    solve_dataset(base, out3, run_id="fixed-run")
-    assert (out3 / "submission.json").read_bytes() == sub1
+    (base / "answers_secret.json").write_text(
+        json.dumps(
+            {
+                "scenarios": {
+                    "P1": {
+                        "covenants": {
+                            "6.1": {"status": "BREACH", "actual": 99, "evidence_txn_id": "ZZ"}
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    sub3 = _solve("corrupt-and-renamed")
+    assert sub1 == sub2 == sub3

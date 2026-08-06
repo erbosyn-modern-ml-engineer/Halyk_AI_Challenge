@@ -1,13 +1,12 @@
-"""Dataset adapter ignore rules and determinism."""
+"""Preflight ignore rules and sanitized manifest determinism."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from halyk_agent.solver.audit import RunFileAudit
-from halyk_agent.solver.dataset.adapter import discover_dataset
-from halyk_agent.solver.dataset.ignore import classify_ignore
+from halyk_agent.preflight.discover import discover_and_sanitize
+from halyk_agent.preflight.ignore import classify_ignore
 
 
 def _mini_dataset(root: Path) -> None:
@@ -45,7 +44,7 @@ def test_ignore_rules_macos_appledouble_and_tiny(tmp_path: Path) -> None:
     assert classify_ignore(tmp_path / "__MACOSX" / "agentic" / "._CASE.ru.md") is not None
     assert classify_ignore(tmp_path / ".DS_Store") is not None
     assert classify_ignore(tmp_path / "documents" / "tiny.db") is not None
-    manifest = discover_dataset(tmp_path, audit=RunFileAudit(run_id="t"))
+    manifest, _ = discover_and_sanitize(tmp_path)
     assert any(
         item.ignore_rule.startswith("path_component") or "appledouble" in item.ignore_rule
         for item in manifest.ignored
@@ -59,9 +58,9 @@ def test_ignore_rules_macos_appledouble_and_tiny(tmp_path: Path) -> None:
 
 def test_manifest_deterministic(tmp_path: Path) -> None:
     _mini_dataset(tmp_path)
-    a = discover_dataset(tmp_path).model_dump(mode="json")
-    b = discover_dataset(tmp_path).model_dump(mode="json")
-    assert a == b
+    a, _ = discover_and_sanitize(tmp_path)
+    b, _ = discover_and_sanitize(tmp_path)
+    assert a.model_dump(mode="json") == b.model_dump(mode="json")
 
 
 def test_dataset_files_unchanged_after_discover(tmp_path: Path) -> None:
@@ -71,7 +70,7 @@ def test_dataset_files_unchanged_after_discover(tmp_path: Path) -> None:
         for p in sorted(tmp_path.rglob("*"))
         if p.is_file()
     }
-    discover_dataset(tmp_path)
+    discover_and_sanitize(tmp_path)
     after = {
         str(p.as_posix()): (p.stat().st_size, p.read_bytes())
         for p in sorted(tmp_path.rglob("*"))
