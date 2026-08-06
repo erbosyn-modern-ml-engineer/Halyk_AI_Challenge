@@ -23,7 +23,8 @@ class Settings(BaseSettings):
 
     profile: ProfileName = Field(default=ProfileName.FULL)
     app_name: str = Field(default="halyk-agent")
-    stage: int = Field(default=4, ge=1)
+    stage: int = Field(default=5, ge=1)
+    mode: Literal["competition", "training"] = Field(default="competition")
     postgres_dsn: str | None = Field(default=None)
     redis_url: str | None = Field(default=None)
 
