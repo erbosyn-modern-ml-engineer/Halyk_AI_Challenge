@@ -123,4 +123,39 @@ Stage 4.3 verified the competition path against local PostgreSQL 18.4 with `post
 - Stage 2: safe archive inventory + schema profiling only. Documents are inventoried, not content-parsed.
 - Stage 3: document parsing to canonical evidence spans. No embeddings, retrieval, LLM extraction, or workers.
 - Stage 4: structure-aware chunking and hybrid retrieval only. No DeepSeek, fact extraction, version resolver, or workers.
-- Stage 5+: model gateway, extraction, decisions, submission (not started).
+- Stage 5A + 5A′: competition dataset adapter, baseline submission writer, isolated training scorer, leakage guards, OCR quality gate / bounded diagnostic. No covenant calculation, no DeepSeek, no Stage 5B+.
+- Stage 5B+: model gateway, extraction, decisions, calculated submission (not started).
+
+## Stage 5A data flow
+
+```text
+dataset root (CLI path)
+  → ignore technical artifacts (__MACOSX, ._, AppleDouble, tiny noise)
+  → discover case / ledger / template / documents / optional GT candidate
+  → competition solve: open only non-GT inputs; audit every opened file
+  → schema-valid baseline submission (NULL_FIELDS unresolved policy)
+  → run_manifest.json + unresolved_cells.jsonl + failure_events.jsonl
+
+training (HALYK_MODE=training only):
+  submission + ground_truth → Decimal scorer → score_report.json
+  (training package must never be imported by solver)
+```
+
+## Stage 5A′ OCR quality
+
+```text
+pypdf pre-pass + page signals (chars, alnum ratio, replacement, images, heading-without-body)
+  → PageQualityState (TEXT_OK … OCR_REQUIRED …)
+  → SUCCESS blocked when OCR_REQUIRED pages were not OCR-processed (→ PARTIAL)
+  → bounded diagnostic over public PDFs only; no mass OCR; no PDF overwrite
+  → if offline OCR backend unavailable → OCR_BACKEND_UNAVAILABLE (no fake success)
+```
+
+## Stage 5A isolation invariants
+
+1. Default `HALYK_MODE=competition`.
+2. Solver must never import `halyk_agent.training`.
+3. Answer-key shaped JSON is blocked from competition reads (content shape, not filename alone).
+4. Solver output is byte-identical whether ground truth is present, absent, or garbage.
+5. Ground truth never appears in competition `run_manifest.json` opened files.
+6. Scorer never feeds expected values back into solver artifacts.

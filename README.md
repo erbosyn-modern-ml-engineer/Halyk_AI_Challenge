@@ -4,10 +4,11 @@ Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
 One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
-**Stage 4 status: VERIFIED** (Docker-free local PostgreSQL + `postgres_numpy_exact` + multilingual-e5-small + RRF).
+**Stage 4: VERIFIED.** **Stage 5A + 5A′: IMPLEMENTED** (dataset adapter, baseline solve, training scorer, leakage guards, OCR quality gate — awaiting Opus review).
 
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
+- **Modes** — `HALYK_MODE=competition` (default) isolates the solver from ground truth; `HALYK_MODE=training` enables the isolated scorer only.
 
 ## Requirements
 
@@ -29,8 +30,26 @@ Health check (default profile FULL):
 
 ```text
 GET /health
--> {"status":"ok","stage":4,"profile":"full"}
+-> {"status":"ok","stage":5,"profile":"full"}
 ```
+
+## Stage 5A — baseline solve and training score
+
+```bash
+# Competition baseline (schema-valid unresolved cells; no ground-truth access)
+uv run python -m halyk_agent solve --dataset ./agentic-bank-public --output ./work/solve-baseline
+
+# Training-only scorer (requires HALYK_MODE=training)
+# PowerShell: $env:HALYK_MODE="training"
+uv run python -m halyk_agent train-score --dataset ./agentic-bank-public --submission ./work/solve-baseline/submission.json --output ./work/score
+
+# OCR quality diagnostic (detection only; does not download OCR models)
+uv run python -m halyk_agent ocr-diagnose --documents ./agentic-bank-public/documents --output ./work/ocr-diag
+```
+
+Outputs for solve: `submission.json`, `run_manifest.json`, `unresolved_cells.jsonl`, `failure_events.jsonl`, `solver_summary.md`.
+
+Ground truth must never appear in the competition solver opened-file audit.
 
 ## Stage 2 — archive inspection
 
