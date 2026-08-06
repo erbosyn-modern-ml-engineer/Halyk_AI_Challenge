@@ -90,6 +90,32 @@ def build_parser() -> argparse.ArgumentParser:
             "Default competition path uses multilingual-e5-small only."
         ),
     )
+
+    solve_parser = subparsers.add_parser(
+        "solve",
+        help="Competition baseline solve (no ground-truth access)",
+    )
+    solve_parser.add_argument("--dataset", required=True, type=Path)
+    solve_parser.add_argument("--output", required=True, type=Path)
+    solve_parser.add_argument("--team", default=None)
+    solve_parser.add_argument("--email", default=None)
+    solve_parser.add_argument("--model", default=None)
+
+    train_parser = subparsers.add_parser(
+        "train-score",
+        help="Training-only scorer (requires HALYK_MODE=training)",
+    )
+    train_parser.add_argument("--dataset", required=True, type=Path)
+    train_parser.add_argument("--submission", required=True, type=Path)
+    train_parser.add_argument("--output", required=True, type=Path)
+
+    ocr_parser = subparsers.add_parser(
+        "ocr-diagnose",
+        help="Bounded OCR quality diagnostic over PDF documents",
+    )
+    ocr_parser.add_argument("--documents", required=True, type=Path)
+    ocr_parser.add_argument("--output", required=True, type=Path)
+
     return parser
 
 
@@ -223,6 +249,56 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         for line in lines:
             print(line)
+        return 0
+
+    if args.command == "solve":
+        from halyk_agent.app.solve import run_solve
+
+        try:
+            solve_result = run_solve(
+                args.dataset,
+                args.output,
+                team=args.team,
+                contact_email=args.email,
+                model_name=args.model,
+            )
+        except Exception as exc:
+            print(f"solve failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        print("solve complete")
+        print(f"run_id={solve_result['run_id']}")
+        print(f"submission={solve_result['submission']}")
+        return 0
+
+    if args.command == "train-score":
+        # Lazy import keeps training out of competition import graphs.
+        from halyk_agent.app.train_score import run_train_score
+
+        try:
+            score_report = run_train_score(args.dataset, args.submission, args.output)
+        except Exception as exc:
+            print(f"train-score failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        print("train-score complete")
+        print(f"uniform_total={score_report.uniform_total}")
+        print(f"cells={score_report.cell_count}")
+        return 0
+
+    if args.command == "ocr-diagnose":
+        from halyk_agent.app.ocr_diagnose import run_ocr_diagnose
+
+        try:
+            ocr_report = run_ocr_diagnose(args.documents, args.output)
+        except Exception as exc:
+            print(f"ocr-diagnose failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        print("ocr-diagnose complete")
+        print(f"pdfs={ocr_report['pdf_count']}")
+        print(f"pages={ocr_report['page_count']}")
+        print(f"ocr_required_pages={ocr_report['ocr_required_page_count']}")
+        backend = ocr_report.get("backend")
+        available = backend.get("available") if isinstance(backend, dict) else None
+        print(f"backend_available={available}")
         return 0
 
     parser.error(f"unknown command: {args.command}")
