@@ -7,24 +7,28 @@ import tempfile
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
 
-from halyk_agent.adapters.parsing.docling_mapping import map_docling_document
+from halyk_agent.adapters.parsing.docling_mapping import (
+    extract_docling_page_visuals,
+    map_docling_document,
+)
 from halyk_agent.adapters.parsing.errors import (
     ParserDependencyMissingError,
     UnsupportedDocumentFormatError,
 )
+from halyk_agent.adapters.parsing.finalize import to_authoritative_parse_result
 from halyk_agent.adapters.parsing.limits import ParserLimits
 from halyk_agent.contracts.parsing import ParseRequest
+from halyk_agent.domain.page_quality import ImageVisibility, PageVisualSignals
 from halyk_agent.domain.parsing import (
     CanonicalDocument,
-    ParseAttempt,
     ParseResult,
     ParserIdentity,
     ParserKind,
     ParseStatus,
     ParseWarning,
     ParseWarningCode,
-    QualityDecision,
     compute_metrics,
     configuration_hash,
     document_identity,
@@ -90,7 +94,7 @@ class DoclingDocumentParser:
         mt = (media_type or "").lower()
         return mt.endswith("pdf") or "wordprocessingml" in mt or mt.endswith("docx")
 
-    def parse_canonical(
+    def parse_with_visuals(
         self,
         data: bytes,
         *,
@@ -99,14 +103,14 @@ class DoclingDocumentParser:
         source_sha256: str,
         document_id: str | None = None,
         media_type: str | None = None,
-    ) -> CanonicalDocument:
-        """Parse via Docling into CanonicalDocument."""
+        converter: Any | None = None,
+    ) -> tuple[CanonicalDocument, list[PageVisualSignals]]:
+        """Parse via Docling into intermediate candidate + picture visual metadata."""
         _ = document_id
         ensure_docling_available()
         if not self.supports(media_type, source_file):
             raise UnsupportedDocumentFormatError("Docling parser supports PDF and DOCX")
 
-        # Lazy imports — never at module import time.
         from docling.datamodel.base_models import InputFormat
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -115,22 +119,25 @@ class DoclingDocumentParser:
         warnings: list[ParseWarning] = []
         started = time.perf_counter()
 
-        pipeline_options = PdfPipelineOptions()
-        pipeline_options.do_ocr = self.ocr_enabled
-        pipeline_options.do_table_structure = self.table_structure_enabled
-
-        converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-            }
-        )
+        active_converter: Any
+        if converter is None:
+            pipeline_options = PdfPipelineOptions()
+            pipeline_options.do_ocr = self.ocr_enabled
+            pipeline_options.do_table_structure = self.table_structure_enabled
+            active_converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                }
+            )
+        else:
+            active_converter = converter
 
         suffix = Path(source_file).suffix or ".pdf"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(data)
             tmp_path = Path(tmp.name)
         try:
-            result = converter.convert(str(tmp_path))
+            result = active_converter.convert(str(tmp_path))
             docling_doc = result.document
         except Exception as exc:
             warnings.append(
@@ -139,7 +146,7 @@ class DoclingDocumentParser:
                     message=f"Docling conversion failed: {exc.__class__.__name__}",
                 )
             )
-            return CanonicalDocument(
+            failed = CanonicalDocument(
                 id=document_identity(artifact_id, source_sha256),
                 artifact_id=artifact_id,
                 document_id=document_identity(artifact_id, source_sha256),
@@ -153,6 +160,7 @@ class DoclingDocumentParser:
                 metrics=empty_metrics(),
                 warnings=warnings,
             )
+            return failed, []
         finally:
             with contextlib.suppress(OSError):
                 tmp_path.unlink(missing_ok=True)
@@ -162,7 +170,6 @@ class DoclingDocumentParser:
         pages, map_warnings = map_docling_document(docling_doc, document_id=doc_id)
         warnings.extend(map_warnings)
 
-        # Enforce document character limit.
         status = ParseStatus.SUCCESS if pages else ParseStatus.PARTIAL
         total = sum(len(page.raw_text) for page in pages)
         if total > self.limits.max_document_characters:
@@ -183,8 +190,22 @@ class DoclingDocumentParser:
                 )
             )
 
+        visuals = extract_docling_page_visuals(
+            docling_doc,
+            page_numbers=[page.page_number for page in pages] or [1],
+        )
+        if not pages:
+            visuals = [
+                PageVisualSignals(
+                    page_number=1,
+                    image_count=0,
+                    image_visibility=ImageVisibility.UNKNOWN,
+                    extraction_warnings=["no_pages_mapped"],
+                )
+            ]
+
         metrics = compute_metrics(pages)
-        return CanonicalDocument(
+        document = CanonicalDocument(
             id=doc_id,
             artifact_id=artifact_id,
             document_id=doc_id,
@@ -198,46 +219,36 @@ class DoclingDocumentParser:
             metrics=metrics,
             warnings=warnings,
         )
+        return document, visuals
 
-    def _to_parse_result(
+    def parse_canonical(
         self,
-        document: CanonicalDocument,
+        data: bytes,
         *,
-        duration_ms: int = 0,
-        quality_decision: QualityDecision | None = None,
-    ) -> ParseResult:
-        """Wrap a CanonicalDocument as the authoritative ParseResult."""
-        if quality_decision is None:
-            if document.status is ParseStatus.SUCCESS:
-                quality_decision = QualityDecision.ACCEPT
-            elif document.status is ParseStatus.PARTIAL:
-                quality_decision = QualityDecision.HUMAN_REVIEW_REQUIRED
-            elif document.status in {ParseStatus.ENCRYPTED, ParseStatus.UNSUPPORTED}:
-                quality_decision = QualityDecision.REJECT
-            else:
-                quality_decision = QualityDecision.HUMAN_REVIEW_REQUIRED
-        attempt = ParseAttempt(
-            parser=document.parser,
-            status=document.status,
-            metrics=document.metrics,
-            warnings=list(document.warnings),
-            duration_ms=duration_ms,
+        source_file: str,
+        artifact_id: str,
+        source_sha256: str,
+        document_id: str | None = None,
+        media_type: str | None = None,
+    ) -> CanonicalDocument:
+        """Parse via Docling into CanonicalDocument (intermediate; not final trust)."""
+        document, _visuals = self.parse_with_visuals(
+            data,
+            source_file=source_file,
+            artifact_id=artifact_id,
+            source_sha256=source_sha256,
+            document_id=document_id,
+            media_type=media_type,
         )
-        return ParseResult(
-            artifact_id=document.artifact_id,
-            selected_document=document,
-            attempts=[attempt],
-            quality_decision=quality_decision,
-            cache_hit=False,
-        )
+        return document
 
     async def parse(self, request: ParseRequest) -> ParseResult:
-        """DocumentParser Protocol: parse from request.source_path."""
+        """DocumentParser Protocol: gated authoritative ParseResult."""
         import time
 
         data = request.source_path.read_bytes()
         started = time.perf_counter()
-        document = self.parse_canonical(
+        candidate, visuals = self.parse_with_visuals(
             data,
             source_file=request.source_file,
             artifact_id=request.artifact_id,
@@ -246,4 +257,9 @@ class DoclingDocumentParser:
             media_type=request.mime_type,
         )
         duration_ms = int((time.perf_counter() - started) * 1000)
-        return self._to_parse_result(document, duration_ms=duration_ms)
+        result, _summary = to_authoritative_parse_result(
+            candidate,
+            page_visuals=visuals,
+            duration_ms=duration_ms,
+        )
+        return result

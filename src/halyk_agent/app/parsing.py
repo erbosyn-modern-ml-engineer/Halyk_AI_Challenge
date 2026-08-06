@@ -14,12 +14,12 @@ from halyk_agent.adapters.parsing.errors import (
     ParserDependencyMissingError,
     UnsupportedDocumentFormatError,
 )
+from halyk_agent.adapters.parsing.finalize import finalize_canonical_parse
 from halyk_agent.adapters.parsing.limits import ParserLimits
 from halyk_agent.adapters.parsing.post_parse_gate import (
     OCR_BACKEND_NONE,
     OCR_POLICY_NONE,
     PageQualitySummary,
-    apply_post_parse_quality_gate,
 )
 from halyk_agent.adapters.parsing.pypdf_parser import PyPdfDocumentParser
 from halyk_agent.adapters.parsing.quality import (
@@ -34,6 +34,7 @@ from halyk_agent.domain.datasets import (
     DatasetManifest,
 )
 from halyk_agent.domain.evidence_factory import build_evidence_catalog
+from halyk_agent.domain.page_quality import PageVisualSignals
 from halyk_agent.domain.parsing import (
     CanonicalDocument,
     ParseAttempt,
@@ -102,10 +103,10 @@ def select_parse_candidates(manifest: DatasetManifest) -> list[DatasetArtifact]:
 def _finalize_document(
     candidate: CanonicalDocument,
     *,
-    page_image_counts: dict[int, int] | None = None,
+    page_visuals: list[PageVisualSignals] | None = None,
 ) -> tuple[CanonicalDocument, PageQualitySummary]:
     """Authoritative trust status via backend-independent post-parse gate."""
-    gated = apply_post_parse_quality_gate(candidate, page_image_counts=page_image_counts)
+    gated = finalize_canonical_parse(candidate, page_visuals=page_visuals)
     return gated.document, gated.summary
 
 
@@ -294,14 +295,14 @@ def parse_inspection_directory(
             else:
                 started = time.perf_counter()
                 try:
-                    candidate = fast_parser.parse_canonical(
+                    candidate, visuals = fast_parser.parse_with_visuals(
                         data,
                         source_file=artifact.normalized_path,
                         artifact_id=artifact.id,
                         source_sha256=source_sha256,
                         media_type=artifact.mime_type,
                     )
-                    document, summary = _finalize_document(candidate)
+                    document, summary = _finalize_document(candidate, page_visuals=visuals)
                     duration_ms = int((time.perf_counter() - started) * 1000)
                     attempts.append(_attempt_from_document(document, duration_ms=duration_ms))
                     evaluation = gate.evaluate_canonical(document, profile=profile_norm)
@@ -405,14 +406,14 @@ def parse_inspection_directory(
             else:
                 started = time.perf_counter()
                 try:
-                    candidate = docling_parser.parse_canonical(
+                    candidate, visuals = docling_parser.parse_with_visuals(
                         data,
                         source_file=artifact.normalized_path,
                         artifact_id=artifact.id,
                         source_sha256=source_sha256,
                         media_type=artifact.mime_type,
                     )
-                    document, summary = _finalize_document(candidate)
+                    document, summary = _finalize_document(candidate, page_visuals=visuals)
                     duration_ms = int((time.perf_counter() - started) * 1000)
                     attempts.append(_attempt_from_document(document, duration_ms=duration_ms))
                     evaluation = gate.evaluate_canonical(document, profile=profile_norm)
