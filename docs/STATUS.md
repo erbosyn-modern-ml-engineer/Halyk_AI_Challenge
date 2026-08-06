@@ -1,8 +1,10 @@
 # Status
 
-Current stage: **5A + 5A′**  
-Stage status: **IMPLEMENTED** (awaiting Opus 5 read-only review)  
-Previous: Stage 4 **VERIFIED** (merged)
+Current stage: **5A.1** (targeted review fixes for 5A + 5A′)  
+Stage status: **IMPLEMENTED** (awaiting Opus 5 re-review of B1/H1/H2)  
+Previous: Stage 5A + 5A′ IMPLEMENTED; Stage 4 **VERIFIED** (merged)
+
+**Not VERIFIED** until re-review passes.
 
 Authoritative profile: **FULL** (competition)
 
@@ -11,32 +13,38 @@ Authoritative profile: **FULL** (competition)
 ```text
 Docker-free
 → local PostgreSQL (Stage 4 retrieval)
-→ PostgreSQL FTS (simple, OR lexemes)
-→ postgres_numpy_exact
-→ multilingual-e5-small (384-d)
-→ RRF
-→ no reranker by default
-→ Stage 5A: dataset adapter → schema-valid baseline submission (no GT access)
-→ Stage 5A′: OCR quality gate (pypdf pre-pass; no silent SUCCESS on OCR_REQUIRED)
+→ …
+→ Stage 5A.1:
+    dataset preflight (quarantine answer keys)
+    → sanitized manifest
+    → competition solver (allowlisted inputs only)
+    → schema-valid baseline submission
+→ PostParseQualityGate on all parser backends (pypdf + Docling)
+→ parse-cache v2 with page-quality / OCR identity
 ```
 
-## Stage 5A + 5A′ (this branch)
+## Stage 5A.1 review fixes
 
-| Capability | Status |
-|------------|--------|
-| Dataset adapter (roles + ignore policies) | implemented |
-| Competition / training isolation (`HALYK_MODE`) | implemented |
-| Ground-truth leakage guards + opened-file audit | implemented |
-| Deterministic baseline `submission.json` | implemented |
-| Isolated training scorer (Decimal) | implemented |
-| Failure-event vocabulary (bounded) | implemented |
-| Image-page / OCR_REQUIRED detection | implemented |
-| Offline OCR execution | **unavailable** (no model download; explicit approval required) |
+| Finding | Fix |
+|---------|-----|
+| B1 ground-truth reads in solver | Preflight quarantine + solver consumes only `SanitizedDatasetManifest` |
+| H1 legacy SUCCESS cache | Cache envelope v2; legacy/missing page-quality → `CACHE_INCOMPATIBLE` |
+| H2 Docling bypass | Shared `PostParseQualityGate` after every backend |
+
+### Truthful isolation invariant
+
+The competition solver process and solver package never open, deserialize, or receive ground-truth / answer-key content.
+
+Raw-dataset preflight may inspect candidate JSON solely for quarantine classification (metadata only; no expected answer values in manifests).
 
 ### Commands
 
 ```bash
-# Competition (default HALYK_MODE=competition) — never reads ground truth
+# Preferred two-step boundary
+uv run python -m halyk_agent dataset preflight --input ./agentic-bank-public --output ./work/preflight
+uv run python -m halyk_agent solve --manifest ./work/preflight/sanitized_manifest.json --output ./work/solve-baseline
+
+# Compatibility composition root (preflight then solve; solver still never walks raw root)
 uv run python -m halyk_agent solve --dataset ./agentic-bank-public --output ./work/solve-baseline
 
 # Training scorer only
@@ -47,53 +55,26 @@ uv run python -m halyk_agent train-score --dataset ./agentic-bank-public --submi
 uv run python -m halyk_agent ocr-diagnose --documents ./agentic-bank-public/documents --output ./work/ocr-diag
 ```
 
-### OCR quality states
+### Manifests
 
-`TEXT_OK` | `LOW_TEXT` | `IMAGE_DOMINANT` | `HEADING_WITHOUT_BODY` | `OCR_REQUIRED` | `OCR_SUCCEEDED` | `OCR_FAILED` | `UNREADABLE`
+| File | Contains |
+|------|----------|
+| `preflight_manifest.json` | Files inspected by preflight; quarantined candidates (path/hash/size/reason); **no answer values** |
+| `run_manifest.json` | Files opened by the competition solver only (allowlisted template/ledger/cases) |
 
-pypdf must not report trusted `SUCCESS` when any load-bearing page is `OCR_REQUIRED` without OCR processing (downgraded to `PARTIAL` + quality warning).
+### OCR / cache
 
-### Current OCR backend
-
-Offline OCR is **not available** for automatic use. Docling may be installed, but OCR weights are not pre-verified and are not downloaded by this stage. Missing-component reason is recorded as `OCR_BACKEND_UNAVAILABLE`.
+- Page quality states unchanged; blocking states prevent trusted `SUCCESS`.
+- Offline OCR remains **unavailable**; no OCR installation in 5A.1.
+- Parse cache schema: `halyk.parse_cache.v2` with page-quality gate version + OCR policy identity.
 
 ### Remaining blockers (before Stage 5B+)
 
+- Opus re-review of B1/H1/H2
 - Explicit user approval if OCR model/weights install is required
 - Covenant calculation / document authority / DSL (not started)
 - DeepSeek / LLM fact extraction (not started)
 
-## Completed and verified (Stage 4.3)
-
-- secure dataset inspection
-- canonical document parsing with exact EvidenceSpan lineage
-- deterministic structure-aware chunking
-- FULL embeddings: **intfloat/multilingual-e5-small** @ pinned revision (offline cache)
-- PostgreSQL FTS on local PostgreSQL 18.4
-- exact vector retrieval via **postgres_numpy_exact**
-- shared RRF hybrid fusion
-- end-to-end inspect → parse → index → search without Docker
-
-## Optional / not required for competition
-
-| Component | Status |
-|-----------|--------|
-| pgvector | optional, not required |
-| BAAI/bge-m3 | optional large model, disabled |
-| BAAI/bge-reranker-v2-m3 | optional large model, disabled |
-| Docker Compose | reference-only, never required |
-| Offline OCR weights | not installed; approval required |
-
-## Not implemented (Stage 5B+)
-
-- DeepSeek / LLM fact extraction
-- document version / authority resolver
-- Covenant DSL and transaction classification
-- calculated covenant answers
-- durable workers / decision workflow
-- proof-bundle generation
-- manually solved public answers
-
 ## Next gate
 
-**Opus 5 read-only review of Stage 5A + 5A′** (do not merge until reviewed).
+**Opus 5 read-only re-review of B1, H1 and H2** — do not merge until reviewed.

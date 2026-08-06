@@ -8,7 +8,7 @@ One shared domain core drives two runtime profiles. The **authoritative competit
 
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
-- **Modes** — `HALYK_MODE=competition` (default) isolates the solver from ground truth; `HALYK_MODE=training` enables the isolated scorer only.
+- **Modes** — `HALYK_MODE=competition` (default): solver consumes only a sanitized manifest and never opens/deserializes answer-key content (preflight may quarantine candidates). `HALYK_MODE=training` enables the isolated scorer only.
 
 ## Requirements
 
@@ -33,10 +33,16 @@ GET /health
 -> {"status":"ok","stage":5,"profile":"full"}
 ```
 
-## Stage 5A — baseline solve and training score
+## Stage 5A / 5A.1 — preflight, baseline solve, training score
 
 ```bash
-# Competition baseline (schema-valid unresolved cells; no ground-truth access)
+# Preflight quarantines answer keys; writes sanitized_manifest.json
+uv run python -m halyk_agent dataset preflight --input ./agentic-bank-public --output ./work/preflight
+
+# Competition solver — sanitized manifest only (preferred)
+uv run python -m halyk_agent solve --manifest ./work/preflight/sanitized_manifest.json --output ./work/solve-baseline
+
+# Compatibility: composition runs preflight then solve (solver still has no raw-root API)
 uv run python -m halyk_agent solve --dataset ./agentic-bank-public --output ./work/solve-baseline
 
 # Training-only scorer (requires HALYK_MODE=training)
@@ -49,7 +55,7 @@ uv run python -m halyk_agent ocr-diagnose --documents ./agentic-bank-public/docu
 
 Outputs for solve: `submission.json`, `run_manifest.json`, `unresolved_cells.jsonl`, `failure_events.jsonl`, `solver_summary.md`.
 
-Ground truth must never appear in the competition solver opened-file audit.
+Competition solver opened-file audit must never include ground truth or quarantined answer keys. Preflight may list them as quarantine metadata only.
 
 ## Stage 2 — archive inspection
 
