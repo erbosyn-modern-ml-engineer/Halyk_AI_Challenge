@@ -1,8 +1,17 @@
-"""Dataset preflight / quarantine (may inspect candidates; never feeds answers to solver)."""
+"""Dataset preflight / quarantine package.
+
+Import concrete APIs from submodules at composition roots, for example:
+
+- ``halyk_agent.preflight.models``
+- ``halyk_agent.preflight.service``
+
+This package ``__init__`` intentionally avoids eager imports so that importing
+solver DTOs does not load discovery/quarantine implementation modules.
+"""
 
 from __future__ import annotations
 
-from halyk_agent.preflight.models import SanitizedDatasetManifest
-from halyk_agent.preflight.service import run_preflight
-
-__all__ = ["SanitizedDatasetManifest", "run_preflight"]
+__all__ = [
+    "SanitizedDatasetManifest",
+    "run_preflight",
+]
