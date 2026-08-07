@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     llm_max_concurrency: int = Field(default=2, ge=1)
     llm_max_retries: int = Field(default=1, ge=0)
     llm_temperature: float = Field(default=0.0, ge=0.0)
+    llm_max_tokens: int = Field(default=2048, ge=1)
+    # Cache identity only — API model id stays deepseek-v4-flash.
+    llm_provider_revision: str = Field(default="deepseek-v4-flash-2026-07-31")
     # Deprecated aliases (mapped in facts gateway builder)
     llm_max_calls: int | None = Field(default=None)
     llm_escalation_max_calls: int | None = Field(default=None)

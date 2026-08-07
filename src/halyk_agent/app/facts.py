@@ -108,6 +108,8 @@ def _build_gateway(
         max_concurrency=settings.llm_max_concurrency,
         max_retries=settings.llm_max_retries,
         temperature=settings.llm_temperature,
+        max_tokens=settings.llm_max_tokens,
+        provider_revision=settings.llm_provider_revision,
         cache_dir=cache_dir,
         allow_network=True,
     )

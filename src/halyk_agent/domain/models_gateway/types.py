@@ -61,6 +61,21 @@ class StructuredExtractionResult(BaseModel):
     reason_code: NonEmptyStr = "OK"
     confidence: str | None = None
     raw_response_hash: NonEmptyStr | None = None
+    usage: TokenUsage | None = None
+    latency_ms: int | None = Field(default=None, ge=0)
+
+
+class TokenUsage(BaseModel):
+    """Provider-tolerant token usage; missing fields stay None."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    prompt_cache_hit_tokens: int | None = Field(default=None, ge=0)
+    prompt_cache_miss_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
 
 
 class ModelCallRecord(BaseModel):
@@ -83,4 +98,7 @@ class ModelCallRecord(BaseModel):
     state: ExtractionState
     latency_ms: int | None = Field(default=None, ge=0)
     error_code: str | None = None
+    usage: TokenUsage | None = None
+    thinking_enabled: bool = False
+    reasoning_effort: str | None = None
     # Explicitly forbid secret-looking fields via extra=forbid; no api_key field.
