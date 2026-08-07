@@ -165,6 +165,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing original PDF files (repeatable)",
     )
 
+    route_parser = subparsers.add_parser(
+        "route",
+        help="Deterministic scenario/entity routing (Stage 5B)",
+    )
+    route_parser.add_argument(
+        "--dataset-manifest",
+        required=True,
+        type=Path,
+        help="Path to sanitized_manifest.json",
+    )
+    route_parser.add_argument(
+        "--parsed",
+        required=True,
+        type=Path,
+        help="OCR-enriched or Stage 3/5A parse output directory",
+    )
+    route_parser.add_argument("--output", required=True, type=Path)
+    route_parser.add_argument("--overwrite", action="store_true")
+    route_parser.add_argument("--json-output", action="store_true")
+    route_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail on structural conflicts that make a scenario unusable",
+    )
+
     return parser
 
 
@@ -416,6 +441,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"attempted={run_report.attempted_pages}")
         print(f"succeeded={run_report.succeeded_pages}")
         print(f"remaining_blocking={run_report.remaining_blocking_pages}")
+        return 0
+
+    if args.command == "route":
+        from halyk_agent.app.routing import (
+            RoutingServiceError,
+            print_route_summary,
+            report_to_json,
+            route_from_paths,
+        )
+
+        try:
+            routing_report = route_from_paths(
+                dataset_manifest=args.dataset_manifest,
+                parsed_dir=args.parsed,
+                output_dir=args.output,
+                overwrite=bool(args.overwrite),
+                strict=bool(args.strict),
+            )
+        except RoutingServiceError as exc:
+            print(f"route failed: {exc.message}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"route failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        if args.json_output:
+            print(report_to_json(routing_report), end="")
+        else:
+            print_route_summary(routing_report)
         return 0
 
     parser.error(f"unknown command: {args.command}")
