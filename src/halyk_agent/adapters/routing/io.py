@@ -35,39 +35,73 @@ def load_ledger_csv(path: Path) -> tuple[LedgerRow, ...]:
     """Load primary transaction ledger into typed rows."""
     if not path.is_file():
         raise RoutingIOError(f"ledger not found: {path}", code="MISSING_LEDGER")
+    return load_ledger_csv_bytes(path.read_bytes(), source_file=path.as_posix())
+
+
+def load_ledger_csv_bytes(data: bytes, *, source_file: str) -> tuple[LedgerRow, ...]:
+    """Parse ledger CSV bytes into typed rows."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RoutingIOError(f"ledger is not UTF-8: {exc}", code="LEDGER_ENCODING") from exc
     rows: list[LedgerRow] = []
-    with path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        required = {
-            "txn_id",
-            "date",
-            "account_id",
-            "counterparty",
-            "description",
-            "amount",
-            "currency",
-        }
-        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
-            raise RoutingIOError(
-                f"ledger missing required columns: {sorted(required)}",
-                code="LEDGER_SCHEMA",
+    reader = csv.DictReader(text.splitlines())
+    required = {
+        "txn_id",
+        "date",
+        "account_id",
+        "counterparty",
+        "description",
+        "amount",
+        "currency",
+    }
+    if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+        raise RoutingIOError(
+            f"ledger missing required columns: {sorted(required)}",
+            code="LEDGER_SCHEMA",
+        )
+    for index, raw in enumerate(reader):
+        rows.append(
+            LedgerRow(
+                row_index=index,
+                txn_id=str(raw["txn_id"]),
+                date=str(raw["date"]),
+                account_id=str(raw["account_id"]),
+                counterparty=str(raw["counterparty"]),
+                description=str(raw.get("description") or ""),
+                amount=str(raw["amount"]),
+                currency=str(raw["currency"]),
+                ledger_source_file=source_file,
             )
-        source = path.as_posix()
-        for index, raw in enumerate(reader):
-            rows.append(
-                LedgerRow(
-                    row_index=index,
-                    txn_id=str(raw["txn_id"]),
-                    date=str(raw["date"]),
-                    account_id=str(raw["account_id"]),
-                    counterparty=str(raw["counterparty"]),
-                    description=str(raw.get("description") or ""),
-                    amount=str(raw["amount"]),
-                    currency=str(raw["currency"]),
-                    ledger_source_file=source,
-                )
-            )
+        )
     return tuple(rows)
+
+
+def load_template_answers(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return _template_answers_from_payload(payload)
+
+
+def load_template_answers_bytes(data: bytes) -> dict[str, Any]:
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RoutingIOError(
+            f"invalid submission template JSON: {exc}", code="TEMPLATE_SCHEMA"
+        ) from (exc)
+    return _template_answers_from_payload(payload)
+
+
+def _template_answers_from_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or "answers" not in payload:
+        raise RoutingIOError("submission template missing answers", code="TEMPLATE_SCHEMA")
+    answers = payload["answers"]
+    if not isinstance(answers, dict):
+        raise RoutingIOError(
+            "submission template answers must be an object",
+            code="TEMPLATE_SCHEMA",
+        )
+    return answers
 
 
 def load_evidence_catalogue(path: Path) -> tuple[EvidenceSpan, ...]:
@@ -80,18 +114,6 @@ def load_evidence_catalogue(path: Path) -> tuple[EvidenceSpan, ...]:
         spans.append(EvidenceSpan.model_validate_json(line))
     spans.sort(key=lambda item: item.id)
     return tuple(spans)
-
-
-def load_template_answers(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or "answers" not in payload:
-        raise RoutingIOError("submission template missing answers", code="TEMPLATE_SCHEMA")
-    answers = payload["answers"]
-    if not isinstance(answers, dict):
-        raise RoutingIOError(
-            "submission template answers must be an object", code="TEMPLATE_SCHEMA"
-        )
-    return answers
 
 
 def _jsonl(models: Iterable[Any]) -> str:
@@ -114,6 +136,7 @@ def write_routing_outputs(report: RoutingReport, output_dir: Path) -> dict[str, 
         "document_links": output_dir / "document_links.jsonl",
         "transaction_links": output_dir / "transaction_links.jsonl",
         "entity_conflicts": output_dir / "entity_conflicts.jsonl",
+        "identity_evidence": output_dir / "identity_evidence.jsonl",
         "summary": output_dir / "routing_summary.md",
     }
     _atomic_write(
@@ -124,6 +147,7 @@ def write_routing_outputs(report: RoutingReport, output_dir: Path) -> dict[str, 
     _atomic_write(paths["document_links"], _jsonl(report.document_links))
     _atomic_write(paths["transaction_links"], _jsonl(report.transaction_links))
     _atomic_write(paths["entity_conflicts"], _jsonl(report.conflicts))
+    _atomic_write(paths["identity_evidence"], _jsonl(report.identity_evidence))
     _atomic_write(paths["summary"], render_summary_markdown(report))
     return paths
 
