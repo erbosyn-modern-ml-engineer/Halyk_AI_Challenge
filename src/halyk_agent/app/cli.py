@@ -288,6 +288,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     facts_extract.add_argument("--json-output", action="store_true")
 
+    transactions_parser = subparsers.add_parser(
+        "transactions",
+        help="Deterministic transaction taxonomy & calculation inputs (Stage 5F)",
+    )
+    transactions_sub = transactions_parser.add_subparsers(
+        dest="transactions_command", required=True
+    )
+    transactions_prepare = transactions_sub.add_parser(
+        "prepare",
+        help="Classify ledger rows and apply Stage 5E adjustments for Stage 6",
+    )
+    transactions_prepare.add_argument(
+        "--routing",
+        required=True,
+        type=Path,
+        help="Stage 5B routing output directory",
+    )
+    transactions_prepare.add_argument(
+        "--covenants",
+        required=True,
+        type=Path,
+        help="Stage 5D covenant output directory",
+    )
+    transactions_prepare.add_argument(
+        "--facts",
+        required=True,
+        type=Path,
+        help="Stage 5E facts output directory",
+    )
+    transactions_prepare.add_argument(
+        "--ledger",
+        required=True,
+        type=Path,
+        help="Master ledger CSV (must match routing ledger SHA)",
+    )
+    transactions_prepare.add_argument("--output", required=True, type=Path)
+    transactions_prepare.add_argument("--overwrite", action="store_true")
+    transactions_prepare.add_argument("--json-output", action="store_true")
+
     models_probe = models_sub.add_parser(
         "probe",
         help="Show configured LLM providers (never HTTP unless --allow-network)",
@@ -692,6 +731,43 @@ def main(argv: list[str] | None = None) -> int:
                 print_facts_summary(facts_report)
             return 0
         parser.error(f"unknown facts command: {args.facts_command}")
+        return 2
+
+    if args.command == "transactions":
+        if args.transactions_command == "prepare":
+            from halyk_agent.app.transactions import (
+                TransactionServiceError,
+                print_taxonomy_summary,
+                transactions_from_paths,
+            )
+            from halyk_agent.app.transactions import (
+                report_to_json as taxonomy_report_to_json,
+            )
+
+            try:
+                taxonomy_report = transactions_from_paths(
+                    routing_dir=args.routing,
+                    covenants_dir=args.covenants,
+                    facts_dir=args.facts,
+                    ledger_path=args.ledger,
+                    output_dir=args.output,
+                    overwrite=bool(args.overwrite),
+                )
+            except TransactionServiceError as exc:
+                print(f"transactions prepare failed: {exc.message}", file=sys.stderr)
+                return 1
+            except Exception as exc:
+                print(
+                    f"transactions prepare failed: {exc.__class__.__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.json_output:
+                print(taxonomy_report_to_json(taxonomy_report), end="")
+            else:
+                print_taxonomy_summary(taxonomy_report)
+            return 0
+        parser.error(f"unknown transactions command: {args.transactions_command}")
         return 2
 
     parser.error(f"unknown command: {args.command}")
