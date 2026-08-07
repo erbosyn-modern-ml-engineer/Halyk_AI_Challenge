@@ -1,8 +1,8 @@
 # Status
 
-Current stage: **5C** (document taxonomy and authority resolution)  
-Stage status: **COMPLETE on branch** `stage-5c/document-taxonomy-authority` (not merged)  
-Previous: Stage 5B.2 merged to `main` @ `32f9704`
+Current stage: **5F** (deterministic transaction taxonomy & adjustment inputs)  
+Stage status: **IMPLEMENTED on branch** `stage-5f/transaction-taxonomy-adjustments` (not merged)  
+Base: Stage 5E.3 on `main` @ `db41b7de368d4dca67015ebd93a07a15304161a5`
 
 Authoritative profile: **FULL** (competition)
 
@@ -10,42 +10,38 @@ Authoritative profile: **FULL** (competition)
 
 | Stage | Question answered |
 |-------|-------------------|
-| **5B** | Which scenario/entity does this document *belong to*? (ownership/routing) |
-| **5C** | What *type* is it, and is it *authoritative* for a fact domain? |
-| **5D** (next) | Covenant semantics / thresholds (not started) |
+| **5B** | Which scenario/entity does this document/transaction belong to? |
+| **5C** | What type is it, and is it authoritative for a fact domain? |
+| **5D** | What covenant definition/selectors/modifiers apply? |
+| **5E** | What trusted structured facts exist in authoritative sources? |
+| **5F** | What calculation-ready transaction/adjustment inputs feed Stage 6? |
+| **6** (next) | Covenant actuals / compliance (not started) |
 
-## Stage 5C guarantees
+## Stage 5F guarantees
 
 | Concern | Guarantee |
 |---------|-----------|
-| Taxonomy | Evidence-backed `DocumentType` from content signals (no embeddings) |
-| Lifecycle | Separate `DocumentLifecycleStatus` (FINAL/DRAFT/SUPERSEDED/CURRENT_EXECUTED/…) |
-| Authority domains | Separate `AuthorityDomain` (COVENANT_TERMS, FINANCIAL_ADJUSTMENTS, …) |
-| False authoritative | Prefer `MISSING_AUTHORITY` / `UNRESOLVED` over wrong draft/policy |
-| Obsolete agreements | Explicit superseded markers exclude from COVENANT_TERMS |
-| KYC | Dossier ≠ policy/procedure; policy never substitutes |
-| Evidence | Every accepted classification/authority decision is quote-backed |
-| GT isolation | No ground-truth reads; consumes Stage 5B routing + OCR-enriched parses only |
+| Taxonomy | Reuses Stage 5D `MetricCategory`; no parallel enum |
+| Adjustments | Original vs effective amount/category/period preserved |
+| REJECTED reclass | Preserved, not applied |
+| Off-ledger | Derived inputs only — never fake ledger rows |
+| Related party | `>=` threshold from source “or more”; exact identity_key |
+| Aggregation | None — Stage 6 owns sums/ratios/thresholds |
+| Network / GT | 0 network calls; 0 ground-truth reads |
 
-## Measured public smoke (OCR-enriched + Stage 5B.2 routing)
+## Measured public smoke (Stage 5F)
 
 | Signal | Measured |
 |--------|----------|
-| Documents | 200 |
-| Classified / unknown | 163 / 37 |
-| LOAN_AGREEMENT | 24 (12 current + 12 superseded) |
-| COVENANT_TERMS authoritative | 12/12 scenarios |
-| Obsolete agreements rejected | 12 |
-| FINANCIAL_ADJUSTMENTS | 12/12 |
-| KYC_RELATIONSHIPS | 12/12 dossiers |
-| GROUP_STRUCTURE | 1 (`a5cc1400b640.pdf`) |
-| TREASURY_FACTS | 1 (P7) |
-| Conflicts | 0 |
-| Missing authority | 0 |
-| GT reads | 0 |
-| Determinism | byte-identical |
+| Ledger rows | 1473 |
+| Scenario-linked | 673 |
+| Routing noise | 800 |
+| Classified / unresolved / conflicts | 673 / 0 / 0 |
+| Calculation inputs | 674 (673 ledger + 1 derived) |
+| Selectors supported | 66/66 |
+| Facts consumed / deferred | 60 / 1 (FX) |
 
-## Next gate
+## Next
 
-Opus 5 read-only review of Stage 5C.  
-**Do not begin Stage 5D until review passes.**
+Claude Opus 5 independent Stage 5F acceptance review.  
+**Do not start Stage 6. Do not push/merge until review.**
