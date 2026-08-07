@@ -203,31 +203,38 @@ parse_report + documents
 
 Evidence spans from OCR blocks carry `text_origin=OCR`, backend identity, page number, exact quote.
 
-## Stage 5B scenario and entity routing
+## Stage 5B / 5B.1 scenario and entity routing
 
 ```text
 SanitizedDatasetManifest
-  + submission template answers
-  + primary ledger rows
-  + OCR-enriched CanonicalDocuments
-  + evidence catalogue (lineage input)
-  → discover scenarios (template only; opaque IDs)
-  → route transactions (configurable txn-id token; validate vs universe)
-  → scenario → account set (supports 0/1/N; conflicts explicit)
-  → extract exact account tokens + borrower declarations (EvidenceSpan required)
-  → document routing precedence:
-       EXPLICIT_ACCOUNT_ID (EXACT)
-       → EXPLICIT_BORROWER_DECLARATION (DECLARED)
-       → DECLARED_ENTITY_RELATION (record only)
-       → NORMALIZED_LEGAL_NAME (full token equality; DERIVED)
-       → UNRESOLVED
-  → RoutingManifest + JSONL links + conflicts/diagnostics
+  → canonicalize allowlist + quarantine
+  → audited FileOpener reads (template + ledger only)
+  → OCR-enriched CanonicalDocuments + evidence catalogue
+  → scenario universe (template)
+  → txn-id anchors + account-id fallback
+  → document precedence:
+       1 EXPLICIT_ACCOUNT_ID
+       2 EXPLICIT_BORROWER_DECLARATION
+       3 GROUP_SEGMENT_DECLARATION
+       4 NORMALIZED_LEGAL_NAME (identity_key)
+       5 UNRESOLVED
+  → RoutingManifest + JSONL + identity_evidence.jsonl
+  → open audit → staged publish
 ```
 
-### Identity precedence and normalization
+### Routing vs Stage 5C
 
-1. Exact complete account identifiers beat company-name similarity (`IDENTIFIER_NAME_CONFLICT` when they disagree).
-2. Legal-name equality requires full normalized token sequences after NFKC / casefold / quote / punctuation / optional legal-suffix transforms — no fuzzy, substring, or embedding match.
-3. Retrieval may diagnose unresolved docs later; it must not assign scenario ownership in Stage 5B.
-4. Stage 5B does not choose final-vs-draft document authority (Stage 5C).
-5. No DeepSeek / LLM entity resolver in this stage.
+- **Routing (5B):** which scenario/entity a document *concerns*.
+- **Stage 5C (not started):** whether that document is relevant, authoritative, or current.
+
+### Legal-name keys
+
+- `identity_key` — ACCEPT match; preserves legal-form class (`jsc` ≠ `llp` ≠ `too`).
+- `base_key` — candidate/conflict diagnostics only; **never** sufficient to accept a link.
+- Language variants of the same form (e.g. `JSC` / `АО`) may share a form class deliberately.
+
+### Leakage boundary
+
+Routing reuses the shared `halyk_agent.dataset_access` contract (same allowlist/quarantine
+canonicalization and audited opener rules as the Stage 5A solver). Role labels alone are
+never trusted.
