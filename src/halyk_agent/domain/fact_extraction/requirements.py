@@ -13,25 +13,33 @@ from halyk_agent.domain.fact_extraction.models import DerivationKind, FactKind, 
 from halyk_agent.domain.ids import deterministic_id
 from halyk_agent.domain.parsing import CanonicalDocument
 
-# Strong cues for SOURCE_TRIGGERED_CONDITIONAL (must appear in winning docs).
-# Keep these strict — bare currency symbols / USD alone must NOT trigger.
-_FX_STRONG = (
-    "обменный курс",
-    "обменном курсе",
-    "exchange rate",
-    "foreign currency",
-    "пересчитывается",
-    "пересчёт",
-    "пересчет",
-    "урегулирован",
+# Concrete FX EVENT cues only — generic accounting-policy Note 5 must NOT trigger.
+_FX_EVENT_CUES = (
+    "обменный курс составил",
+    "обменный курс равен",
+    "exchange rate of",
+    "exchange rate is",
+    "урегулирован в размере",
     "settled in",
     "settled at",
+    "settled for",
 )
-_FX_STRONG_PATTERNS = (
-    re.compile(r"курс\s+(?:равен|составил|of|is)\s+\d", re.IGNORECASE),
-    re.compile(r"exchange\s+rate\s+(?:of\s+)?\d", re.IGNORECASE),
+_FX_EVENT_PATTERNS = (
+    re.compile(r"(?:курс|exchange\s+rate)\s+(?:равен|составил|of|is)\s+\d", re.IGNORECASE),
     re.compile(
-        r"(?:счёт|invoice).{0,80}?(?:EUR|GBP).{0,120}?(?:урегулирован|settled)",
+        r"(?:счёт|invoice|amount).{0,100}?(?:EUR|GBP|KZT).{0,140}?(?:урегулирован|settled)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"(?:урегулирован|settled).{0,80}?(?:\$|USD)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"TXN-[A-Za-z0-9]+-\d+[^\n]{0,200}?(?:EUR|GBP)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:EUR|GBP)\s*[\d,]+\d.{0,100}?(?:урегулирован|settled|USD|\$)",
         re.IGNORECASE | re.DOTALL,
     ),
 )
@@ -276,7 +284,15 @@ def derive_fact_requirements(
                     "неограниченн",
                     "ограниченн",
                 ),
-                strong=("subsidiary", "дочерн", "unrestricted", "restricted", "групп"),
+                # Bare "групп"/"group" is NOT enough for model eligibility.
+                strong=(
+                    "subsidiary",
+                    "дочерн",
+                    "unrestricted",
+                    "restricted",
+                    "неограниченн",
+                    "ограниченн",
+                ),
                 cats=tuple(
                     sorted(
                         c.value
@@ -322,16 +338,15 @@ def derive_fact_requirements(
         )
         corpus = _doc_corpus(docs, fin_docs) if fin_docs else ""
 
-        if corpus and _has_strong_cues(corpus, _FX_STRONG, _FX_STRONG_PATTERNS):
-            # Exclude mere $ / USD without FX language (handled by strong list).
+        if corpus and _has_strong_cues(corpus, _FX_EVENT_CUES, _FX_EVENT_PATTERNS):
             add(
                 kind=FactKind.FX_RATE,
                 derivation=DerivationKind.SOURCE_TRIGGERED_CONDITIONAL,
                 domains=(AuthorityDomain.FINANCIAL_ADJUSTMENTS, AuthorityDomain.TREASURY_FACTS),
-                reason="SOURCE_FX_CUE",
-                trigger="strong_fx_or_settlement_cue_in_winning_doc",
-                cues=_FX_STRONG,
-                strong=_FX_STRONG,
+                reason="SOURCE_FX_EVENT_CUE",
+                trigger="concrete_fx_event_cue_in_winning_doc",
+                cues=_FX_EVENT_CUES,
+                strong=_FX_EVENT_CUES,
             )
 
         if corpus and _has_strong_cues(corpus, _AMOUNT_STRONG):

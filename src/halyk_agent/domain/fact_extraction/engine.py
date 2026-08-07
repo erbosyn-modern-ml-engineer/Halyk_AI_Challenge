@@ -45,6 +45,7 @@ from halyk_agent.domain.fact_extraction.models import (
     RequirementTerminalState,
 )
 from halyk_agent.domain.fact_extraction.requirements import derive_fact_requirements
+from halyk_agent.domain.fact_extraction.text_normalize import cue_corpus
 from halyk_agent.domain.fact_extraction.validators import validate_candidate
 from halyk_agent.domain.fact_extraction.windows import select_windows
 from halyk_agent.domain.ids import sha256_text
@@ -122,32 +123,38 @@ def _doc_has_strong_cue(requirement: FactRequirement, document: CanonicalDocumen
     if not cues:
         return False
     for page in document.pages:
-        text = (page.raw_text or "").casefold()
+        text = cue_corpus(page.raw_text or "").casefold()
         if any(cue.casefold() in text for cue in cues if cue):
             return True
     return False
 
 
-def _source_plausibly_contains_answer(
-    requirement: FactRequirement,
-    document: CanonicalDocument,
-) -> bool:
+def _corpus_plausibly_answers(requirement: FactRequirement, corpus: str) -> bool:
     """Stricter than cue presence: look for parse-shaped evidence per family."""
-    corpus = "\n".join((p.raw_text or "") for p in document.pages)
-    lowered = corpus.casefold()
+    repaired = cue_corpus(corpus)
+    lowered = repaired.casefold()
     kind = requirement.fact_kind
     if kind is FactKind.FX_RATE:
         return bool(
-            re.search(r"(?:курс|exchange\s+rate).{0,40}\d", corpus, re.IGNORECASE | re.DOTALL)
+            re.search(
+                r"(?:курс|exchange\s+rate)\s+(?:равен|составил|of|is)\s+\d",
+                repaired,
+                re.IGNORECASE,
+            )
+            or re.search(
+                r"(?:счёт|invoice).{0,100}?(?:EUR|GBP).{0,140}?(?:урегулирован|settled)",
+                repaired,
+                re.IGNORECASE | re.DOTALL,
+            )
             or re.search(
                 r"(?:урегулирован|settled).{0,80}\$",
-                corpus,
+                repaired,
                 re.IGNORECASE | re.DOTALL,
             )
         )
     if kind is FactKind.TRANSACTION_PERIOD:
         return bool(
-            re.search(r"TXN-[A-Za-z0-9]+-\d+", corpus)
+            re.search(r"TXN-[A-Za-z0-9]+-\d+", repaired)
             and any(
                 cue.casefold() in lowered
                 for cue in (
@@ -174,23 +181,53 @@ def _source_plausibly_contains_answer(
             )
         )
     if kind is FactKind.TRANSACTION_TREATMENT:
-        return bool(re.search(r"TXN-[A-Za-z0-9]+-\d+", corpus)) and any(
+        return bool(re.search(r"TXN-[A-Za-z0-9]+-\d+", repaired)) and any(
             cue in lowered for cue in ("расчёт", "расчет", "covenant calculation", "из расч")
         )
     if kind is FactKind.OWNERSHIP:
-        return bool(re.search(r"\d+(?:[.,]\d+)?\s*%", corpus)) and any(
-            cue in lowered for cue in ("владе", "ownership", "голосующ", "бенефициар")
+        return bool(re.search(r"\d+(?:[.,]\d+)?\s*%", repaired)) and (
+            any(cue in lowered for cue in ("владе", "ownership", "голосующ", "бенефициар"))
+            or bool(re.search(r"(?:LLP|JSC|Inc)\s+\d+(?:[.,]\d+)?\s*%", repaired))
         )
     if kind is FactKind.RELATED_PARTY_THRESHOLD:
-        return any(cue in lowered for cue in ("связанн", "related")) and "%" in corpus
+        return any(cue in lowered for cue in ("связанн", "related")) and "%" in repaired
     if kind is FactKind.SUBSIDIARY_STATUS:
+        # Bare group/доли участия is insufficient.
         return any(
             cue in lowered
-            for cue in ("subsidiary", "дочерн", "unrestricted", "restricted", "групп")
+            for cue in (
+                "subsidiary",
+                "дочерн",
+                "unrestricted",
+                "restricted",
+                "неограниченн",
+                "ограниченн",
+            )
         )
     if kind is FactKind.TRANSACTION_RECLASSIFICATION:
         return any(cue in lowered for cue in ("перекласс", "reclass", "переквалиф"))
-    return _doc_has_strong_cue(requirement, document)
+    cues = requirement.strong_lexical_cues or requirement.lexical_cues
+    return any(cue.casefold() in lowered for cue in cues if cue)
+
+
+def _source_plausibly_contains_answer(
+    requirement: FactRequirement,
+    document: CanonicalDocument,
+) -> bool:
+    corpus = "\n".join((p.raw_text or "") for p in document.pages)
+    return _corpus_plausibly_answers(requirement, corpus)
+
+
+def _window_plausibly_answers(
+    requirement: FactRequirement,
+    window: object,
+) -> bool:
+    from halyk_agent.domain.fact_extraction.windows import EvidenceWindow
+
+    if not isinstance(window, EvidenceWindow):
+        return False
+    corpus = "\n".join(f.text for f in window.fragments)
+    return _corpus_plausibly_answers(requirement, corpus)
 
 
 def _winning_domains_and_docs(
@@ -276,6 +313,8 @@ def _evaluate_model_eligibility(
             window = select_windows(requirement, document)
             if window is None:
                 continue
+            if not _window_plausibly_answers(requirement, window):
+                continue
             _ = domain
             return True, "MODEL_ELIGIBLE"
     return False, "NO_STRONG_CUE_OR_WINDOW"
@@ -329,41 +368,8 @@ def run_fact_extraction(
         domain_docs = _winning_domains_and_docs(requirement, auth_map)
         domains_used[requirement.requirement_id] = {d for d, _ in domain_docs}
 
-        # CONFIRMED_NONE before positive extraction
-        none_hit = None
-        none_doc = None
-        none_domain = None
-        for domain, winning in domain_docs:
-            for doc_id in sorted(winning):
-                document = docs.get(doc_id)
-                if document is None:
-                    continue
-                hit = detect_confirmed_none(requirement.fact_kind, document)
-                if hit is not None:
-                    none_hit = hit
-                    none_doc = document
-                    none_domain = domain
-                    break
-            if none_hit is not None:
-                break
-
-        if none_hit is not None and none_doc is not None and none_domain is not None:
-            confirmed_none_ids.add(requirement.requirement_id)
-            model_eligible_flags[requirement.requirement_id] = False
-            eligibility_reasons[requirement.requirement_id] = "CONFIRMED_NONE"
-            try:
-                none_span = create_exact_page_span(
-                    none_doc, none_hit.page_number, none_hit.char_start, none_hit.char_end
-                )
-                spans[none_span.id] = none_span
-                confirmed_none_spans[requirement.requirement_id] = none_span.id
-                evidence_by_req.setdefault(requirement.requirement_id, []).append(none_span.id)
-            except EvidenceAlignmentError:
-                pass
-            domains_used[requirement.requirement_id].add(none_domain)
-            continue
-
-        # Deterministic extraction across allowed authoritative domains
+        # Deterministic extraction first — collect ALL non-duplicate facts before
+        # terminalization. CONFIRMED_NONE must not suppress specific REJECTED facts.
         for domain, winning in domain_docs:
             for doc_id in sorted(winning):
                 document = docs.get(doc_id)
@@ -400,11 +406,44 @@ def run_fact_extraction(
                         if status is FactValidatorStatus.AMBIGUOUS:
                             ambiguous_ids.add(requirement.requirement_id)
 
+        if requirement.requirement_id not in resolved_req_ids:
+            none_hit = None
+            none_doc = None
+            none_domain = None
+            for domain, winning in domain_docs:
+                for doc_id in sorted(winning):
+                    document = docs.get(doc_id)
+                    if document is None:
+                        continue
+                    hit = detect_confirmed_none(requirement.fact_kind, document)
+                    if hit is not None:
+                        none_hit = hit
+                        none_doc = document
+                        none_domain = domain
+                        break
+                if none_hit is not None:
+                    break
+            if none_hit is not None and none_doc is not None and none_domain is not None:
+                confirmed_none_ids.add(requirement.requirement_id)
+                model_eligible_flags[requirement.requirement_id] = False
+                eligibility_reasons[requirement.requirement_id] = "CONFIRMED_NONE"
+                try:
+                    none_span = create_exact_page_span(
+                        none_doc, none_hit.page_number, none_hit.char_start, none_hit.char_end
+                    )
+                    spans[none_span.id] = none_span
+                    confirmed_none_spans[requirement.requirement_id] = none_span.id
+                    evidence_by_req.setdefault(requirement.requirement_id, []).append(none_span.id)
+                except EvidenceAlignmentError:
+                    pass
+                domains_used[requirement.requirement_id].add(none_domain)
+                continue
+
         eligible, elig_reason = _evaluate_model_eligibility(
             requirement=requirement,
             domain_docs=domain_docs,
             docs=docs,
-            confirmed_none=False,
+            confirmed_none=requirement.requirement_id in confirmed_none_ids,
             deterministic_resolved=requirement.requirement_id in resolved_req_ids,
         )
         model_eligible_flags[requirement.requirement_id] = eligible
@@ -436,6 +475,8 @@ def run_fact_extraction(
                         continue
                     window = select_windows(requirement, document)
                     if window is None:
+                        continue
+                    if not _window_plausibly_answers(requirement, window):
                         continue
 
                     request = StructuredExtractionRequest(
@@ -819,7 +860,10 @@ def _dummy_payload(kind: FactKind) -> FactPayload:
     )
 
     if kind is FactKind.TRANSACTION_RECLASSIFICATION:
-        return TransactionReclassificationPayload(from_category="A", to_category="B")
+        return TransactionReclassificationPayload(
+            from_category="A",
+            to_category="B",
+        )
     if kind is FactKind.TRANSACTION_PERIOD:
         return TransactionPeriodPayload(
             transaction_id="TXN-X-0",

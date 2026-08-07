@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from halyk_agent.domain.common import NonEmptyStr
 from halyk_agent.domain.fact_extraction.models import FactRequirement
+from halyk_agent.domain.fact_extraction.text_normalize import cue_corpus
 from halyk_agent.domain.ids import deterministic_id, sha256_text
 from halyk_agent.domain.parsing import CanonicalDocument
 
@@ -96,8 +97,34 @@ def _split_paragraphs(page_number: int, text: str) -> list[_Paragraph]:
 
 
 def _cue_hit(text: str, cues: tuple[str, ...]) -> bool:
-    lowered = text.casefold()
-    return any(cue.casefold() in lowered for cue in cues if cue)
+    lowered = cue_corpus(text).casefold()
+    if any(cue.casefold() in lowered for cue in cues if cue):
+        return True
+    # Ownership/threshold tables may keep ASCII entity+% rows while cue words are mojibaked.
+    ownershipish = any(
+        cue.casefold()
+        in {"владе", "ownership", "голосующ", "бенефициар", "%", "связанн", "related"}
+        for cue in cues
+    )
+    return bool(
+        ownershipish
+        and re.search(
+            r"(?:LLP|JSC|Inc\.?|Bureau|Partners|Capital|Logistics)\s+\d+(?:[.,]\d+)?\s*%",
+            text,
+        )
+    )
+
+
+def _answer_density(text: str, cues: tuple[str, ...]) -> int:
+    """Prefer paragraphs that themselves look answer-capable (tables, %, TXN)."""
+    score = 0
+    lowered = cue_corpus(text).casefold()
+    if any(cue.casefold() in lowered for cue in cues if cue):
+        score += 2
+    score += len(re.findall(r"\d+(?:[.,]\d+)?\s*%", text))
+    score += 3 * len(re.findall(r"\b(?:LLP|JSC)\b", text))
+    score += 2 * len(re.findall(r"TXN-[A-Za-z0-9]+-\d+", text))
+    return score
 
 
 def select_windows(
@@ -110,6 +137,7 @@ def select_windows(
     Build a bounded evidence window around paragraphs matching lexical cues.
 
     Fragment ids are local to the window: F001, F002, …
+    Prefer high answer-density hits (ownership tables) over weak later-page cues.
     """
     cues = requirement.strong_lexical_cues or requirement.lexical_cues
     if not cues:
@@ -125,12 +153,22 @@ def select_windows(
     if not hit_indexes:
         return None
 
+    # Rank hits so table pages beat boilerplate "структура владения" pages.
+    hit_indexes.sort(key=lambda i: (-_answer_density(all_paras[i].text, cues), i))
+    primary = hit_indexes[0]
     selected: dict[int, _Paragraph] = {}
-    for idx in hit_indexes:
-        lo = max(0, idx - _NEIGHBOR_PARAS)
-        hi = min(len(all_paras), idx + _NEIGHBOR_PARAS + 1)
-        for j in range(lo, hi):
-            selected[j] = all_paras[j]
+    lo = max(0, primary - _NEIGHBOR_PARAS)
+    hi = min(len(all_paras), primary + _NEIGHBOR_PARAS + 1)
+    for j in range(lo, hi):
+        selected[j] = all_paras[j]
+    # Include other strong hits on the same page as the primary hit.
+    primary_page = all_paras[primary].page_number
+    for idx in hit_indexes[1:]:
+        if all_paras[idx].page_number != primary_page:
+            continue
+        if _answer_density(all_paras[idx].text, cues) <= 0:
+            continue
+        selected[idx] = all_paras[idx]
 
     ordered = [selected[i] for i in sorted(selected)]
     fragments: list[EvidenceFragment] = []
