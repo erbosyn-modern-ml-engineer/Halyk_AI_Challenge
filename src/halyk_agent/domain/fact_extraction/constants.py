@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-FACT_SCHEMA_VERSION = "halyk.facts.schema.v2"
-FACT_EXTRACTOR_VERSION = "halyk.facts.extractor.v2"
-FACT_VALIDATOR_VERSION = "halyk.facts.validator.v2"
-FACT_REQUIREMENT_VERSION = "halyk.facts.requirements.v2"
-FACT_ALGORITHM_VERSION = "halyk.facts.algorithm.v2"
+FACT_SCHEMA_VERSION = "halyk.facts.schema.v3"
+FACT_EXTRACTOR_VERSION = "halyk.facts.extractor.v3"
+FACT_VALIDATOR_VERSION = "halyk.facts.validator.v3"
+FACT_REQUIREMENT_VERSION = "halyk.facts.requirements.v3"
+FACT_ALGORITHM_VERSION = "halyk.facts.algorithm.v3"
 
-MODEL_GATEWAY_VERSION = "halyk.models.gateway.v2"
-MODEL_PROMPT_VERSION = "halyk.models.prompt.v2"
-MODEL_CACHE_VERSION = "halyk.models.cache.v2"
+MODEL_GATEWAY_VERSION = "halyk.models.gateway.v3"
+MODEL_PROMPT_VERSION = "halyk.models.prompt.v3"
+MODEL_CACHE_VERSION = "halyk.models.cache.v3"
+
+# Local cache/epoch identity only — never sent as the API model id.
+DEFAULT_PROVIDER_REVISION = "deepseek-v4-flash-2026-07-31"
+DEFAULT_DEEPSEEK_MAX_TOKENS = 2048

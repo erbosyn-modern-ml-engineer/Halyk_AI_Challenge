@@ -177,7 +177,9 @@ def semantic_validate(
             ):
                 return FactValidatorStatus.REJECTED_SEMANTIC, "UNKNOWN_TXN"
         elif isinstance(payload, TransactionReclassificationPayload):
-            if payload.from_category.strip().casefold() == payload.to_category.strip().casefold():
+            from_cat = (payload.from_category or "").strip()
+            to_cat = (payload.to_category or "").strip()
+            if from_cat and to_cat and from_cat.casefold() == to_cat.casefold():
                 return FactValidatorStatus.REJECTED_SEMANTIC, "RECLASS_SAME_CATEGORY"
             if payload.amount is not None and not payload.amount.currency.strip():
                 return FactValidatorStatus.REJECTED_SEMANTIC, "CURRENCY_EMPTY"

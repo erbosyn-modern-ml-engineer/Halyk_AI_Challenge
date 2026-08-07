@@ -115,9 +115,21 @@ class TransactionReclassificationPayload(BaseModel):
     transaction_id: NonEmptyStr | None = None
     counterparty: NonEmptyStr | None = None
     amount: MoneyAmount | None = None
-    from_category: NonEmptyStr
-    to_category: NonEmptyStr
+    # Categories are required for ACCEPTED; REJECTED may omit unstated proposed/original.
+    from_category: NonEmptyStr | None = None
+    to_category: NonEmptyStr | None = None
     disposition: ReclassificationDisposition = ReclassificationDisposition.ACCEPTED
+
+    @model_validator(mode="after")
+    def _categories_for_disposition(self) -> TransactionReclassificationPayload:
+        if self.disposition is ReclassificationDisposition.ACCEPTED:
+            if not self.from_category or not self.to_category:
+                raise ValueError("ACCEPTED reclassification requires from_category and to_category")
+            if self.from_category.strip().casefold() == self.to_category.strip().casefold():
+                raise ValueError("ACCEPTED reclassification categories must differ")
+        elif not any((self.transaction_id, self.amount, self.from_category, self.to_category)):
+            raise ValueError("REJECTED reclassification needs at least one stated field")
+        return self
 
 
 class TransactionPeriodPayload(BaseModel):
