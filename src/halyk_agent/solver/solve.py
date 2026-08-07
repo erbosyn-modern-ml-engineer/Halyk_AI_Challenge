@@ -9,6 +9,16 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from halyk_agent.dataset_access import LeakageAttemptError as SharedLeakageAttemptError
+from halyk_agent.dataset_access import (
+    assert_opens_allowlisted as shared_assert_opens_allowlisted,
+)
+from halyk_agent.dataset_access import (
+    resolve_dataset_path,
+)
+from halyk_agent.dataset_access import (
+    validate_manifest_paths as shared_validate_manifest_paths,
+)
 from halyk_agent.preflight.models import SanitizedDatasetManifest
 from halyk_agent.solver.audit import RunFileAudit
 from halyk_agent.solver.errors import DatasetAdapterError, LeakageAttemptError
@@ -31,25 +41,14 @@ _ALLOWED_PURPOSES = frozenset(
 
 
 def _resolve(path: Path) -> Path:
-    return path.expanduser().resolve()
+    return resolve_dataset_path(path)
 
 
 def _validate_manifest_paths(manifest: SanitizedDatasetManifest) -> tuple[set[Path], set[Path]]:
-    """Return (allowed, banned) resolved path sets. Fail if roles point at quarantine."""
-    banned = {_resolve(Path(item.path)) for item in manifest.quarantined}
-    allowed = {
-        _resolve(Path(manifest.submission_template.path)),
-        _resolve(Path(manifest.primary_ledger.path)),
-        *{_resolve(Path(case.path)) for case in manifest.case_descriptions},
-    }
-    overlap = allowed & banned
-    if overlap:
-        paths = sorted(str(p) for p in overlap)
-        raise LeakageAttemptError(f"sanitized manifest allowlist overlaps quarantine: {paths}")
-    for path in allowed:
-        if "ground_truth" in path.name.lower():
-            raise LeakageAttemptError(f"allowlisted path looks like ground truth: {path}")
-    return allowed, banned
+    try:
+        return shared_validate_manifest_paths(manifest)
+    except SharedLeakageAttemptError as exc:
+        raise LeakageAttemptError(exc.message) from exc
 
 
 def _assert_opens_allowlisted(
@@ -58,12 +57,10 @@ def _assert_opens_allowlisted(
     allowed: set[Path],
     banned: set[Path],
 ) -> None:
-    opened = [_resolve(Path(p)) for p in opener.opened_paths]
-    for path in opened:
-        if path in banned:
-            raise LeakageAttemptError(f"solver opened quarantined path: {path}")
-        if path not in allowed:
-            raise LeakageAttemptError(f"solver opened non-allowlisted path: {path}")
+    try:
+        shared_assert_opens_allowlisted(opener, allowed=allowed, banned=banned)
+    except SharedLeakageAttemptError as exc:
+        raise LeakageAttemptError(exc.message) from exc
 
 
 def solve_from_manifest(

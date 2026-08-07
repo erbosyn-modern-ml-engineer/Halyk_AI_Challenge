@@ -6,59 +6,40 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from halyk_agent.dataset_access import (
+    FileOpener as SharedFileOpener,
+)
+from halyk_agent.dataset_access import LeakageAttemptError as SharedLeakageAttemptError
+from halyk_agent.dataset_access import (
+    RecordingFileOpener,
+)
+from halyk_agent.dataset_access import (
+    require_audited_opener as shared_require_audited_opener,
+)
 from halyk_agent.solver.errors import LeakageAttemptError
+
+# Re-export shared protocol / opener under the solver package API.
+FileOpener = SharedFileOpener
 
 
 @runtime_checkable
-class FileOpener(Protocol):
-    """Every production opener must expose an auditable open log."""
-
+class _FileOpenerCheck(Protocol):
     @property
     def opened_paths(self) -> Sequence[Path]: ...
 
     def read_bytes(self, path: Path) -> bytes: ...
 
 
-class RecordingFileOpener:
-    """Filesystem opener that records every path opened by the solver."""
-
-    def __init__(self) -> None:
-        self._opened_paths: list[Path] = []
-
-    @property
-    def opened_paths(self) -> Sequence[Path]:
-        return list(self._opened_paths)
-
-    def read_bytes(self, path: Path) -> bytes:
-        resolved = path.resolve()
-        self._opened_paths.append(resolved)
-        return resolved.read_bytes()
-
-
-def require_audited_opener(opener: object) -> FileOpener:
-    """Fail closed if opener does not satisfy the audited FileOpener contract."""
-    if not isinstance(opener, FileOpener):
-        raise LeakageAttemptError(
-            "solver FileOpener must implement read_bytes and opened_paths; "
-            "unaudited openers are rejected before any input is read"
-        )
+def require_audited_opener(opener: object) -> SharedFileOpener:
+    """Fail closed; raise solver.errors.LeakageAttemptError."""
     try:
-        opened = opener.opened_paths
-    except Exception as exc:
-        raise LeakageAttemptError(
-            "solver FileOpener.opened_paths is unusable; "
-            "unaudited openers are rejected before any input is read"
-        ) from exc
-    if opened is None:
-        raise LeakageAttemptError(
-            "solver FileOpener.opened_paths must be a sequence, not None; "
-            "unaudited openers are rejected before any input is read"
-        )
-    try:
-        _ = list(opened)
-    except TypeError as exc:
-        raise LeakageAttemptError(
-            "solver FileOpener.opened_paths must be an iterable sequence; "
-            "unaudited openers are rejected before any input is read"
-        ) from exc
-    return opener
+        return shared_require_audited_opener(opener)
+    except SharedLeakageAttemptError as exc:
+        raise LeakageAttemptError(exc.message) from exc
+
+
+__all__ = [
+    "FileOpener",
+    "RecordingFileOpener",
+    "require_audited_opener",
+]
