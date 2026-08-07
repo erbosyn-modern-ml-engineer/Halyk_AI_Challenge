@@ -30,14 +30,29 @@ _LEGAL_FORM_STRIP = re.compile(
     r"[\s,.]*(?:LLP|JSC|Inc\.?|LLC|Ltd\.?|PLC|GmbH|ТОО|АО|ООО|TOO|ZAO|ЗАО|ПАО)\s*$",
     re.IGNORECASE,
 )
+_WRAP_QUOTES = re.compile(r"^[\"'«„“]+|[\"'»“”]+$")
+
+
+def _strip_wrapping_quotes(value: str) -> str:
+    text = value.strip(" ,.;:\t")
+    # Peel matching wrapper quotes repeatedly ("LLP", «LLP», '"LLP"').
+    while text:
+        stripped = _WRAP_QUOTES.sub("", text).strip(" ,.;:\t")
+        if stripped == text:
+            break
+        text = stripped
+    return text
 
 
 def is_meaningful_entity_name(name: str) -> bool:
-    """Reject entity_name that is only a legal form after stripping suffixes."""
-    raw = name.strip(" ,.;:\t")
+    """Reject entity_name that is only a legal form after quote/suffix normalization."""
+    raw = _strip_wrapping_quotes(name)
     if not raw:
         return False
+    if raw.casefold() in _LEGAL_FORMS:
+        return False
     base = _LEGAL_FORM_STRIP.sub("", raw).strip(" ,.;:\t")
+    base = _strip_wrapping_quotes(base)
     if not base:
         return False
     if base.casefold() in _LEGAL_FORMS:
