@@ -111,7 +111,9 @@ def select_windows(
 
     Fragment ids are local to the window: F001, F002, …
     """
-    cues = requirement.lexical_cues
+    cues = requirement.strong_lexical_cues or requirement.lexical_cues
+    if not cues:
+        cues = requirement.lexical_cues
     if not cues:
         return None
 
