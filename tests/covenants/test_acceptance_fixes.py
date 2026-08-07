@@ -23,7 +23,10 @@ from halyk_agent.domain.covenants.models import (
     ScopeKind,
     ScopeProvenance,
 )
-from halyk_agent.domain.covenants.modifiers import extract_modifiers
+from halyk_agent.domain.covenants.modifiers import (
+    extract_modifier_matches,
+    extract_modifiers,
+)
 from halyk_agent.domain.covenants.parse import (
     parse_threshold,
     related_party_phrase,
@@ -275,3 +278,146 @@ def test_scope_default_provenance_without_fake_evidence() -> None:
     assert scope.scope_kind is ScopeKind.BORROWER
     assert scope.provenance is ScopeProvenance.DEFAULT_BORROWER_BY_RULE
     assert scope.matched_text is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "определяемых на основании аудированной отчётности Заёмщика с учётом любой "
+            "переквалификации затрат в состав Процентных расходов, принятой аудиторами "
+            "Заёмщика для целей соблюдения ковенанта.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
+        ),
+        (
+            "определяемую на основании аудированной отчётности Заёмщика с учётом любой "
+            "корректировки по методу начисления или переквалификации периода, принятой "
+            "аудиторами Заёмщика для целей соблюдения ковенанта.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
+        ),
+        (
+            "суммы, отнесённые к данной статье в аудированной финансовой отчётности "
+            "Заёмщика с учётом переквалификаций, произведённых аудиторами Заёмщика для "
+            "целей соблюдения ковенантов.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
+        ),
+        (
+            "Суммы, переквалифицированные независимым аудитором Заёмщика в состав "
+            "финансовых или иных неоперационных статей, в счёт исполнения настоящего "
+            "ковенанта не засчитываются независимо от их первоначального отражения в учёте.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE,
+        ),
+    ],
+)
+def test_ru_modifier_families_from_source_phrasing(
+    text: str, expected: CovenantModifierKind
+) -> None:
+    matches = extract_modifier_matches(text)
+    assert any(m.kind is expected for m in matches)
+    hit = next(m for m in matches if m.kind is expected)
+    assert hit.quotes
+    for quote in hit.quotes:
+        assert quote in text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "Revenue is determined taking into account reclassifications made by the auditor.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
+        ),
+        (
+            "Amounts reclassified by the auditor as non-operating expenses are reflected.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
+        ),
+        (
+            "Amounts reclassified as financial items shall not be counted "
+            "toward covenant compliance.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE,
+        ),
+        (
+            "Revenue is subject to accrual adjustments approved for covenant measurement.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
+        ),
+        (
+            "The metric reflects period reclassification approved by the auditor.",
+            CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
+        ),
+    ],
+)
+def test_en_modifier_parity_positives(text: str, expected: CovenantModifierKind) -> None:
+    kinds = {m.kind for m in extract_modifier_matches(text)}
+    assert expected in kinds
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "переквалификация сотрудника на другую должность не влияет на штатное расписание",
+        "корректировка адреса компании отражена в реестре",
+        "period changed for administrative reporting only",
+        "auditor discussed the report with management",
+        "the company may reclassify departments next year",
+        "auditor discussed possible classifications without covenant effect",
+        "employee was reclassified to another role",
+        "administrative period adjustment for internal calendars",
+    ],
+)
+def test_modifier_negative_controls(text: str) -> None:
+    assert extract_modifier_matches(text) == ()
+
+
+def test_modifier_evidence_coupled_to_same_match() -> None:
+    text = (
+        "Пункт 6.2 Revenue. Для целей настоящей статьи под поступлениями по статье "
+        "«Выручка» понимаются суммы в аудированной финансовой отчётности Заёмщика "
+        "с учётом переквалификаций, произведённых аудиторами Заёмщика для целей "
+        "соблюдения ковенантов. Заёмщик обязуется поддерживать такие поступления "
+        "за период с 2025-01-01 по 2025-12-31 на уровне не менее $1,000,000.00."
+    )
+    matches = extract_modifier_matches(text)
+    assert matches
+    doc = make_document(raw_text=text, sha="m" * 64)
+    definition, failure, spans = compile_covenant_cell(
+        scenario_id="SX", clause_id="6.2", document=doc
+    )
+    assert failure is None, failure
+    assert definition is not None
+    assert definition.modifiers
+    by_id = {s.id: s for s in spans}
+    for mod in definition.modifiers:
+        assert mod.evidence_span_ids
+        for sid in mod.evidence_span_ids:
+            span = by_id[sid]
+            assert any(
+                q in text and (span.quote in q or q in span.quote or span.quote in text)
+                for q in matches[0].quotes
+            ) or (span.quote in text)
+
+
+def test_exclude_modifier_handles_distant_cues() -> None:
+    text = (
+        "Пункт 6.2 Revenue floor. Заёмщик обязуется поддерживать выручку за период "
+        "с 2025-01-01 по 2025-12-31 на уровне не менее $6,500,000.00. "
+        "Суммы, переквалифицированные независимым аудитором Заёмщика в состав "
+        "финансовых или иных неоперационных статей, в счёт исполнения настоящего "
+        "ковенанта не засчитываются независимо от их первоначального отражения в учёте."
+    )
+    matches = extract_modifier_matches(text)
+    assert any(m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE for m in matches)
+    hit = next(
+        m for m in matches if m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE
+    )
+    assert len(hit.quotes) >= 2
+    doc = make_document(raw_text=text, sha="n" * 64)
+    definition, failure, _ = compile_covenant_cell(scenario_id="SX", clause_id="6.2", document=doc)
+    assert failure is None, failure
+    assert definition is not None
+    mod = next(
+        m
+        for m in definition.modifiers
+        if m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE
+    )
+    assert mod.evidence_span_ids
+    assert len(mod.evidence_span_ids) >= 1

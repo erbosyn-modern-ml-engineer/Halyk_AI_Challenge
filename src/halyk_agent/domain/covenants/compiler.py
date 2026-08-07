@@ -18,7 +18,7 @@ from halyk_agent.domain.covenants.models import (
     CovenantModifier,
     ScopeProvenance,
 )
-from halyk_agent.domain.covenants.modifiers import extract_modifiers
+from halyk_agent.domain.covenants.modifiers import extract_modifier_matches
 from halyk_agent.domain.covenants.parse import (
     ThresholdRole,
     collect_threshold_candidates,
@@ -321,25 +321,22 @@ def compile_covenant_cell(
                     break
             activation = activation.model_copy(update={"evidence_span_ids": activation_spans})
 
-    modifiers = extract_modifiers(located.text)
     modifier_spans: list[str] = []
     enriched_mods: list[CovenantModifier] = []
-    for mod in modifiers:
-        # Best-effort phrase evidence from detail keywords already in extractor kinds.
-        needle = None
-        if "материал" in mod.detail.casefold() or "material" in mod.detail.casefold():
-            needle = "существенност"
-        elif "numerator" in mod.detail.casefold() or "denominator" in mod.detail.casefold():
-            needle = "числител"
-        elif "rejected" in mod.detail.casefold():
-            needle = "отклонён"
-        elif "exclude" in mod.detail.casefold():
-            needle = "исключ"
-        elif "include" in mod.detail.casefold():
-            needle = "переквалифицир"
-        ids = _clause_span(needle)
-        modifier_spans.extend(ids)
-        enriched_mods.append(mod.model_copy(update={"evidence_span_ids": ids}))
+    for match in extract_modifier_matches(located.text):
+        # Evidence comes from the same matcher event (exact quotes), not a second grammar.
+        ids: list[str] = []
+        for quote in match.quotes:
+            ids.extend(_clause_span(quote))
+        span_ids = tuple(dict.fromkeys(ids))
+        modifier_spans.extend(span_ids)
+        enriched_mods.append(
+            CovenantModifier(
+                kind=match.kind,
+                detail=match.detail,
+                evidence_span_ids=span_ids,
+            )
+        )
 
     evidence = CovenantEvidenceRefs(
         clause_span_ids=(located.span.id,),
