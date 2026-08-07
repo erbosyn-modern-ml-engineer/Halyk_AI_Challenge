@@ -109,6 +109,8 @@ exclude = ["tests/"]
 module = [
   "docling",
   "docling.*",
+  "pypdfium2",
+  "pypdfium2.*",
   "sentence_transformers",
   "sentence_transformers.*",
   "numpy",

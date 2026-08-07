@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     force_docling: bool = Field(default=False)
     docling_ocr_enabled: bool = Field(default=False)
     docling_table_structure_enabled: bool = Field(default=True)
+    # Selective OCR (Stage 5A.4) — explicit backend only; no silent fallback/download
+    ocr_backend: Literal["none", "tesseract_cli"] = Field(default="none")
+    ocr_languages: str = Field(default="eng+rus+kaz")
+    ocr_max_pages: int = Field(default=32, ge=1)
+    ocr_timeout_seconds: float = Field(default=60.0, gt=0.0)
+    ocr_render_scale: float = Field(default=2.0, gt=0.0)
+    ocr_psm: int = Field(default=6, ge=0, le=13)
     max_pdf_pages: int = Field(default=500, ge=1)
     max_page_characters: int = Field(default=500_000, ge=1)
     max_document_characters: int = Field(default=5_000_000, ge=1)

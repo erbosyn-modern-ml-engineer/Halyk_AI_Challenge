@@ -139,6 +139,32 @@ def build_parser() -> argparse.ArgumentParser:
     ocr_parser.add_argument("--documents", required=True, type=Path)
     ocr_parser.add_argument("--output", required=True, type=Path)
 
+    ocr_cmd = subparsers.add_parser(
+        "ocr",
+        help="Selective provenance-safe OCR (Stage 5A.4)",
+    )
+    ocr_sub = ocr_cmd.add_subparsers(dest="ocr_command", required=True)
+    ocr_probe = ocr_sub.add_parser("probe", help="Read-only OCR backend probe (no downloads)")
+    ocr_probe.add_argument("--json-output", action="store_true")
+    ocr_run = ocr_sub.add_parser("run", help="Selectively OCR blocking pages from parse output")
+    ocr_run.add_argument("--parsed", required=True, type=Path)
+    ocr_run.add_argument("--output", required=True, type=Path)
+    ocr_run.add_argument("--overwrite", action="store_true")
+    ocr_run.add_argument("--backend", default=None, help="Explicit backend (tesseract_cli)")
+    ocr_run.add_argument("--languages", default="eng+rus+kaz")
+    ocr_run.add_argument("--only-required", action="store_true", default=True)
+    ocr_run.add_argument("--max-pages", type=int, default=32)
+    ocr_run.add_argument("--timeout", type=float, default=60.0)
+    ocr_run.add_argument("--scale", type=float, default=2.0)
+    ocr_run.add_argument("--psm", type=int, default=6)
+    ocr_run.add_argument(
+        "--source-root",
+        action="append",
+        default=[],
+        type=Path,
+        help="Directory containing original PDF files (repeatable)",
+    )
+
     return parser
 
 
@@ -350,6 +376,46 @@ def main(argv: list[str] | None = None) -> int:
         backend = ocr_report.get("backend")
         available = backend.get("available") if isinstance(backend, dict) else None
         print(f"backend_available={available}")
+        return 0
+
+    if args.command == "ocr" and args.ocr_command == "probe":
+        from halyk_agent.app.ocr import run_ocr_probe
+
+        _report, text = run_ocr_probe(json_output=bool(args.json_output))
+        print(text, end="")
+        return 0 if _report.offline_ready_backend else 2
+
+    if args.command == "ocr" and args.ocr_command == "run":
+        from halyk_agent.app.ocr import SelectiveOcrError, run_selective_ocr
+
+        languages = [part for part in str(args.languages).replace(",", "+").split("+") if part]
+        try:
+            run_report = asyncio.run(
+                run_selective_ocr(
+                    args.parsed,
+                    args.output,
+                    overwrite=bool(args.overwrite),
+                    backend_name=args.backend,
+                    languages=languages,
+                    only_required=bool(args.only_required),
+                    max_pages=int(args.max_pages),
+                    timeout=float(args.timeout),
+                    scale=float(args.scale),
+                    psm=int(args.psm),
+                    source_roots=list(args.source_root),
+                )
+            )
+        except SelectiveOcrError as exc:
+            print(f"ocr run failed: {exc.message}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"ocr run failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        print("ocr run complete")
+        print(f"selected={run_report.selected_pages}")
+        print(f"attempted={run_report.attempted_pages}")
+        print(f"succeeded={run_report.succeeded_pages}")
+        print(f"remaining_blocking={run_report.remaining_blocking_pages}")
         return 0
 
     parser.error(f"unknown command: {args.command}")
