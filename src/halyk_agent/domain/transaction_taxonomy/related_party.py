@@ -36,6 +36,13 @@ class RelatedPartyDecision:
     fact_ids: tuple[str, ...] = ()
 
 
+def is_damaged_entity_name(name: str) -> bool:
+    """True when OCR/extraction damage makes identity unsafe to match."""
+    if not name:
+        return True
+    return "?" in name or "\ufffd" in name or "�" in name
+
+
 def _threshold_for_scenario(
     facts: tuple[FactRecord, ...], scenario_id: str
 ) -> tuple[Decimal | None, str | None]:
@@ -46,10 +53,20 @@ def _threshold_for_scenario(
     ]
     if not hits:
         return None, None
-    # One threshold expected per scenario; conflict handled by caller if multiple differ.
     payload = hits[0].payload
     assert isinstance(payload, RelatedPartyThresholdPayload)
     return payload.threshold_percent, hits[0].fact_id
+
+
+def scenario_has_damaged_ownership(facts: tuple[FactRecord, ...], scenario_id: str) -> bool:
+    for fact in facts:
+        if fact.scenario_id != scenario_id or fact.fact_kind is not FactKind.OWNERSHIP:
+            continue
+        payload = fact.payload
+        assert isinstance(payload, OwnershipPayload)
+        if is_damaged_entity_name(payload.entity_name):
+            return True
+    return False
 
 
 def qualifying_related_parties(
@@ -59,6 +76,7 @@ def qualifying_related_parties(
     Entities whose ownership meets scenario threshold.
 
     Comparator from Stage 5E source wording: \"X% or more\" / \"и более\" → >= .
+    Damaged entity names are excluded from the matchable qualifying set.
     """
     by_scenario: dict[str, list[FactRecord]] = {}
     for fact in facts:
@@ -74,6 +92,8 @@ def qualifying_related_parties(
                 continue
             payload = fact.payload
             assert isinstance(payload, OwnershipPayload)
+            if is_damaged_entity_name(payload.entity_name):
+                continue
             if payload.ownership_percent >= threshold:
                 keys = normalize_legal_name_keys(payload.entity_name)
                 out.append(
@@ -97,6 +117,7 @@ def resolve_related_party(
     qualifying: tuple[QualifyingRelatedParty, ...],
     has_threshold: bool,
     has_ownership: bool,
+    has_damaged_ownership: bool = False,
 ) -> RelatedPartyDecision:
     """Exact identity_key match only — never JSC==LLP fuzzy."""
     if scenario_id is None:
@@ -118,7 +139,6 @@ def resolve_related_party(
     cp_key = normalize_legal_name_keys(counterparty_raw).identity_key
     matches = [q for q in qualifying if q.scenario_id == scenario_id and q.identity_key == cp_key]
     if len(matches) > 1:
-        # Same identity key colliding on distinct entities — ambiguous.
         names = {m.entity_name for m in matches}
         if len(names) > 1:
             return RelatedPartyDecision(
@@ -134,8 +154,12 @@ def resolve_related_party(
             matched_entity=m.entity_name,
             fact_ids=m.fact_ids,
         )
-    # No exact identity match → not a known related party (FALSE), not UNKNOWN.
-    # UNKNOWN reserved for missing facts / ambiguous identity.
+    # Damaged ownership identities make closed-world FALSE unsafe for non-matches.
+    if has_damaged_ownership:
+        return RelatedPartyDecision(
+            status=RelatedPartyStatus.UNKNOWN,
+            basis=RelatedPartyBasis.DAMAGED_OWNERSHIP_IDENTITY,
+        )
     return RelatedPartyDecision(
         status=RelatedPartyStatus.FALSE,
         basis=RelatedPartyBasis.NO_IDENTITY_MATCH,

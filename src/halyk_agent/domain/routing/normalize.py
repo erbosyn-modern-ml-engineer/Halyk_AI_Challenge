@@ -112,6 +112,43 @@ def _preprocess(raw: str) -> tuple[str, list[CompanyAlias]]:
     return folded, aliases
 
 
+def _extract_legal_form(
+    tokens: tuple[str, ...],
+) -> tuple[tuple[str, ...], str | None, bool]:
+    """
+    Peel a trailing legal-form token, including punctuation variants.
+
+    Safe equivalents (same form class only):
+      LLP / LLP. / L.L.P. / L.L.P
+      JSC / J.S.C. / J.S.C
+    Distinct forms (JSC vs LLP vs TOO) remain distinct.
+    """
+    if not tokens:
+        return tokens, None, False
+
+    last = tokens[-1]
+    # Exact canon token (already clean).
+    if last in _LEGAL_FORM_CANON:
+        return tokens[:-1], _LEGAL_FORM_CANON[last], False
+
+    # Trailing period: "llp." → "llp"
+    stripped = last.rstrip(".")
+    if stripped in _LEGAL_FORM_CANON:
+        return tokens[:-1], _LEGAL_FORM_CANON[stripped], True
+
+    # Compact dotted single token: "l.l.p." / "j.s.c"
+    compact = last.replace(".", "")
+    if compact in _LEGAL_FORM_CANON:
+        return tokens[:-1], _LEGAL_FORM_CANON[compact], True
+
+    # Spaced dotted form after punctuation spacing: ("l.", "l.", "p.") → llp
+    if len(tokens) >= 3:
+        tail = "".join(tok.rstrip(".") for tok in tokens[-3:])
+        if tail in _LEGAL_FORM_CANON:
+            return tokens[:-3], _LEGAL_FORM_CANON[tail], True
+    return tokens, None, False
+
+
 def normalize_legal_name_keys(
     raw: str,
     *,
@@ -120,14 +157,13 @@ def normalize_legal_name_keys(
     """Build identity_key (form-preserving) and base_key (form-stripped)."""
     folded, aliases = _preprocess(raw)
     tokens = tokenize_normalized(folded)
-    legal_form: str | None = None
-    base_tokens = tokens
-    identity_tokens = tokens
-    if tokens and tokens[-1] in _LEGAL_FORM_CANON:
-        legal_form = _LEGAL_FORM_CANON[tokens[-1]]
-        base_tokens = tokens[:-1]
+    base_tokens, legal_form, punct_normalized = _extract_legal_form(tokens)
+    if legal_form is None:
+        identity_tokens = tokens
+        base_tokens = tokens
+    else:
         identity_tokens = (*base_tokens, legal_form)
-        if record_aliases and tokens[-1] != legal_form:
+        if record_aliases and (punct_normalized or tokens[-1:] != (legal_form,)):
             aliases.append(
                 CompanyAlias(
                     canonical_candidate=" ".join(identity_tokens),
