@@ -326,6 +326,17 @@ def resolve_authority(
                         DocumentLifecycleStatus.WORKING_PAPER,
                     }
                 ]
+                superseded_rejected = [
+                    d
+                    for d in candidates
+                    if d.lifecycle_status
+                    in {
+                        DocumentLifecycleStatus.SUPERSEDED,
+                        DocumentLifecycleStatus.OBSOLETE,
+                        DocumentLifecycleStatus.EXPIRED,
+                    }
+                ]
+                non_winning_rejected = drafts + superseded_rejected
                 if not finals:
                     decisions.append(
                         AuthorityDecision(
@@ -340,7 +351,9 @@ def resolve_authority(
                             status=AuthorityStatus.MISSING_AUTHORITY,
                             rule_id="RULE_MISSING_FINAL_AUDIT",
                             reason="no FINAL/APPROVED auditor or AUP document",
-                            rejected_document_ids=tuple(sorted(d.document_id for d in drafts)),
+                            rejected_document_ids=tuple(
+                                sorted(d.document_id for d in non_winning_rejected)
+                            ),
                             candidate_document_ids=tuple(sorted(c.document_id for c in candidates)),
                         )
                     )
@@ -394,7 +407,9 @@ def resolve_authority(
                                 status=AuthorityStatus.UNRESOLVED,
                                 rule_id="RULE_EQUAL_FINAL_AUDIT_CONFLICT",
                                 reason=conflict.reason,
-                                rejected_document_ids=tuple(sorted(d.document_id for d in drafts)),
+                                rejected_document_ids=tuple(
+                                    sorted(d.document_id for d in non_winning_rejected)
+                                ),
                                 candidate_document_ids=tuple(
                                     sorted(c.document_id for c in candidates)
                                 ),
@@ -416,12 +431,15 @@ def resolve_authority(
                         domain=domain,
                         status=AuthorityStatus.AUTHORITATIVE,
                         rule_id="RULE_FINAL_AUDIT_OUTRANKS_DRAFT",
-                        reason="FINAL/APPROVED auditor output outranks draft/preliminary",
+                        reason=(
+                            "FINAL/APPROVED auditor output outranks "
+                            "draft/preliminary/superseded/obsolete"
+                        ),
                         winning_document_ids=(winner.document_id,),
                         rejected_document_ids=tuple(
                             sorted(
                                 {
-                                    *(d.document_id for d in drafts),
+                                    *(d.document_id for d in non_winning_rejected),
                                     *(
                                         d.document_id
                                         for d in finals
@@ -436,7 +454,113 @@ def resolve_authority(
                 )
                 continue
 
-            # Generic domain resolution (KYC / GROUP / TREASURY).
+            if domain is AuthorityDomain.TREASURY_FACTS:
+                # Lifecycle ≠ authority: a borrower-specific TREASURY_MEMO working
+                # document may still supply TREASURY_FACTS without being FINAL.
+                active_treasury = [
+                    d
+                    for d in candidates
+                    if d.document_type is DocumentType.TREASURY_MEMO
+                    and d.lifecycle_status in _ACTIVE_LIFECYCLES
+                ]
+                working_treasury = [
+                    d
+                    for d in candidates
+                    if d.document_type is DocumentType.TREASURY_MEMO
+                    and d.lifecycle_status is DocumentLifecycleStatus.WORKING_PAPER
+                ]
+                unknown_treasury = [
+                    d
+                    for d in candidates
+                    if d.document_type is DocumentType.TREASURY_MEMO
+                    and d.lifecycle_status is DocumentLifecycleStatus.UNKNOWN
+                ]
+                rejected_treasury = [
+                    d
+                    for d in candidates
+                    if d.lifecycle_status
+                    in {
+                        DocumentLifecycleStatus.SUPERSEDED,
+                        DocumentLifecycleStatus.OBSOLETE,
+                        DocumentLifecycleStatus.EXPIRED,
+                        DocumentLifecycleStatus.DRAFT,
+                        DocumentLifecycleStatus.PRELIMINARY,
+                    }
+                ]
+                pool = active_treasury or working_treasury or unknown_treasury
+                if not pool:
+                    continue
+                if len(pool) > 1:
+                    conflict = AuthorityConflict(
+                        conflict_id=deterministic_id(
+                            "authority-conflict-v1",
+                            scenario_id,
+                            domain.value,
+                            *sorted(d.document_id for d in pool),
+                        ),
+                        scenario_id=scenario_id,
+                        domain=domain,
+                        candidate_document_ids=tuple(sorted(d.document_id for d in pool)),
+                        reason="multiple treasury memo candidates without supersession",
+                    )
+                    conflicts.append(conflict)
+                    decisions.append(
+                        AuthorityDecision(
+                            decision_id=deterministic_id(
+                                "authority-decision-v1",
+                                scenario_id,
+                                domain.value,
+                                "unresolved",
+                            ),
+                            scenario_id=scenario_id,
+                            domain=domain,
+                            status=AuthorityStatus.UNRESOLVED,
+                            rule_id="RULE_EQUAL_AUTHORITATIVE_CONFLICT",
+                            reason=conflict.reason,
+                            rejected_document_ids=tuple(
+                                sorted(d.document_id for d in rejected_treasury)
+                            ),
+                            candidate_document_ids=tuple(sorted(c.document_id for c in candidates)),
+                        )
+                    )
+                    continue
+                winner = pool[0]
+                if active_treasury:
+                    rule_id = "RULE_TREASURY_FACTS_ACTIVE"
+                    reason = "single active treasury memo for TREASURY_FACTS"
+                elif working_treasury:
+                    rule_id = "RULE_TREASURY_MEMO_WORKING_AUTHORITY"
+                    reason = (
+                        "borrower-specific TREASURY_MEMO working document "
+                        "authoritative for TREASURY_FACTS"
+                    )
+                else:
+                    rule_id = "RULE_TREASURY_MEMO_UNKNOWN_AUTHORITY"
+                    reason = "single TREASURY_MEMO candidate without contradictory lifecycle"
+                decisions.append(
+                    AuthorityDecision(
+                        decision_id=deterministic_id(
+                            "authority-decision-v1",
+                            scenario_id,
+                            domain.value,
+                            winner.document_id,
+                        ),
+                        scenario_id=scenario_id,
+                        domain=domain,
+                        status=AuthorityStatus.AUTHORITATIVE,
+                        rule_id=rule_id,
+                        reason=reason,
+                        winning_document_ids=(winner.document_id,),
+                        rejected_document_ids=tuple(
+                            sorted(d.document_id for d in rejected_treasury)
+                        ),
+                        candidate_document_ids=tuple(sorted(c.document_id for c in candidates)),
+                        evidence_span_ids=winner.evidence_span_ids,
+                    )
+                )
+                continue
+
+            # Generic domain resolution (KYC / GROUP).
             active_generic = [d for d in candidates if d.lifecycle_status in _ACTIVE_LIFECYCLES]
             # KYC dossiers default CURRENT even without markers.
             if domain is AuthorityDomain.KYC_RELATIONSHIPS and not active_generic:
