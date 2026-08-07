@@ -91,16 +91,22 @@ def _build_gateway(
 ) -> StructuredModelGateway | None:
     if not allow_network_models:
         return None
+    max_external = settings.llm_max_external_attempts
+    if settings.llm_max_calls is not None:
+        max_external = settings.llm_max_calls
+    max_thinking = settings.llm_max_thinking_escalations
+    if settings.llm_escalation_max_calls is not None:
+        max_thinking = settings.llm_escalation_max_calls
     cfg = LlmGatewayConfig(
         primary_provider=settings.llm_primary_provider,
         primary_model=settings.llm_primary_model,
         escalation_provider=settings.llm_escalation_provider,
         escalation_model=settings.llm_escalation_model,
         timeout_seconds=settings.llm_timeout_seconds,
-        max_calls=settings.llm_max_calls,
+        max_external_attempts=max_external,
+        max_thinking_escalations=max_thinking,
         max_concurrency=settings.llm_max_concurrency,
         max_retries=settings.llm_max_retries,
-        escalation_max_calls=settings.llm_escalation_max_calls,
         temperature=settings.llm_temperature,
         cache_dir=cache_dir,
         allow_network=True,
@@ -188,7 +194,9 @@ def facts_from_paths(
         covenant_definitions_hash=definitions_hash,
     )
 
-    stage_dir = Path(tempfile.mkdtemp(prefix=".facts-stage-", dir=str(output_dir.parent)))
+    stage_parent = output_dir.parent
+    stage_parent.mkdir(parents=True, exist_ok=True)
+    stage_dir = Path(tempfile.mkdtemp(prefix=".facts-stage-", dir=str(stage_parent)))
     try:
         write_fact_outputs(report, stage_dir)
         if output_dir.exists() and any(output_dir.iterdir()):
@@ -206,10 +214,15 @@ def print_facts_summary(report: FactExtractionReport) -> None:
     print("fact extraction complete")
     print(f"scenarios={m.scenario_count}")
     print(f"requirements={m.requirement_count}")
+    print(f"semantic_required={m.semantic_required_count}")
+    print(f"source_triggered={m.source_triggered_count}")
+    print(f"speculative={m.speculative_count}")
     print(f"candidates={m.candidate_count}")
     print(f"accepted={m.accepted_count}")
     print(f"rejected={m.rejected_count}")
     print(f"unresolved={m.unresolved_count}")
+    print(f"needs_model={m.needs_model_count}")
+    print(f"confirmed_none={m.confirmed_none_count}")
     print(f"conflicts={m.conflict_count}")
     print(f"model_calls={m.model_call_count}")
     print(f"deterministic_accepted={m.deterministic_accepted_count}")

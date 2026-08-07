@@ -89,10 +89,16 @@ class DiskExtractionCache:
         result: StructuredExtractionResult,
         provider: str,
         model: str,
+        gen_config: dict[str, Any] | None = None,
     ) -> None:
         path = self._path(key)
         if path is None:
             return
+        # Never persist reasoning_content — strip if a caller accidentally embeds it.
+        result_data = result.model_dump(mode="json")
+        if isinstance(result_data.get("payload"), dict):
+            result_data["payload"].pop("reasoning_content", None)
+            result_data["payload"].pop("reasoning", None)
         payload = {
             "meta": {
                 "cache_version": MODEL_CACHE_VERSION,
@@ -103,8 +109,9 @@ class DiskExtractionCache:
                 "window_hash": request.window_hash,
                 "prompt_version": request.prompt_version,
                 "schema_version": request.schema_version,
+                "gen_config": gen_config or {},
             },
-            "result": result.model_dump(mode="json"),
+            "result": result_data,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")

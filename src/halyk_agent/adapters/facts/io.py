@@ -62,6 +62,7 @@ def write_fact_outputs(report: FactExtractionReport, output_dir: Path) -> dict[s
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
         "requirements": output_dir / "fact_requirements.jsonl",
+        "requirement_results": output_dir / "fact_requirement_results.jsonl",
         "candidates": output_dir / "fact_candidates.jsonl",
         "accepted": output_dir / "accepted_facts.jsonl",
         "rejected": output_dir / "rejected_facts.jsonl",
@@ -72,6 +73,7 @@ def write_fact_outputs(report: FactExtractionReport, output_dir: Path) -> dict[s
         "summary": output_dir / "fact_extraction_summary.md",
     }
     _atomic_write(paths["requirements"], _jsonl(report.requirements))
+    _atomic_write(paths["requirement_results"], _jsonl(report.requirement_results))
     _atomic_write(paths["candidates"], _jsonl(report.candidates))
     _atomic_write(paths["accepted"], _jsonl(report.accepted_facts))
     _atomic_write(paths["rejected"], _jsonl(report.rejected_facts))
@@ -93,10 +95,15 @@ def render_summary_markdown(report: FactExtractionReport) -> str:
         "",
         f"- scenarios: {m.scenario_count}",
         f"- requirements: {m.requirement_count}",
+        f"- semantic_required: {m.semantic_required_count}",
+        f"- source_triggered: {m.source_triggered_count}",
+        f"- speculative: {m.speculative_count}",
         f"- candidates: {m.candidate_count}",
         f"- accepted: {m.accepted_count}",
         f"- rejected: {m.rejected_count}",
         f"- unresolved: {m.unresolved_count}",
+        f"- needs_model: {m.needs_model_count}",
+        f"- confirmed_none: {m.confirmed_none_count}",
         f"- conflicts: {m.conflict_count}",
         f"- model_calls: {m.model_call_count}",
         f"- deterministic_accepted: {m.deterministic_accepted_count}",
@@ -105,11 +112,19 @@ def render_summary_markdown(report: FactExtractionReport) -> str:
         f"- allow_network_models: {m.allow_network_models}",
         f"- schema_version: `{m.schema_version}`",
         "",
-        "## Accepted by kind",
+        "## Terminal states",
         "",
     ]
+    for key, count in sorted(m.terminal_state_counts.items()):
+        lines.append(f"- {key}: {count}")
+    lines.extend(["", "## Accepted by kind", ""])
     for key, count in sorted(kind_counts.items()):
         lines.append(f"- {key}: {count}")
+    needs = [r for r in report.requirement_results if r.terminal_state.value == "NEEDS_MODEL"]
+    if needs:
+        lines.extend(["", "## NEEDS_MODEL (sample)", ""])
+        for item in needs[:20]:
+            lines.append(f"- `{item.fact_kind.value}` / `{item.reason_code}`")
     if report.unresolved_requirement_ids:
         lines.extend(["", "## Unresolved requirements (sample)", ""])
         for rid in report.unresolved_requirement_ids[:20]:
