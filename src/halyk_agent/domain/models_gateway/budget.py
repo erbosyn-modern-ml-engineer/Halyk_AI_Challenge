@@ -15,8 +15,10 @@ class ExternalAttemptBudget:
     """
     Hard cap on real HTTP attempts.
 
-    Call ``claim()`` immediately BEFORE each HTTP request. Retries and
-    escalations must each claim their own permit. Never infer cost after the fact.
+    Provider contract: any runtime provider that performs internal retries MUST
+    call ``claim()`` / ``try_claim()`` immediately BEFORE each actual HTTP
+    request (including empty-content retries). Escalations also claim one permit
+    each. Never infer cost after the fact from call deltas.
     """
 
     max_attempts: int

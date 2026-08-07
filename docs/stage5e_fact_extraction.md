@@ -1,6 +1,6 @@
 # Stage 5E — Structured Fact Extraction
 
-**Status:** `STAGE_5E_2_CLOSED` (source-fidelity + model-eligibility closure; DeepSeek wired offline; no live API verification in CI)
+**Status:** `STAGE_5E_3_OWNERSHIP_GUARD` (ownership semantic table context; DeepSeek wired offline; no live API verification in CI)
 
 ## Architecture
 
@@ -35,6 +35,15 @@ CovenantDefinitions + AuthorityDecisions (+ winning docs for source triggers)
 
 **Defaults:** deterministic-only, `allow_network=False`, fail-closed.
 No ledger mutation. No covenant actuals (Stage 5F). No `ground_truth.json` reads.
+
+### Stage 5E.3 ownership semantic guard
+
+Ownership percentages require **local** table/section context meaning
+ownership/voting rights (e.g. «Доля голосующих прав»). Collateral / pledged-asset
+tables (e.g. «Доля активов в залоге») must never emit `OwnershipPayload`.
+Nearest preceding header wins; mojibake-normalized headers use the same gate.
+Quoted bare legal forms (`"LLP"`, `«ТОО»`) are rejected. DeepSeek JSON examples
+are synthetic only (no public corpus entities/amounts).
 
 ### Stage 5E.2 closure notes
 
