@@ -14,7 +14,7 @@ from halyk_agent.domain.authority.constants import (
     TAXONOMY_RULE_VERSION,
 )
 from halyk_agent.domain.authority.families import build_families
-from halyk_agent.domain.authority.metadata import extract_metadata
+from halyk_agent.domain.authority.metadata import extract_metadata_bundle
 from halyk_agent.domain.authority.models import (
     AuthorityDomain,
     AuthorityEvidenceAssertion,
@@ -54,29 +54,36 @@ def _build_evidence(
         if doc is None or not doc.source_sha256:
             continue
         scenario_id = item.scenario_ids[0] if len(item.scenario_ids) == 1 else None
+        meta = metadata_by_id.get(item.document_id)
+        meta_span_ids = set(meta.evidence_span_ids) if meta is not None else set()
         for span_id in item.evidence_span_ids:
             span = spans_by_id.get(span_id)
             if span is None:
                 continue
+            kind = "METADATA_SIGNAL" if span_id in meta_span_ids else "TAXONOMY_LIFECYCLE"
+            rule_id = item.rule_id if kind == "TAXONOMY_LIFECYCLE" else "RULE_METADATA_EVIDENCE"
+            reason_code = (
+                item.reason_code if kind == "TAXONOMY_LIFECYCLE" else "METADATA_EVIDENCE_SPAN"
+            )
             assertions.append(
                 AuthorityEvidenceAssertion(
                     assertion_id=deterministic_id(
                         "authority-evidence-v1",
                         item.document_id,
                         span_id,
-                        item.rule_id,
-                        item.reason_code,
+                        rule_id,
+                        reason_code,
                     ),
                     document_id=item.document_id,
                     scenario_id=scenario_id,
-                    assertion_kind="TAXONOMY_LIFECYCLE",
+                    assertion_kind=kind,
                     document_type=item.document_type,
                     lifecycle_status=item.lifecycle_status,
                     authority_domain=item.authority_domains[0]
                     if item.authority_domains
                     else AuthorityDomain.NONE,
-                    rule_id=item.rule_id,
-                    reason_code=item.reason_code,
+                    rule_id=rule_id,
+                    reason_code=reason_code,
                     evidence_span_id=span_id,
                     raw_quote=span.quote,
                     page_number=span.page_number,
@@ -85,7 +92,40 @@ def _build_evidence(
                     ocr_backend_identity=span.ocr_backend_identity,
                 )
             )
-    # Dedup
+        if meta is not None:
+            for span_id in meta.evidence_span_ids:
+                if span_id in item.evidence_span_ids:
+                    continue
+                span = spans_by_id.get(span_id)
+                if span is None:
+                    continue
+                assertions.append(
+                    AuthorityEvidenceAssertion(
+                        assertion_id=deterministic_id(
+                            "authority-evidence-v1",
+                            item.document_id,
+                            span_id,
+                            "RULE_METADATA_EVIDENCE",
+                            "METADATA_EVIDENCE_SPAN",
+                        ),
+                        document_id=item.document_id,
+                        scenario_id=scenario_id,
+                        assertion_kind="METADATA_SIGNAL",
+                        document_type=item.document_type,
+                        lifecycle_status=item.lifecycle_status,
+                        authority_domain=item.authority_domains[0]
+                        if item.authority_domains
+                        else AuthorityDomain.NONE,
+                        rule_id="RULE_METADATA_EVIDENCE",
+                        reason_code="METADATA_EVIDENCE_SPAN",
+                        evidence_span_id=span_id,
+                        raw_quote=span.quote,
+                        page_number=span.page_number,
+                        text_origin=span.text_origin.value,
+                        source_sha256=doc.source_sha256,
+                        ocr_backend_identity=span.ocr_backend_identity,
+                    )
+                )
     by_id = {a.assertion_id: a for a in assertions}
     return tuple(sorted(by_id.values(), key=lambda a: a.assertion_id))
 
@@ -120,18 +160,16 @@ def run_authority(
     all_spans: list[EvidenceSpan] = []
 
     for document in docs_sorted:
-        meta = extract_metadata(document)
+        meta_bundle = extract_metadata_bundle(document)
+        meta = meta_bundle.metadata
         metadata_list.append(meta)
-        # Rebuild metadata spans into all_spans via document pages is not needed
-        # if we only keep IDs from classification spans; still collect classify spans.
+        all_spans.extend(meta_bundle.spans)
         link = links_by_doc.get(document.document_id)
         bundle = classify_document(document, metadata=meta, link=link)
         classifications.append(bundle.classification)
         all_spans.extend(bundle.spans)
 
     metadata_by_id = {m.document_id: m for m in metadata_list}
-    # Attach metadata evidence spans if present in identity catalogue — skipped;
-    # classification spans are authoritative for taxonomy evidence.
 
     families = build_families(
         classifications=tuple(classifications),
@@ -141,7 +179,6 @@ def run_authority(
     scenario_ids = sorted(
         {scenario_id for link in document_links for scenario_id in link.scenario_ids}
     )
-    # Also include scenarios that appear only on resolved links.
     decisions, conflicts = resolve_authority(
         classifications=tuple(classifications),
         metadata_by_id=metadata_by_id,

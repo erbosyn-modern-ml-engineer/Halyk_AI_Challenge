@@ -5,11 +5,20 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date
 
 from halyk_agent.domain.authority.evidence import find_first_span
 from halyk_agent.domain.authority.models import DocumentMetadata
+from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.parsing import CanonicalDocument
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataBundle:
+    metadata: DocumentMetadata
+    spans: tuple[EvidenceSpan, ...]
+
 
 _DATE_RE = re.compile(
     r"(?i)(?:от\s+|dated\s+|date\s*[:=]?\s*|as of\s+|effective\s+(?:date\s*)?[:=]?\s*)?"
@@ -90,15 +99,27 @@ def _title_from_head(head: str) -> str | None:
 
 def extract_metadata(document: CanonicalDocument) -> DocumentMetadata:
     """Extract typed metadata with optional evidence span IDs."""
+    return extract_metadata_bundle(document).metadata
+
+
+def extract_metadata_bundle(document: CanonicalDocument) -> MetadataBundle:
+    """Extract typed metadata and persistable evidence spans."""
     head = _first_page_text(document)
     blob = "\n".join(page.raw_text or "" for page in document.pages)
+    spans: list[EvidenceSpan] = []
     span_ids: list[str] = []
+
+    def _remember(span: EvidenceSpan | None) -> None:
+        if span is None or span.id in span_ids:
+            return
+        spans.append(span)
+        span_ids.append(span.id)
 
     title = _title_from_head(head)
     if title:
         hit = find_first_span(document, pattern=title[:80] if len(title) > 80 else title)
         if hit.span is not None:
-            span_ids.append(hit.span.id)
+            _remember(hit.span)
             title = hit.span.quote
 
     agreement_number: str | None = None
@@ -106,24 +127,21 @@ def extract_metadata(document: CanonicalDocument) -> DocumentMetadata:
     if m:
         agreement_number = m.group(1) if m.lastindex else m.group(0)
         hit = find_first_span(document, pattern=agreement_number)
-        if hit.span is not None:
-            span_ids.append(hit.span.id)
+        _remember(hit.span)
 
     version_indicator: str | None = None
     vm = _VERSION.search(head)
     if vm:
         version_indicator = vm.group(0).strip()[:80]
         hit = find_first_span(document, pattern=version_indicator[:40])
-        if hit.span is not None:
-            span_ids.append(hit.span.id)
+        _remember(hit.span)
 
     report_number: str | None = None
     rm = _REPORT_NO.search(head)
     if rm:
         report_number = rm.group(0).strip()[:100]
         hit = find_first_span(document, pattern=report_number[:40])
-        if hit.span is not None:
-            span_ids.append(hit.span.id)
+        _remember(hit.span)
 
     document_date: str | None = None
     effective_date: str | None = None
@@ -163,7 +181,7 @@ def extract_metadata(document: CanonicalDocument) -> DocumentMetadata:
         hit = find_first_span(document, pattern=marker)
         if hit.span is None:
             continue
-        span_ids.append(hit.span.id)
+        _remember(hit.span)
         low = marker.casefold()
         if any(x in low for x in ("недействующ", "не применя", "supersed", "obsolete")):
             superseded_marker = hit.span.quote
@@ -178,15 +196,7 @@ def extract_metadata(document: CanonicalDocument) -> DocumentMetadata:
     if pm:
         period_covered = pm.group(0).strip()[:120]
 
-    # Deduplicate span ids while preserving order.
-    seen: set[str] = set()
-    unique_spans: list[str] = []
-    for span_id in span_ids:
-        if span_id not in seen:
-            seen.add(span_id)
-            unique_spans.append(span_id)
-
-    return DocumentMetadata(
+    metadata = DocumentMetadata(
         document_id=document.document_id,
         document_version_id=document.document_version_id,
         source_file=document.source_file,
@@ -202,5 +212,6 @@ def extract_metadata(document: CanonicalDocument) -> DocumentMetadata:
         agreement_number=agreement_number,
         draft_final_marker=draft_final_marker,
         superseded_marker=superseded_marker,
-        evidence_span_ids=tuple(unique_spans),
+        evidence_span_ids=tuple(span_ids),
     )
+    return MetadataBundle(metadata=metadata, spans=tuple(spans))
