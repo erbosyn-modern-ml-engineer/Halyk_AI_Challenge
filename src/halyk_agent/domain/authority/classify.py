@@ -6,7 +6,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from halyk_agent.domain.authority.evidence import require_span_or_none
+from halyk_agent.domain.authority.evidence import (
+    find_first_span_non_negated,
+    require_span_or_none,
+)
 from halyk_agent.domain.authority.models import (
     AuthorityDomain,
     ClassificationConfidence,
@@ -46,6 +49,14 @@ def _lifecycle_from_markers(
     doc_type: DocumentType,
     metadata: DocumentMetadata,
 ) -> tuple[DocumentLifecycleStatus, EvidenceSpan | None, str]:
+    """
+    Resolve lifecycle using explicit signal strength.
+
+    SUPERSEDED/OBSOLETE and DRAFT/PROJECT outrank weak field phrases such as
+    Effective Date or incidental body words like "final"/"утверждённый".
+    Strong execution / strong final status markers are required to establish
+    CURRENT_EXECUTED / FINAL.
+    """
     superseded = require_span_or_none(
         document,
         patterns=(
@@ -67,14 +78,30 @@ def _lifecycle_from_markers(
         if span is not None:
             return DocumentLifecycleStatus.SUPERSEDED, span, "EXPLICIT_SUPERSEDED"
 
+    working_doc = require_span_or_none(
+        document,
+        patterns=(
+            "РАБОЧИЙ ДОКУМЕНТ",
+            "Рабочий документ",
+            "рабочий документ",
+            "внутренний рабочий документ",
+            "ДЛЯ ВНУТРЕННЕГО ПОЛЬЗОВАНИЯ",
+            "WORKING DOCUMENT",
+            "Working Document",
+            "working document",
+        ),
+    )
+
     draft = require_span_or_none(
         document,
         patterns=(
             "ПРОЕКТ — ПРОМЕЖУТОЧНАЯ",
             "ПРОЕКТ —",
+            "ПРОЕКТ",
             "черновик",
             "ЧЕРНОВИК",
             "DRAFT",
+            "Draft",
             "draft",
             "preliminary report",
             "Preliminary Report",
@@ -87,56 +114,75 @@ def _lifecycle_from_markers(
             "interim worksheet",
         ),
     )
-    final = require_span_or_none(
-        document,
-        patterns=(
-            "окончательн",
-            "итоговый",
-            "утвержденн",
-            "утверждённ",
-            "FINAL",
-            "Final Report",
-            "final report",
-        ),
-    )
-    executed = require_span_or_none(
+
+    # Strong execution-status markers only (not Effective Date field/clause).
+    strong_executed = require_span_or_none(
         document,
         patterns=(
             "ИСПОЛНИТЕЛЬНЫЙ ЭКЗЕМПЛЯР",
+            "ДЕЙСТВУЮЩАЯ РЕДАКЦИЯ",
+            "EXECUTED COPY",
+            "Executed Copy",
+            "SIGNED AND EXECUTED",
+            "Signed and Executed",
             "CURRENT_EXECUTED",
-            "executed",
-            "Executed",
-            "вступил в силу",
-            "effective date",
-            "Effective Date",
-            "Дата вступления в силу",
-            "күшіне ену",
+        ),
+    )
+
+    # Strong final-status markers; reject negated local contexts.
+    # Do NOT use unbounded body words final/окончательн*/итогов*/утверждённ*.
+    strong_final = find_first_span_non_negated(
+        document,
+        patterns=(
+            "FINAL AUDITOR'S REPORT",
+            "Final Auditor's Report",
+            "FINAL AUDITOR REPORT",
+            "FINAL REPORT",
+            "Final Report",
+            "окончательный аудиторский отчет",
+            "окончательный аудиторский отчёт",
+            "окончательный отчет",
+            "окончательный отчёт",
+            "итоговый аудиторский отчет",
+            "итоговый аудиторский отчёт",
+            "окончательной позицией аудитора",
+            "окончательная позиция аудитора",
+            "являются окончательной позицией",
+            "является окончательной позицией",
+            "FINAL AUP",
+            "Final AUP Report",
+            "ЭКЗЕМПЛЯР АУДИТОРА",
         ),
     )
 
     if doc_type is DocumentType.LOAN_AGREEMENT:
-        # Explicit executed/current outranks incidental draft vocabulary in clauses.
-        if executed is not None:
-            return DocumentLifecycleStatus.CURRENT_EXECUTED, executed, "EXPLICIT_EXECUTED"
+        # Explicit DRAFT/PROJECT must not be overridden by Effective Date clauses.
         if draft is not None:
             return DocumentLifecycleStatus.DRAFT, draft, "EXPLICIT_DRAFT"
+        if strong_executed is not None:
+            return (
+                DocumentLifecycleStatus.CURRENT_EXECUTED,
+                strong_executed,
+                "STRONG_EXECUTION_STATUS",
+            )
+        # Weak effective-date fields are metadata only — not CURRENT_EXECUTED.
         return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
 
     if doc_type in {
         DocumentType.AUDITOR_REPORT,
         DocumentType.AGREED_UPON_PROCEDURES_REPORT,
     }:
-        if draft is not None and final is None:
-            # Distinguish working paper / preliminary.
+        # Explicit draft/preliminary outranks weak body "final" mentions.
+        if draft is not None:
             low = (draft.quote or "").casefold()
             if "working" in low or "рабоч" in low:
                 return DocumentLifecycleStatus.WORKING_PAPER, draft, "EXPLICIT_WORKING_PAPER"
             if "prelimin" in low or "промежуточ" in low or "предварит" in low:
                 return DocumentLifecycleStatus.PRELIMINARY, draft, "EXPLICIT_PRELIMINARY"
             return DocumentLifecycleStatus.DRAFT, draft, "EXPLICIT_DRAFT"
-        if final is not None:
-            return DocumentLifecycleStatus.FINAL, final, "EXPLICIT_FINAL"
-        # Independent auditor engagement letters without draft markers → FINAL.
+        if strong_final is not None:
+            return DocumentLifecycleStatus.FINAL, strong_final, "STRONG_FINAL_STATUS"
+        # Engagement packaging without draft markers → FINAL for auditor reports.
         if doc_type is DocumentType.AUDITOR_REPORT:
             audit_finalish = require_span_or_none(
                 document,
@@ -151,17 +197,33 @@ def _lifecycle_from_markers(
                 return DocumentLifecycleStatus.FINAL, audit_finalish, "AUDITOR_ENGAGEMENT_FINAL"
         return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
 
+    if doc_type is DocumentType.TREASURY_MEMO:
+        if working_doc is not None:
+            return DocumentLifecycleStatus.WORKING_PAPER, working_doc, "EXPLICIT_WORKING_DOCUMENT"
+        if draft is not None:
+            return DocumentLifecycleStatus.DRAFT, draft, "EXPLICIT_DRAFT"
+        # Do not infer FINAL from unrelated "утверждённый" body nouns.
+        if strong_final is not None:
+            return DocumentLifecycleStatus.FINAL, strong_final, "STRONG_FINAL_STATUS"
+        return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
+
     if doc_type is DocumentType.KYC_DOSSIER:
         if draft is not None:
             return DocumentLifecycleStatus.DRAFT, draft, "EXPLICIT_DRAFT"
-        if executed is not None or final is not None:
-            return DocumentLifecycleStatus.CURRENT, executed or final, "KYC_CURRENT"
+        if strong_executed is not None or strong_final is not None:
+            return (
+                DocumentLifecycleStatus.CURRENT,
+                strong_executed or strong_final,
+                "KYC_CURRENT",
+            )
         return DocumentLifecycleStatus.CURRENT, None, "KYC_DEFAULT_CURRENT"
 
+    if working_doc is not None:
+        return DocumentLifecycleStatus.WORKING_PAPER, working_doc, "EXPLICIT_WORKING_DOCUMENT"
     if draft is not None:
         return DocumentLifecycleStatus.DRAFT, draft, "EXPLICIT_DRAFT"
-    if final is not None:
-        return DocumentLifecycleStatus.FINAL, final, "EXPLICIT_FINAL"
+    if strong_final is not None:
+        return DocumentLifecycleStatus.FINAL, strong_final, "STRONG_FINAL_STATUS"
     return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
 
 
@@ -169,6 +231,14 @@ def _domains_for(
     doc_type: DocumentType,
     lifecycle: DocumentLifecycleStatus,
 ) -> tuple[AuthorityDomain, ...]:
+    # Treasury working memos may still establish TREASURY_FACTS (type ≠ lifecycle).
+    # DRAFT is not granted here — only WORKING_PAPER / UNKNOWN keep domain candidacy.
+    if doc_type is DocumentType.TREASURY_MEMO and lifecycle in {
+        DocumentLifecycleStatus.WORKING_PAPER,
+        DocumentLifecycleStatus.UNKNOWN,
+    }:
+        return (AuthorityDomain.TREASURY_FACTS,)
+
     if lifecycle in {
         DocumentLifecycleStatus.SUPERSEDED,
         DocumentLifecycleStatus.OBSOLETE,
