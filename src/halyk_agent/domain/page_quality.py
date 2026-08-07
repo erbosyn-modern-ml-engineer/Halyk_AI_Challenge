@@ -171,10 +171,12 @@ def page_image_count_from_pypdf(page: object) -> tuple[int, ImageVisibility, lis
     counts: list[int] = []
 
     # Prefer page.images when available (pypdf >= 3.x).
+    # Use len() only — materialising the lazy sequence constructs ImageFile objects
+    # and may decode embedded images merely to count them.
     try:
         images = getattr(page, "images", None)
         if images is not None:
-            counts.append(len(list(images)))
+            counts.append(len(images))
     except Exception as exc:
         warnings.append(f"page.images_failed:{exc.__class__.__name__}")
 

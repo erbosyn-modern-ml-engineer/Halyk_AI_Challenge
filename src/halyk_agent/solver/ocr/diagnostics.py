@@ -11,6 +11,7 @@ from halyk_agent.domain.page_quality import (
     PageQualityState,
     PageSignals,
     classify_signals,
+    is_blocking_page_quality,
     page_image_count_from_pypdf,
 )
 from halyk_agent.solver.failures import FailureEvent, FailureMode
@@ -102,7 +103,7 @@ def run_ocr_diagnostic(documents_dir: Path, output_dir: Path) -> dict[str, Any]:
     for pdf in pdfs:
         pages = diagnose_pdf(pdf)
         total_pages += len(pages)
-        required = [p for p in pages if p["state"] == PageQualityState.OCR_REQUIRED.value]
+        required = [p for p in pages if is_blocking_page_quality(PageQualityState(p["state"]))]
         ocr_required_pages += len(required)
         file_reports.append(
             {
