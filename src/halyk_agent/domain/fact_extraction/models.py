@@ -34,6 +34,25 @@ class FactKind(StrEnum):
     TRANSACTION_TREATMENT = "TRANSACTION_TREATMENT"
 
 
+class DerivationKind(StrEnum):
+    """How a requirement was derived. SPECULATIVE is forbidden."""
+
+    SEMANTIC_REQUIRED = "SEMANTIC_REQUIRED"
+    SOURCE_TRIGGERED_CONDITIONAL = "SOURCE_TRIGGERED_CONDITIONAL"
+
+
+class RequirementTerminalState(StrEnum):
+    RESOLVED = "RESOLVED"
+    CONFIRMED_NONE = "CONFIRMED_NONE"
+    ABSENT_FROM_SOURCE = "ABSENT_FROM_SOURCE"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    NEEDS_MODEL = "NEEDS_MODEL"
+    UNRESOLVED_AMBIGUOUS = "UNRESOLVED_AMBIGUOUS"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    FAILED_VALIDATION = "FAILED_VALIDATION"
+
+
 class ExtractionMethod(StrEnum):
     DETERMINISTIC = "DETERMINISTIC"
     LLM_PRIMARY = "LLM_PRIMARY"
@@ -70,6 +89,11 @@ class SubsidiaryKind(StrEnum):
     RESTRICTED = "RESTRICTED"
     UNRESTRICTED = "UNRESTRICTED"
     GROUP_MEMBER = "GROUP_MEMBER"
+
+
+class RateSource(StrEnum):
+    EXPLICIT = "EXPLICIT"
+    NOT_STATED = "NOT_STATED"
 
 
 class MoneyAmount(BaseModel):
@@ -174,24 +198,36 @@ class SubsidiaryStatusPayload(BaseModel):
 
 
 class FxRatePayload(BaseModel):
+    """FX / conversion fact — source-faithful; never invent an unstated rate."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal[FactKind.FX_RATE] = FactKind.FX_RATE
     from_currency: NonEmptyStr
     to_currency: NonEmptyStr
-    rate: ExactDecimal
+    source_amount: MoneyAmount | None = None
+    settlement_amount: MoneyAmount | None = None
+    explicit_rate: ExactDecimal | None = None
+    rate_source: RateSource = RateSource.NOT_STATED
     as_of_date: date | None = None
     transaction_id: NonEmptyStr | None = None
 
-    @field_validator("rate", mode="before")
+    @field_validator("explicit_rate", mode="before")
     @classmethod
     def _no_float(cls, value: Any) -> Any:
+        if value is None:
+            return value
         return reject_float_amount(value)
 
     @model_validator(mode="after")
-    def _positive(self) -> FxRatePayload:
-        if self.rate <= 0:
-            raise ValueError("FX rate must be positive")
+    def _consistency(self) -> FxRatePayload:
+        if self.rate_source is RateSource.EXPLICIT:
+            if self.explicit_rate is None or self.explicit_rate <= 0:
+                raise ValueError("EXPLICIT rate_source requires positive explicit_rate")
+        elif self.explicit_rate is not None:
+            raise ValueError("NOT_STATED rate_source must not carry explicit_rate")
+        if not self.from_currency.strip() or not self.to_currency.strip():
+            raise ValueError("currencies must be non-empty")
         return self
 
 
@@ -236,12 +272,33 @@ class FactRequirement(BaseModel):
     requirement_id: NonEmptyStr
     scenario_id: NonEmptyStr
     fact_kind: FactKind
-    authority_domain: AuthorityDomain
+    derivation_kind: DerivationKind
+    trigger_rule: NonEmptyStr
+    allowed_authority_domains: tuple[AuthorityDomain, ...]
+    upstream_definition_ids: tuple[NonEmptyStr, ...] = ()
     clause_ids: tuple[NonEmptyStr, ...] = ()
     modifier_kinds: tuple[NonEmptyStr, ...] = ()
     selector_categories: tuple[NonEmptyStr, ...] = ()
     reason_code: NonEmptyStr
     lexical_cues: tuple[NonEmptyStr, ...] = ()
+    strong_lexical_cues: tuple[NonEmptyStr, ...] = ()
+
+
+class FactRequirementResult(BaseModel):
+    """Exactly one terminal outcome per requirement."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requirement_id: NonEmptyStr
+    scenario_id: NonEmptyStr
+    fact_kind: FactKind
+    derivation_kind: DerivationKind
+    terminal_state: RequirementTerminalState
+    reason_code: NonEmptyStr
+    model_eligible: bool = False
+    accepted_fact_ids: tuple[NonEmptyStr, ...] = ()
+    evidence_span_ids: tuple[NonEmptyStr, ...] = ()
+    authority_domains_used: tuple[AuthorityDomain, ...] = ()
 
 
 class ModelProvenance(BaseModel):
@@ -328,6 +385,9 @@ class FactExtractionManifest(BaseModel):
     canonical_documents_hash: NonEmptyStr
     scenario_count: int = Field(ge=0)
     requirement_count: int = Field(ge=0)
+    semantic_required_count: int = Field(ge=0)
+    source_triggered_count: int = Field(ge=0)
+    speculative_count: int = Field(default=0, ge=0)
     candidate_count: int = Field(ge=0)
     accepted_count: int = Field(ge=0)
     rejected_count: int = Field(ge=0)
@@ -338,9 +398,13 @@ class FactExtractionManifest(BaseModel):
     llm_accepted_count: int = Field(ge=0)
     evidence_span_count: int = Field(ge=0)
     allow_network_models: bool = False
+    terminal_state_counts: dict[str, int] = Field(default_factory=dict)
+    needs_model_count: int = Field(ge=0, default=0)
+    confirmed_none_count: int = Field(ge=0, default=0)
     requirements_hash: NonEmptyStr
     accepted_facts_hash: NonEmptyStr
     evidence_hash: NonEmptyStr
+    requirement_results_hash: NonEmptyStr = ""
 
 
 class FactExtractionReport(BaseModel):
@@ -348,6 +412,7 @@ class FactExtractionReport(BaseModel):
 
     manifest: FactExtractionManifest
     requirements: tuple[FactRequirement, ...]
+    requirement_results: tuple[FactRequirementResult, ...] = ()
     candidates: tuple[FactCandidate, ...]
     accepted_facts: tuple[FactRecord, ...]
     rejected_facts: tuple[FactRecord, ...]
