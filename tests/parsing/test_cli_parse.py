@@ -23,9 +23,23 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _inspection_with_pdf(tmp_path: Path) -> Path:
-    pdf = make_text_pdf(["CLI parse document content alphanumeric"])
+    pdf = make_text_pdf(
+        [
+            "CLI parse document content with sufficient alphanumeric covenant body "
+            "text for a trusted extract across multiple words and obligations."
+        ]
+    )
     archive = tmp_path / "docs.zip"
-    write_zip(archive, {"policy.pdf": pdf, "notes.txt": b"plain notes"})
+    write_zip(
+        archive,
+        {
+            "policy.pdf": pdf,
+            "notes.txt": (
+                b"Plain notes with sufficient alphanumeric body text for a trusted "
+                b"extract that is clearly not a heading-only page."
+            ),
+        },
+    )
     inspection = tmp_path / "inspection"
     result = subprocess.run(
         [
@@ -200,7 +214,12 @@ def test_overwrite_succeeds(tmp_path: Path) -> None:
 
 
 def test_one_failed_document_does_not_erase_successful(tmp_path: Path) -> None:
-    good = make_text_pdf(["good alphanumeric content here"])
+    good = make_text_pdf(
+        [
+            "Good alphanumeric covenant body content here with enough trusted "
+            "extract text for a successful parse page."
+        ]
+    )
     archive = tmp_path / "mix.zip"
     write_zip(archive, {"good.pdf": good, "bad.pdf": b"not-a-pdf"})
     inspection = tmp_path / "insp"

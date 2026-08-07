@@ -148,21 +148,23 @@ def test_success_requires_pages() -> None:
         )
 
 
-def test_failed_cannot_masquerade_as_trusted() -> None:
-    page = CanonicalPage(page_number=1, raw_text="secret", normalized_text="secret")
-    with pytest.raises(ValueError):
-        CanonicalDocument(
-            id="id",
-            artifact_id="a",
-            document_id="id",
-            document_version_id="v",
-            source_file="f.pdf",
-            source_sha256="0" * 64,
-            parser=_parser(),
-            status=ParseStatus.FAILED,
-            pages=[page],
-            metrics=compute_metrics([page]),
-        )
+def test_failed_may_retain_observational_untrusted_text() -> None:
+    """FAILED means no trusted usable pages; blocking-page text may remain."""
+    page = CanonicalPage(page_number=1, raw_text="HEADING ONLY", normalized_text="HEADING ONLY")
+    doc = CanonicalDocument(
+        id="id",
+        artifact_id="a",
+        document_id="id",
+        document_version_id="v",
+        source_file="f.pdf",
+        source_sha256="0" * 64,
+        parser=_parser(),
+        status=ParseStatus.FAILED,
+        pages=[page],
+        metrics=compute_metrics([page]),
+    )
+    assert doc.status is ParseStatus.FAILED
+    assert doc.pages[0].raw_text == "HEADING ONLY"
 
 
 def test_canonical_json_no_nan_infinity() -> None:

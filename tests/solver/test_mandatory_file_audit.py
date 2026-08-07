@@ -51,6 +51,26 @@ class _UnauditedOpener:
         return path.read_bytes()
 
 
+class _NoneOpenedPathsOpener:
+    """Satisfies Protocol attribute presence but returns None (fail closed)."""
+
+    @property
+    def opened_paths(self):  # type: ignore[no-untyped-def]
+        return None
+
+    def read_bytes(self, path: Path) -> bytes:
+        return path.read_bytes()
+
+
+def test_opened_paths_none_raises_leakage_not_typeerror(tmp_path: Path) -> None:
+    _mini(tmp_path)
+    manifest = run_preflight(tmp_path, tmp_path / "pf")
+    out = tmp_path / "out-none"
+    with pytest.raises(LeakageAttemptError, match="opened_paths"):
+        solve_from_manifest(manifest, out, opener=_NoneOpenedPathsOpener())  # type: ignore[arg-type]
+    assert not (out / "submission.json").exists()
+
+
 def test_unaudited_opener_rejected_before_outputs(tmp_path: Path) -> None:
     _mini(tmp_path)
     manifest = run_preflight(tmp_path, tmp_path / "pf")
