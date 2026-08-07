@@ -68,16 +68,20 @@ class Settings(BaseSettings):
     quality_max_pages_without_text_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
 
     # Stage 5E structured model gateway (prefix HALYK_)
-    llm_primary_provider: str = Field(default="xai")
-    llm_primary_model: str = Field(default="grok-4.5")
-    llm_escalation_provider: str = Field(default="anthropic")
-    llm_escalation_model: str = Field(default="claude-opus-5")
+    # Primary runtime: DeepSeek V4 Flash. xAI/Anthropic are experimental only.
+    llm_primary_provider: str = Field(default="deepseek")
+    llm_primary_model: str = Field(default="deepseek-v4-flash")
+    llm_escalation_provider: str = Field(default="deepseek")
+    llm_escalation_model: str = Field(default="deepseek-v4-flash")
     llm_timeout_seconds: float = Field(default=60.0, gt=0.0)
-    llm_max_calls: int = Field(default=50, ge=0)
+    llm_max_external_attempts: int = Field(default=8, ge=0)
+    llm_max_thinking_escalations: int = Field(default=2, ge=0)
     llm_max_concurrency: int = Field(default=2, ge=1)
     llm_max_retries: int = Field(default=1, ge=0)
-    llm_escalation_max_calls: int = Field(default=5, ge=0)
     llm_temperature: float = Field(default=0.0, ge=0.0)
+    # Deprecated aliases (mapped in facts gateway builder)
+    llm_max_calls: int | None = Field(default=None)
+    llm_escalation_max_calls: int | None = Field(default=None)
 
     def execution_profile(self) -> ExecutionProfile:
         """Return the configured FAST or FULL profile declaration."""

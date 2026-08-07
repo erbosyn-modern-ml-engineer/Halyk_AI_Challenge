@@ -15,8 +15,9 @@ from halyk_agent.domain.fact_extraction.constants import (
 
 
 class ProviderName(StrEnum):
-    XAI = "xai"
-    ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
+    XAI = "xai"  # experimental / disabled by default
+    ANTHROPIC = "anthropic"  # experimental / disabled by default
     MOCK = "mock"
 
 
