@@ -5,6 +5,7 @@ from __future__ import annotations
 from halyk_agent.domain.errors import EvidenceAlignmentError
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.ids import deterministic_id, sha256_text
+from halyk_agent.domain.ocr import TextOrigin
 from halyk_agent.domain.parsing import (
     CanonicalBlock,
     CanonicalBoundingBox,
@@ -34,6 +35,8 @@ def _evidence_id(
     table_id: str | None,
     row_index: int | None,
     column_index: int | None,
+    text_origin: str = "",
+    ocr_configuration_hash: str = "",
 ) -> str:
     return deterministic_id(
         "evidence-span-v1",
@@ -47,6 +50,8 @@ def _evidence_id(
         table_id or "",
         row_index if row_index is not None else "",
         column_index if column_index is not None else "",
+        text_origin,
+        ocr_configuration_hash,
     )
 
 
@@ -65,6 +70,15 @@ def create_block_span(
     quote = page.raw_text[block.char_start : block.char_end]
     if quote != block.raw_text:
         raise EvidenceAlignmentError("block quote does not match page substring")
+    origin_raw = block.metadata.get("text_origin")
+    try:
+        origin = TextOrigin(str(origin_raw)) if origin_raw else TextOrigin.EMBEDDED_PDF_TEXT
+    except ValueError as exc:
+        raise EvidenceAlignmentError(f"invalid text_origin on block: {origin_raw}") from exc
+    ocr_backend = block.metadata.get("ocr_backend")
+    ocr_cfg = block.metadata.get("ocr_configuration_hash")
+    if origin is TextOrigin.OCR and not ocr_backend:
+        raise EvidenceAlignmentError("OCR evidence requires ocr_backend identity")
     return EvidenceSpan(
         id=_evidence_id(
             document_id=document.document_id,
@@ -77,6 +91,8 @@ def create_block_span(
             table_id=None,
             row_index=None,
             column_index=None,
+            text_origin=origin.value,
+            ocr_configuration_hash=str(ocr_cfg or ""),
         ),
         source_file=document.source_file,
         document_id=document.document_id,
@@ -87,6 +103,9 @@ def create_block_span(
         char_end=block.char_end,
         bbox=_bbox_tuple(block.bbox),
         block_id=block.id,
+        text_origin=origin,
+        ocr_backend_identity=str(ocr_backend) if ocr_backend is not None else None,
+        ocr_configuration_hash=str(ocr_cfg) if ocr_cfg is not None else None,
     )
 
 

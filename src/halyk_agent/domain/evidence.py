@@ -8,6 +8,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from halyk_agent.domain.common import NonEmptyStr
+from halyk_agent.domain.ocr import TextOrigin
 
 BBox = Annotated[tuple[float, float, float, float], Field(min_length=4, max_length=4)]
 
@@ -30,6 +31,9 @@ class EvidenceSpan(BaseModel):
     table_id: NonEmptyStr | None = None
     row_index: int | None = Field(default=None, ge=0)
     column_index: int | None = Field(default=None, ge=0)
+    text_origin: TextOrigin = TextOrigin.EMBEDDED_PDF_TEXT
+    ocr_backend_identity: str | None = None
+    ocr_configuration_hash: str | None = None
 
     @field_validator("quote")
     @classmethod
