@@ -86,6 +86,7 @@ def write_taxonomy_outputs(report: TaxonomyReport, output_dir: Path) -> dict[str
         "conflicts": output_dir / "transaction_conflicts.jsonl",
         "unresolved": output_dir / "transaction_unresolved.jsonl",
         "selector_coverage": output_dir / "selector_coverage.json",
+        "definition_readiness": output_dir / "definition_readiness.json",
         "fact_consumption": output_dir / "fact_consumption.jsonl",
         "related_parties": output_dir / "qualifying_related_parties.json",
         "manifest": output_dir / "stage5f_manifest.json",
@@ -101,6 +102,16 @@ def write_taxonomy_outputs(report: TaxonomyReport, output_dir: Path) -> dict[str
         paths["selector_coverage"],
         json.dumps(
             [e.model_dump(mode="json") for e in report.selector_coverage],
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    _atomic_write(
+        paths["definition_readiness"],
+        json.dumps(
+            [e.model_dump(mode="json") for e in report.definition_readiness],
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
@@ -131,21 +142,35 @@ def render_summary_markdown(report: TaxonomyReport) -> str:
         f"- calculation_inputs: {m.calculation_input_count}",
         f"- derived_inputs: {m.derived_input_count}",
         f"- adjustments: {m.adjustment_event_count}",
-        f"- selectors_supported: {m.selector_supported_count}/{m.selector_count}",
+        f"- selectors READY/TRUE_ZERO/UNRESOLVED: "
+        f"{m.selector_ready_count}/{m.selector_true_zero_count}/{m.selector_unresolved_count}"
+        f" (total {m.selector_count})",
+        f"- definitions READY/UNRESOLVED: "
+        f"{m.definition_ready_count}/{m.definition_unresolved_count}",
         f"- facts_consumed: {m.facts_consumed_count}/{m.accepted_facts_count}",
         f"- related_party TRUE/FALSE/UNKNOWN: "
         f"{m.related_party_true_count}/{m.related_party_false_count}/{m.related_party_unknown_count}",
         f"- schema_version: `{m.schema_version}`",
         f"- algorithm_version: `{m.algorithm_version}`",
         "",
-        "## Categories",
+        "## Primary categories",
         "",
     ]
     for cat, count in sorted(m.category_counts.items()):
         lines.append(f"- `{cat}`: {count}")
+    lines.extend(["", "## Selector memberships", ""])
+    for cat, count in sorted(m.membership_counts.items()):
+        lines.append(f"- `{cat}`: {count}")
     lines.extend(["", "## Methods", ""])
     for method, count in sorted(m.method_counts.items()):
         lines.append(f"- `{method}`: {count}")
+    lines.extend(["", "## Definition readiness (unresolved)", ""])
+    for entry in report.definition_readiness:
+        if entry.status.value == "UNRESOLVED":
+            lines.append(
+                f"- `{entry.definition_id}` ({entry.scenario_id}): "
+                f"{', '.join(entry.unresolved_selectors) or entry.reason_code}"
+            )
     lines.append("")
     return "\n".join(lines)
 

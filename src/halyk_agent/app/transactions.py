@@ -119,7 +119,12 @@ def transactions_from_paths(
     expected_ledger = (routing_manifest.get("parsed_input_identity") or {}).get(
         "ledger_source_sha256"
     ) or routing_manifest.get("ledger_source_sha256")
-    if expected_ledger and expected_ledger != ledger_sha:
+    if not expected_ledger:
+        raise TransactionServiceError(
+            "routing manifest missing ledger_source_sha256",
+            code="LEDGER_IDENTITY_MISSING",
+        )
+    if expected_ledger != ledger_sha:
         raise TransactionServiceError(
             "ledger SHA does not match routing manifest ledger_source_sha256",
             code="LEDGER_MISMATCH",
@@ -127,7 +132,12 @@ def transactions_from_paths(
 
     cov_auth = covenant_manifest.get("authority_manifest_hash")
     fact_auth = facts_manifest.get("authority_manifest_hash")
-    if cov_auth and fact_auth and cov_auth != fact_auth:
+    if not cov_auth or not fact_auth:
+        raise TransactionServiceError(
+            "covenants/facts authority_manifest_hash missing",
+            code="AUTHORITY_IDENTITY_MISSING",
+        )
+    if cov_auth != fact_auth:
         raise TransactionServiceError(
             "facts/covenants authority_manifest_hash mismatch",
             code="AUTHORITY_MISMATCH",
@@ -140,6 +150,20 @@ def transactions_from_paths(
         facts = load_accepted_facts(accepted_path)
     except TransactionIOError as exc:
         raise TransactionServiceError(exc.message, code=exc.code) from exc
+
+    routing_scenarios = {link.scenario_id for link in links if link.scenario_id}
+    covenant_scenarios = {definition.scenario_id for definition in definitions}
+    facts_scenarios = {fact.scenario_id for fact in facts}
+    if routing_scenarios != covenant_scenarios:
+        raise TransactionServiceError(
+            "routing scenario universe incompatible with covenant scenario universe",
+            code="SCENARIO_UNIVERSE_MISMATCH",
+        )
+    if not facts_scenarios.issubset(covenant_scenarios):
+        raise TransactionServiceError(
+            "accepted facts scenario universe incompatible with covenants",
+            code="FACTS_SCENARIO_MISMATCH",
+        )
 
     report = run_transaction_taxonomy(
         ledger_rows=ledger_rows,
@@ -178,7 +202,16 @@ def print_taxonomy_summary(report: TaxonomyReport) -> None:
     print(f"conflicts={m.conflict_count}")
     print(f"calculation_inputs={m.calculation_input_count}")
     print(f"derived_inputs={m.derived_input_count}")
-    print(f"selectors_supported={m.selector_supported_count}/{m.selector_count}")
+    print(
+        "selectors="
+        f"READY:{m.selector_ready_count}/"
+        f"TRUE_ZERO:{m.selector_true_zero_count}/"
+        f"UNRESOLVED:{m.selector_unresolved_count}/"
+        f"total:{m.selector_count}"
+    )
+    print(
+        f"definitions=READY:{m.definition_ready_count}/UNRESOLVED:{m.definition_unresolved_count}"
+    )
     print(f"facts_consumed={m.facts_consumed_count}/{m.accepted_facts_count}")
     print(
         "related_party="

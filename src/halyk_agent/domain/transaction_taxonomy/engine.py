@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from halyk_agent.domain.covenants.ast import MetricCategory
-from halyk_agent.domain.covenants.models import CovenantDefinition, ScopeKind
+from halyk_agent.domain.covenants.models import CovenantDefinition
 from halyk_agent.domain.fact_extraction.models import (
     AmountCorrectionPayload,
     FactKind,
@@ -34,6 +34,10 @@ from halyk_agent.domain.transaction_taxonomy.constants import (
     TAXONOMY_CLASSIFIER_VERSION,
     TAXONOMY_SCHEMA_VERSION,
 )
+from halyk_agent.domain.transaction_taxonomy.membership import (
+    membership_reasons,
+    selector_memberships,
+)
 from halyk_agent.domain.transaction_taxonomy.models import (
     AdjustmentEvent,
     AdjustmentEventType,
@@ -48,6 +52,8 @@ from halyk_agent.domain.transaction_taxonomy.models import (
     PeriodMembershipHint,
     RelatedPartyBasis,
     RelatedPartyStatus,
+    SelectorReadinessStatus,
+    SubsidiaryStatusKind,
     TaxonomyConflict,
     TaxonomyManifest,
     TaxonomyReport,
@@ -57,8 +63,12 @@ from halyk_agent.domain.transaction_taxonomy.models import (
 from halyk_agent.domain.transaction_taxonomy.related_party import (
     qualifying_related_parties,
     resolve_related_party,
+    scenario_has_damaged_ownership,
 )
-from halyk_agent.domain.transaction_taxonomy.selectors import build_selector_coverage
+from halyk_agent.domain.transaction_taxonomy.selectors import (
+    build_definition_readiness,
+    build_selector_coverage,
+)
 
 
 def _parse_date(raw: str) -> date | None:
@@ -208,6 +218,9 @@ def run_transaction_taxonomy(
                 "related_party_status": RelatedPartyStatus.UNKNOWN,
                 "related_party_basis": RelatedPartyBasis.ROUTING_NOISE,
                 "entity_scope": EntityScopeKind.UNKNOWN,
+                "subsidiary_status": SubsidiaryStatusKind.UNKNOWN,
+                "selector_categories": [],
+                "membership_reasons": [],
                 "classification_status": ClassificationStatus.ROUTING_NOISE,
                 "classification_method": ClassificationMethod.ROUTING_NOISE,
                 "classification_rule": None,
@@ -278,6 +291,9 @@ def run_transaction_taxonomy(
             "related_party_status": RelatedPartyStatus.UNKNOWN,
             "related_party_basis": RelatedPartyBasis.MISSING_OWNERSHIP,
             "entity_scope": EntityScopeKind.BORROWER,
+            "subsidiary_status": SubsidiaryStatusKind.UNKNOWN,
+            "selector_categories": [],
+            "membership_reasons": [],
             "classification_status": status,
             "classification_method": method,
             "classification_rule": hit.rule,
@@ -312,9 +328,8 @@ def run_transaction_taxonomy(
     for fact in reclass_facts:
         payload = fact.payload
         assert isinstance(payload, TransactionReclassificationPayload)
-        scenario_set = {tid for tid in scenario_txns if tid.split("-")[1] == fact.scenario_id} | {
-            tid for tid, link in links.items() if link.scenario_id == fact.scenario_id
-        }
+        # Scenario ownership comes exclusively from Stage 5B routing.
+        scenario_set = {tid for tid, link in links.items() if link.scenario_id == fact.scenario_id}
         targets = _match_reclass_targets(fact, rows_by_txn, scenario_set)
         if payload.disposition is ReclassificationDisposition.REJECTED:
             if not targets and payload.transaction_id:
@@ -763,10 +778,15 @@ def run_transaction_taxonomy(
         else:
             _mark_fact(fact, "UNUSED", "no Stage 5F consumer registered")
 
-    # --- Related-party + entity scope enrichment ---
+    damaged_scenarios = {
+        sid for sid in ownership_scenarios if scenario_has_damaged_ownership(accepted_facts, sid)
+    }
+
+    # --- Related-party + entity / subsidiary scope enrichment ---
     for tid, state in classified_mutable.items():
         scenario_id = state["scenario_id"]
         if scenario_id is None:
+            state["subsidiary_status"] = SubsidiaryStatusKind.UNKNOWN
             continue
         decision = resolve_related_party(
             scenario_id=scenario_id,
@@ -774,6 +794,7 @@ def run_transaction_taxonomy(
             qualifying=qualifying,
             has_threshold=scenario_id in threshold_scenarios,
             has_ownership=scenario_id in ownership_scenarios,
+            has_damaged_ownership=scenario_id in damaged_scenarios,
         )
         state["related_party_status"] = decision.status
         state["related_party_basis"] = decision.basis
@@ -798,39 +819,66 @@ def run_transaction_taxonomy(
                 )
             )
 
-        # Entity scope: default borrower; subsidiary fact may upgrade.
+        # Subsidiary status: UNKNOWN unless trusted fact proves otherwise.
+        # Never map UNKNOWN → UNRESTRICTED.
         scope = EntityScopeKind.BORROWER
+        sub_status = SubsidiaryStatusKind.UNKNOWN
         for fact in subsidiary_by_scenario.get(scenario_id, ()):
             payload = fact.payload
             assert isinstance(payload, SubsidiaryStatusPayload)
             keys = normalize_legal_name_keys(payload.entity_name)
-            if keys.identity_key == state["counterparty_identity_key"]:
-                if payload.status is SubsidiaryKind.GROUP_MEMBER:
-                    scope = EntityScopeKind.GROUP
-                else:
-                    scope = EntityScopeKind.SUBSIDIARY
-                if fact.fact_id not in state["applied_fact_ids"]:
-                    state["applied_fact_ids"].append(fact.fact_id)
-                break
-        if decision.status is RelatedPartyStatus.TRUE:
-            # Related-party counterparty scope marker (borrower-level payment to RP).
-            state["flags"].append("RELATED_PARTY_COUNTERPARTY")
-        # Covenant-level GROUP scope does not rewrite every row; mark when definition needs it.
-        state["entity_scope"] = scope
+            if keys.identity_key != state["counterparty_identity_key"]:
+                continue
+            if payload.status is SubsidiaryKind.UNRESTRICTED:
+                sub_status = SubsidiaryStatusKind.UNRESTRICTED
+                scope = EntityScopeKind.SUBSIDIARY
+            elif payload.status is SubsidiaryKind.RESTRICTED:
+                sub_status = SubsidiaryStatusKind.RESTRICTED
+                scope = EntityScopeKind.SUBSIDIARY
+            elif payload.status is SubsidiaryKind.GROUP_MEMBER:
+                sub_status = SubsidiaryStatusKind.GROUP_MEMBER
+                scope = EntityScopeKind.GROUP
+            if fact.fact_id not in state["applied_fact_ids"]:
+                state["applied_fact_ids"].append(fact.fact_id)
+            break
 
-    # Expression-scoped / group selectors: flag CAPEX rows when scenario has GROUP_CAPEX selector.
-    group_scenarios = {
-        d.scenario_id
-        for d in definitions
-        if d.scope.scope_kind is ScopeKind.EXPRESSION_SCOPED
-        or any(s.group_level or s.category is MetricCategory.GROUP_CAPEX for s in d.selectors)
-    }
-    for _tid, state in classified_mutable.items():
-        if state["scenario_id"] in group_scenarios and state["effective_category"] in {
-            MetricCategory.CAPEX,
-            MetricCategory.GROUP_CAPEX,
-        }:
-            state["flags"].append("GROUP_SCOPE")
+        # Promote unrestricted-sub category only with trusted UNRESTRICTED status.
+        if (
+            state["classification_rule"] == "CAPITAL_TRANSFER_SUBSIDIARY"
+            and sub_status is SubsidiaryStatusKind.UNRESTRICTED
+        ):
+            state["effective_category"] = (
+                MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS
+            )
+        elif (
+            state["effective_category"]
+            is MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS
+            and sub_status is not SubsidiaryStatusKind.UNRESTRICTED
+        ):
+            # Fail closed: do not keep unrestricted category without evidence.
+            state["effective_category"] = MetricCategory.CAPEX
+            state["flags"].append("UNRESTRICTED_STATUS_REQUIRED")
+
+        # GROUP_CAPEX primary from description only; never stamp borrower CAPEX as group.
+        if (
+            state["effective_category"] is MetricCategory.GROUP_CAPEX
+            and state["classification_rule"] == "GROUP_CAPEX"
+        ):
+            scope = EntityScopeKind.GROUP
+            state["flags"].append("GROUP_LEVEL_SOURCE")
+
+        if decision.status is RelatedPartyStatus.TRUE:
+            state["flags"].append("RELATED_PARTY_COUNTERPARTY")
+        state["entity_scope"] = scope
+        state["subsidiary_status"] = sub_status
+
+        # Attach semantic memberships (primary + hierarchy).
+        if state["effective_category"] is not None:
+            state["selector_categories"] = list(selector_memberships(state["effective_category"]))
+            state["membership_reasons"] = list(membership_reasons(state["effective_category"]))
+        else:
+            state["selector_categories"] = []
+            state["membership_reasons"] = []
 
     # --- Build calculation inputs (scenario-linked classified with amount + category) ---
     calc_inputs: list[CalculationInput] = []
@@ -883,6 +931,13 @@ def run_transaction_taxonomy(
         if state["rejected_fact_ids"]:
             flags.append("HAS_REJECTED_RECLASSIFICATION")
 
+        selector_cats = tuple(state.get("selector_categories") or [])
+        if not selector_cats:
+            selector_cats = selector_memberships(state["effective_category"])
+        mem_reasons = tuple(state.get("membership_reasons") or [])
+        if not mem_reasons:
+            mem_reasons = membership_reasons(state["effective_category"])
+
         calc_inputs.append(
             CalculationInput(
                 input_id=deterministic_id("calc", tid, state["effective_category"].value),
@@ -890,6 +945,8 @@ def run_transaction_taxonomy(
                 source_kind=InputSourceKind.LEDGER_ROW,
                 transaction_id=tid,
                 category=state["effective_category"],
+                selector_categories=selector_cats,
+                membership_reasons=mem_reasons,
                 amount=state["effective_amount"],
                 currency=state["effective_currency"],
                 transaction_date=state["original_date"],
@@ -899,10 +956,12 @@ def run_transaction_taxonomy(
                 counterparty=state["counterparty_raw"],
                 related_party=state["related_party_status"],
                 entity_scope=state["entity_scope"],
+                subsidiary_status=state.get("subsidiary_status", SubsidiaryStatusKind.UNKNOWN),
                 flags=tuple(sorted(set(flags))),
                 applied_fact_ids=tuple(dict.fromkeys(state["applied_fact_ids"])),
                 rejected_fact_ids=tuple(dict.fromkeys(state["rejected_fact_ids"])),
                 provenance_refs=tuple(dict.fromkeys(state["evidence_refs"])),
+                classification_rule=state.get("classification_rule"),
             )
         )
 
@@ -919,6 +978,8 @@ def run_transaction_taxonomy(
                 source_kind=InputSourceKind.AUTHORITATIVE_FACT,
                 derived_input_id=derived.input_id,
                 category=derived.category,
+                selector_categories=selector_memberships(derived.category),
+                membership_reasons=membership_reasons(derived.category),
                 amount=derived.amount,
                 currency=derived.currency,
                 transaction_date=derived.as_of_date,
@@ -926,9 +987,11 @@ def run_transaction_taxonomy(
                 period_end=derived.as_of_date,
                 related_party=derived.related_party_status,
                 entity_scope=derived.entity_scope,
+                subsidiary_status=SubsidiaryStatusKind.UNKNOWN,
                 flags=("OFF_LEDGER",),
                 applied_fact_ids=(derived.fact_id,),
                 provenance_refs=derived.evidence_span_ids,
+                classification_rule="AUTHORITATIVE_FACT",
             )
         )
 
@@ -968,6 +1031,9 @@ def run_transaction_taxonomy(
                 related_party_status=state["related_party_status"],
                 related_party_basis=state["related_party_basis"],
                 entity_scope=state["entity_scope"],
+                subsidiary_status=state.get("subsidiary_status", SubsidiaryStatusKind.UNKNOWN),
+                selector_categories=tuple(state.get("selector_categories") or ()),
+                membership_reasons=tuple(state.get("membership_reasons") or ()),
                 classification_status=state["classification_status"],
                 classification_method=state["classification_method"],
                 classification_rule=state["classification_rule"],
@@ -980,13 +1046,59 @@ def run_transaction_taxonomy(
         )
 
     # Unresolved rows remain potentially_relevant (fail-closed); no silent IRRELEVANT demotion.
-    selector_coverage = build_selector_coverage(definitions, tuple(calc_inputs))
+    group_capex_scenarios = {
+        d.scenario_id
+        for d in definitions
+        if any(s.category is MetricCategory.GROUP_CAPEX for s in d.selectors)
+    }
+    group_capex_unresolved = {
+        sid
+        for sid in group_capex_scenarios
+        if not any(
+            i.scenario_id == sid
+            and MetricCategory.GROUP_CAPEX in (i.selector_categories or (i.category,))
+            and "GROUP_LEVEL_SOURCE" in i.flags
+            for i in calc_inputs
+        )
+    }
+
+    unrestricted_scenarios = {
+        d.scenario_id
+        for d in definitions
+        if any(
+            s.category is MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS
+            for s in d.selectors
+        )
+    }
+    unrestricted_unresolved = set()
+    for sid in unrestricted_scenarios:
+        has_unrestricted_fact = any(
+            f.scenario_id == sid
+            and f.fact_kind is FactKind.SUBSIDIARY_STATUS
+            and isinstance(f.payload, SubsidiaryStatusPayload)
+            and f.payload.status is SubsidiaryKind.UNRESTRICTED
+            for f in accepted_facts
+        )
+        if not has_unrestricted_fact:
+            unrestricted_unresolved.add(sid)
+
+    selector_coverage = build_selector_coverage(
+        definitions,
+        tuple(calc_inputs),
+        group_capex_unresolved=group_capex_unresolved,
+        unrestricted_unresolved=unrestricted_unresolved,
+    )
+    definition_readiness = build_definition_readiness(definitions, selector_coverage)
 
     category_counts = Counter(
         c.effective_category.value
         for c in classified_rows
         if c.scenario_id is not None and c.effective_category is not None
     )
+    membership_counts: Counter[str] = Counter()
+    for inp in calc_inputs:
+        for cat in inp.selector_categories or (inp.category,):
+            membership_counts[cat.value] += 1
     method_counts = Counter(
         c.classification_method.value for c in classified_rows if c.scenario_id is not None
     )
@@ -1053,9 +1165,29 @@ def run_transaction_taxonomy(
         derived_input_count=len(derived_inputs_sorted),
         adjustment_event_count=len(adjustments_sorted),
         selector_count=len(selector_coverage),
-        selector_supported_count=sum(1 for s in selector_coverage if s.status == "SUPPORTED"),
+        selector_ready_count=sum(
+            1 for s in selector_coverage if s.status is SelectorReadinessStatus.READY
+        ),
+        selector_true_zero_count=sum(
+            1 for s in selector_coverage if s.status is SelectorReadinessStatus.TRUE_ZERO
+        ),
+        selector_unresolved_count=sum(
+            1 for s in selector_coverage if s.status is SelectorReadinessStatus.UNRESOLVED
+        ),
+        # Legacy aliases: supported ≈ ready+true_zero; unsupported ≈ unresolved.
+        selector_supported_count=sum(
+            1
+            for s in selector_coverage
+            if s.status in {SelectorReadinessStatus.READY, SelectorReadinessStatus.TRUE_ZERO}
+        ),
         selector_unsupported_count=sum(
-            1 for s in selector_coverage if s.status == "UNSUPPORTED_SELECTOR"
+            1 for s in selector_coverage if s.status is SelectorReadinessStatus.UNRESOLVED
+        ),
+        definition_ready_count=sum(
+            1 for d in definition_readiness if d.status is SelectorReadinessStatus.READY
+        ),
+        definition_unresolved_count=sum(
+            1 for d in definition_readiness if d.status is SelectorReadinessStatus.UNRESOLVED
         ),
         accepted_facts_count=len(accepted_facts),
         facts_consumed_count=sum(1 for f in fact_consumption_tuple if f.disposition == "CONSUMED"),
@@ -1063,6 +1195,7 @@ def run_transaction_taxonomy(
         related_party_false_count=rp_false,
         related_party_unknown_count=rp_unknown,
         category_counts=dict(sorted(category_counts.items())),
+        membership_counts=dict(sorted(membership_counts.items())),
         method_counts=dict(sorted(method_counts.items())),
         taxonomy_hash=taxonomy_hash,
         calculation_inputs_hash=calc_hash,
@@ -1078,6 +1211,7 @@ def run_transaction_taxonomy(
         conflicts=conflicts_sorted,
         unresolved=unresolved_tuple,
         selector_coverage=selector_coverage,
+        definition_readiness=definition_readiness,
         fact_consumption=fact_consumption_tuple,
         qualifying_related_parties=tuple(
             {
