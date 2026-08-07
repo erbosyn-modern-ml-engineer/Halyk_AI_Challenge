@@ -43,7 +43,13 @@ class XaiStructuredProvider:
     def _resolve_key(self) -> str | None:
         return self._api_key or os.environ.get("XAI_API_KEY")
 
-    def extract(self, request: StructuredExtractionRequest) -> StructuredExtractionResult:
+    def extract(
+        self,
+        request: StructuredExtractionRequest,
+        *,
+        budget: object | None = None,
+    ) -> StructuredExtractionResult:
+        _ = budget
         key = self._resolve_key()
         if not key:
             return StructuredExtractionResult(
