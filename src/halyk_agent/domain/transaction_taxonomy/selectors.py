@@ -1,4 +1,4 @@
-"""Selector coverage and eligibility helpers for Stage 5D TransactionSelector."""
+"""Selector coverage, membership matching, and Stage 6 readiness."""
 
 from __future__ import annotations
 
@@ -6,78 +6,136 @@ from halyk_agent.domain.covenants.ast import MetricCategory, TransactionSelector
 from halyk_agent.domain.covenants.models import CovenantDefinition
 from halyk_agent.domain.transaction_taxonomy.models import (
     CalculationInput,
+    DefinitionReadinessEntry,
     RelatedPartyStatus,
     SelectorCoverageEntry,
+    SelectorReadinessStatus,
+    SubsidiaryStatusKind,
 )
-
-
-def _selector_supported(selector: TransactionSelector) -> tuple[bool, str]:
-    """All current Stage 5D selector fields are representable in Stage 5F inputs."""
-    # include/exclude flags are preserved for Stage 6; empty on public corpus.
-    _ = selector.include_flags
-    _ = selector.exclude_flags
-    try:
-        MetricCategory(selector.category)
-    except ValueError:
-        return False, "UNKNOWN_CATEGORY"
-    return True, "OK"
 
 
 def input_matches_selector(inp: CalculationInput, selector: TransactionSelector) -> bool:
     """
-    Exact eligibility using Stage 5F normalized attributes.
+    Exact eligibility using Stage 5F normalized attributes + semantic memberships.
 
     related_party_only never treats UNKNOWN as TRUE.
-    RELATED_PARTY_PAYMENTS matches related_party==TRUE payments (outflows preferred).
+    GROUP_CAPEX never matches plain borrower CAPEX.
+    Unrestricted-sub transfers require subsidiary_status == UNRESTRICTED.
     """
     if selector.related_party_only and inp.related_party is not RelatedPartyStatus.TRUE:
         return False
-    if (
-        selector.group_level
-        and inp.entity_scope.value not in {"GROUP", "SUBSIDIARY"}
-        and "GROUP_SCOPE" not in inp.flags
-    ):
-        return False
+
+    memberships = inp.selector_categories or (inp.category,)
 
     if selector.category is MetricCategory.RELATED_PARTY_PAYMENTS:
         return inp.related_party is RelatedPartyStatus.TRUE and (
-            inp.category is MetricCategory.RELATED_PARTY_PAYMENTS
+            MetricCategory.RELATED_PARTY_PAYMENTS in memberships
             or inp.amount < 0
-            or inp.category
-            in {
-                MetricCategory.OPEX,
-                MetricCategory.LABOR,
-                MetricCategory.RENT,
-                MetricCategory.LEASE_PAYMENTS,
-                MetricCategory.INSURANCE_PREMIUMS,
-                MetricCategory.UTILITIES,
-                MetricCategory.TAXES,
-                MetricCategory.INTEREST_EXPENSE,
-                MetricCategory.CAPEX,
-            }
+            or any(
+                cat
+                in {
+                    MetricCategory.OPEX,
+                    MetricCategory.LABOR,
+                    MetricCategory.RENT,
+                    MetricCategory.LEASE_PAYMENTS,
+                    MetricCategory.INSURANCE_PREMIUMS,
+                    MetricCategory.UTILITIES,
+                    MetricCategory.TAXES,
+                    MetricCategory.INTEREST_EXPENSE,
+                    MetricCategory.CAPEX,
+                }
+                for cat in memberships
+            )
         )
 
     if selector.category is MetricCategory.GROUP_CAPEX:
-        return inp.category in {MetricCategory.GROUP_CAPEX, MetricCategory.CAPEX} and (
-            selector.group_level is False
-            or inp.entity_scope.value in {"GROUP", "SUBSIDIARY"}
-            or "GROUP_SCOPE" in inp.flags
+        # Only trusted group-level inputs — never borrower CAPEX substitution.
+        return (
+            MetricCategory.GROUP_CAPEX in memberships
+            and inp.entity_scope.value == "GROUP"
+            and "GROUP_LEVEL_SOURCE" in inp.flags
         )
 
-    return inp.category is selector.category
+    if selector.category is MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS:
+        return (
+            MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS in memberships
+            and inp.subsidiary_status is SubsidiaryStatusKind.UNRESTRICTED
+        )
+
+    if (
+        selector.group_level
+        and "GROUP_LEVEL_SOURCE" not in inp.flags
+        and inp.entity_scope.value not in {"GROUP"}
+    ):
+        return False
+
+    return selector.category in memberships
+
+
+def _selector_readiness(
+    *,
+    definition: CovenantDefinition,
+    selector: TransactionSelector,
+    match_count: int,
+    scenario_inputs: list[CalculationInput],
+    group_capex_unresolved: set[str],
+    unrestricted_unresolved: set[str],
+) -> tuple[SelectorReadinessStatus, str]:
+    if selector.category is MetricCategory.GROUP_CAPEX:
+        if definition.scenario_id in group_capex_unresolved:
+            return (
+                SelectorReadinessStatus.UNRESOLVED,
+                "GROUP_CAPEX_OPERAND_UNRESOLVED",
+            )
+        if match_count == 0:
+            return SelectorReadinessStatus.TRUE_ZERO, "NO_GROUP_CAPEX_INPUTS"
+        return SelectorReadinessStatus.READY, "OK"
+
+    if selector.category is MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS:
+        if definition.scenario_id in unrestricted_unresolved:
+            return (
+                SelectorReadinessStatus.UNRESOLVED,
+                "UNRESTRICTED_SUBSIDIARY_STATUS_UNKNOWN",
+            )
+        if match_count == 0:
+            return SelectorReadinessStatus.TRUE_ZERO, "NO_UNRESTRICTED_TRANSFER_INPUTS"
+        return SelectorReadinessStatus.READY, "OK"
+
+    if selector.related_party_only:
+        unknowns = sum(1 for i in scenario_inputs if i.related_party is RelatedPartyStatus.UNKNOWN)
+        if unknowns and match_count == 0:
+            # Unknown identities may hide related-party payments.
+            return (
+                SelectorReadinessStatus.UNRESOLVED,
+                "RELATED_PARTY_IDENTITY_UNKNOWN",
+            )
+
+    if match_count == 0:
+        return SelectorReadinessStatus.TRUE_ZERO, "NO_MATCHING_INPUTS"
+    return SelectorReadinessStatus.READY, "OK"
 
 
 def build_selector_coverage(
     definitions: tuple[CovenantDefinition, ...],
     inputs: tuple[CalculationInput, ...],
+    *,
+    group_capex_unresolved: set[str] | None = None,
+    unrestricted_unresolved: set[str] | None = None,
 ) -> tuple[SelectorCoverageEntry, ...]:
+    group_unres = group_capex_unresolved or set()
+    unres_sub = unrestricted_unresolved or set()
     entries: list[SelectorCoverageEntry] = []
     for definition in sorted(definitions, key=lambda d: (d.scenario_id, d.definition_id)):
+        scenario_inputs = [i for i in inputs if i.scenario_id == definition.scenario_id]
         for selector in definition.selectors:
-            ok, reason = _selector_supported(selector)
-            scenario_inputs = [i for i in inputs if i.scenario_id == definition.scenario_id]
-            match_count = (
-                sum(1 for i in scenario_inputs if input_matches_selector(i, selector)) if ok else 0
+            match_count = sum(1 for i in scenario_inputs if input_matches_selector(i, selector))
+            status, reason = _selector_readiness(
+                definition=definition,
+                selector=selector,
+                match_count=match_count,
+                scenario_inputs=scenario_inputs,
+                group_capex_unresolved=group_unres,
+                unrestricted_unresolved=unres_sub,
             )
             entries.append(
                 SelectorCoverageEntry(
@@ -88,8 +146,8 @@ def build_selector_coverage(
                     group_level=selector.group_level,
                     include_flags=selector.include_flags,
                     exclude_flags=selector.exclude_flags,
-                    status="SUPPORTED" if ok else "UNSUPPORTED_SELECTOR",
-                    reason=reason,
+                    status=status,
+                    reason_code=reason,
                     matching_input_count=match_count,
                 )
             )
@@ -97,3 +155,41 @@ def build_selector_coverage(
         key=lambda e: (e.scenario_id, e.definition_id, e.category.value, e.related_party_only)
     )
     return tuple(entries)
+
+
+def build_definition_readiness(
+    definitions: tuple[CovenantDefinition, ...],
+    selector_coverage: tuple[SelectorCoverageEntry, ...],
+) -> tuple[DefinitionReadinessEntry, ...]:
+    by_def: dict[str, list[SelectorCoverageEntry]] = {}
+    for entry in selector_coverage:
+        by_def.setdefault(entry.definition_id, []).append(entry)
+
+    out: list[DefinitionReadinessEntry] = []
+    for definition in sorted(definitions, key=lambda d: (d.scenario_id, d.definition_id)):
+        entries = by_def.get(definition.definition_id, [])
+        unresolved = [
+            f"{e.category.value}:{e.reason_code}"
+            for e in entries
+            if e.status is SelectorReadinessStatus.UNRESOLVED
+        ]
+        if unresolved:
+            out.append(
+                DefinitionReadinessEntry(
+                    definition_id=definition.definition_id,
+                    scenario_id=definition.scenario_id,
+                    status=SelectorReadinessStatus.UNRESOLVED,
+                    reason_code="UNRESOLVED_INPUT",
+                    unresolved_selectors=tuple(unresolved),
+                )
+            )
+        else:
+            out.append(
+                DefinitionReadinessEntry(
+                    definition_id=definition.definition_id,
+                    scenario_id=definition.scenario_id,
+                    status=SelectorReadinessStatus.READY,
+                    reason_code="OK",
+                )
+            )
+    return tuple(out)

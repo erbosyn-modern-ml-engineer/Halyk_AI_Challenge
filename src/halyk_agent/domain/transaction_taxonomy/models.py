@@ -48,6 +48,20 @@ class RelatedPartyBasis(StrEnum):
     MISSING_THRESHOLD = "MISSING_THRESHOLD"
     MISSING_OWNERSHIP = "MISSING_OWNERSHIP"
     ROUTING_NOISE = "ROUTING_NOISE"
+    DAMAGED_OWNERSHIP_IDENTITY = "DAMAGED_OWNERSHIP_IDENTITY"
+
+
+class SubsidiaryStatusKind(StrEnum):
+    UNRESTRICTED = "UNRESTRICTED"
+    RESTRICTED = "RESTRICTED"
+    GROUP_MEMBER = "GROUP_MEMBER"
+    UNKNOWN = "UNKNOWN"
+
+
+class SelectorReadinessStatus(StrEnum):
+    READY = "READY"
+    TRUE_ZERO = "TRUE_ZERO"
+    UNRESOLVED = "UNRESOLVED"
 
 
 class EntityScopeKind(StrEnum):
@@ -165,6 +179,9 @@ class ClassifiedTransaction(BaseModel):
     related_party_status: RelatedPartyStatus = RelatedPartyStatus.UNKNOWN
     related_party_basis: RelatedPartyBasis = RelatedPartyBasis.MISSING_OWNERSHIP
     entity_scope: EntityScopeKind = EntityScopeKind.BORROWER
+    subsidiary_status: SubsidiaryStatusKind = SubsidiaryStatusKind.UNKNOWN
+    selector_categories: tuple[MetricCategory, ...] = ()
+    membership_reasons: tuple[NonEmptyStr, ...] = ()
 
     classification_status: ClassificationStatus
     classification_method: ClassificationMethod
@@ -220,6 +237,8 @@ class CalculationInput(BaseModel):
     transaction_id: NonEmptyStr | None = None
     derived_input_id: NonEmptyStr | None = None
     category: MetricCategory
+    selector_categories: tuple[MetricCategory, ...] = ()
+    membership_reasons: tuple[NonEmptyStr, ...] = ()
     amount: ExactDecimal
     currency: NonEmptyStr
     transaction_date: date | None = None
@@ -229,10 +248,12 @@ class CalculationInput(BaseModel):
     counterparty: NonEmptyStr | None = None
     related_party: RelatedPartyStatus
     entity_scope: EntityScopeKind
+    subsidiary_status: SubsidiaryStatusKind = SubsidiaryStatusKind.UNKNOWN
     flags: tuple[NonEmptyStr, ...] = ()
     applied_fact_ids: tuple[NonEmptyStr, ...] = ()
     rejected_fact_ids: tuple[NonEmptyStr, ...] = ()
     provenance_refs: tuple[NonEmptyStr, ...] = ()
+    classification_rule: NonEmptyStr | None = None
 
     @field_validator("amount", mode="before")
     @classmethod
@@ -273,9 +294,19 @@ class SelectorCoverageEntry(BaseModel):
     group_level: bool
     include_flags: tuple[NonEmptyStr, ...] = ()
     exclude_flags: tuple[NonEmptyStr, ...] = ()
-    status: Literal["SUPPORTED", "UNSUPPORTED_SELECTOR"]
-    reason: NonEmptyStr = "OK"
+    status: SelectorReadinessStatus
+    reason_code: NonEmptyStr = "OK"
     matching_input_count: int = Field(ge=0, default=0)
+
+
+class DefinitionReadinessEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    definition_id: NonEmptyStr
+    scenario_id: NonEmptyStr
+    status: SelectorReadinessStatus
+    reason_code: NonEmptyStr
+    unresolved_selectors: tuple[NonEmptyStr, ...] = ()
 
 
 class FactConsumptionEntry(BaseModel):
@@ -310,14 +341,21 @@ class TaxonomyManifest(BaseModel):
     derived_input_count: int = Field(ge=0)
     adjustment_event_count: int = Field(ge=0)
     selector_count: int = Field(ge=0)
+    selector_ready_count: int = Field(ge=0)
+    selector_true_zero_count: int = Field(ge=0)
+    selector_unresolved_count: int = Field(ge=0)
+    # Deprecated aliases retained for summary compatibility.
     selector_supported_count: int = Field(ge=0)
     selector_unsupported_count: int = Field(ge=0)
+    definition_ready_count: int = Field(ge=0)
+    definition_unresolved_count: int = Field(ge=0)
     accepted_facts_count: int = Field(ge=0)
     facts_consumed_count: int = Field(ge=0)
     related_party_true_count: int = Field(ge=0)
     related_party_false_count: int = Field(ge=0)
     related_party_unknown_count: int = Field(ge=0)
     category_counts: dict[str, int] = Field(default_factory=dict)
+    membership_counts: dict[str, int] = Field(default_factory=dict)
     method_counts: dict[str, int] = Field(default_factory=dict)
     taxonomy_hash: NonEmptyStr
     calculation_inputs_hash: NonEmptyStr
@@ -335,5 +373,6 @@ class TaxonomyReport(BaseModel):
     conflicts: tuple[TaxonomyConflict, ...]
     unresolved: tuple[UnresolvedTransaction, ...]
     selector_coverage: tuple[SelectorCoverageEntry, ...]
-    fact_consumption: tuple[FactConsumptionEntry, ...]
+    definition_readiness: tuple[DefinitionReadinessEntry, ...] = ()
+    fact_consumption: tuple[FactConsumptionEntry, ...] = ()
     qualifying_related_parties: tuple[dict[str, Any], ...] = ()
