@@ -4,12 +4,13 @@ Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
 One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
-**Stage 4: VERIFIED.** **Stage 5A.2: IMPLEMENTED** (trust-gate + isolation fixes — awaiting Opus final review; **not VERIFIED**).
+**Stage 4: VERIFIED.** **Stage 5A: VERIFIED** (merged). **Stage 5A.4: IMPLEMENTED — BLOCKED_ON_OCR_BACKEND** (selective OCR contracts ready; no offline Tesseract).
 
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
 - **Modes** — `HALYK_MODE=competition` (default): solver consumes only a sanitized manifest and never opens/deserializes answer-key content (preflight may quarantine candidates). `HALYK_MODE=training` enables the isolated scorer only.
 - **Trust** — one `PostParseQualityGate` for every public parse path; pypdf/Docling page visual metadata uses KNOWN vs UNKNOWN (never silent zero).
+- **Selective OCR** — blocking pages only; explicit backend; no silent fallback; no automatic downloads. Currently blocked until Tesseract CLI + eng/rus/kaz are installed.
 
 ## Requirements
 
@@ -56,6 +57,10 @@ uv run python -m halyk_agent train-score --dataset ./agentic-bank-public --submi
 
 # OCR quality diagnostic (detection only; does not download OCR models)
 uv run python -m halyk_agent ocr-diagnose --documents ./agentic-bank-public/documents --output ./work/ocr-diag
+
+# Selective OCR probe / run (Stage 5A.4) — no downloads; run exits non-zero if backend not offline-ready
+uv run python -m halyk_agent ocr probe --json-output
+# uv run python -m halyk_agent ocr run --parsed ./work/parsed-full --output ./work/ocr-enriched --overwrite --only-required --backend tesseract_cli --source-root ./agentic-bank-public/documents
 ```
 
 Outputs for solve: `submission.json`, `run_manifest.json`, `unresolved_cells.jsonl`, `failure_events.jsonl`, `solver_summary.md`.

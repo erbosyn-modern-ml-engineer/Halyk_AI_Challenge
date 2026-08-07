@@ -123,8 +123,9 @@ Stage 4.3 verified the competition path against local PostgreSQL 18.4 with `post
 - Stage 2: safe archive inventory + schema profiling only. Documents are inventoried, not content-parsed.
 - Stage 3: document parsing to canonical evidence spans. No embeddings, retrieval, LLM extraction, or workers.
 - Stage 4: structure-aware chunking and hybrid retrieval only. No DeepSeek, fact extraction, version resolver, or workers.
-- Stage 5A + 5A′ / 5A.1 / 5A.2: preflight quarantine, sanitized-manifest solver, baseline submission, isolated training scorer, shared PostParseQualityGate with page visual metadata (KNOWN|UNKNOWN), parse-cache v2 gate identity. No covenant calculation, no DeepSeek, no Stage 5B+.
-- Stage 5B+: model gateway, extraction, decisions, calculated submission (not started).
+- Stage 5A + 5A′ / 5A.1–5A.3: preflight quarantine, sanitized-manifest solver, baseline submission, isolated training scorer, shared PostParseQualityGate with page visual metadata (KNOWN|UNKNOWN), parse-cache v2 gate identity.
+- Stage 5A.4: selective provenance-safe OCR for blocking pages only (probe + planner + merge + CLI). Offline backend currently blocked (no Tesseract CLI / eng+rus+kaz). No covenant calculation, no DeepSeek, no Stage 5B+.
+- Stage 5B+: scenario/entity routing, model gateway, extraction, decisions, calculated submission (not started).
 
 ## Stage 5A.2 data flow
 
@@ -185,3 +186,18 @@ Legacy / pre-visual cache entries → CACHE_INCOMPATIBLE (reparse; never silent 
 6. Scorer never feeds expected values back into solver artifacts.
 7. No parser backend publishes final trusted SUCCESS without `PostParseQualityGate`.
 8. Unaudited file openers (missing `opened_paths`) are rejected before reads or submission publish.
+
+## Stage 5A.4 selective OCR
+
+```text
+parse_report + documents
+  → plan_selective_ocr (is_blocking_page_quality only; max_pages bound)
+  → ocr probe (TESSERACT_CLI preferred; no download; no silent RapidOCR fallback)
+  → recognize_pages(selected only)
+  → validate_ocr_page_text
+  → merge_ocr_into_document (preserve embedded; TextOrigin.OCR blocks)
+  → PostParseQualityGate
+  → enriched parse outputs (separate directory)
+```
+
+Evidence spans from OCR blocks carry `text_origin=OCR`, backend identity, page number, exact quote.
