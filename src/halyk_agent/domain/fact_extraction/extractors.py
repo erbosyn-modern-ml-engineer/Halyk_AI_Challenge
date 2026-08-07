@@ -40,6 +40,7 @@ from halyk_agent.domain.fact_extraction.text_locate import (
     parse_money,
     parse_percentage,
 )
+from halyk_agent.domain.fact_extraction.text_normalize import cue_corpus
 from halyk_agent.domain.ids import deterministic_id
 from halyk_agent.domain.parsing import CanonicalDocument
 
@@ -135,17 +136,124 @@ _RECLASS_EN = re.compile(
 
 _REJECTED_MARKERS = ("отклон", "отверг", "rejected", "не принят", "непринят")
 
+# Specific proposal/review + rejection / original-remains (NOT generic "не требовалось").
+_REJECTED_RECLASS_RU = re.compile(
+    r"(?P<body>"
+    r"(?:Операция\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+    r"[^.\n]{0,220}?"
+    r"(?:первоначально\s+учт[её]нн\w*\s+как\s+(?P<from>[^,(.\n]{2,80}?))?"
+    r"(?:\s*\((?P<money>\$[\d,]+(?:\.\d{2})?)\))?"
+    r"[^.\n]{0,200}?"
+    r"(?:"
+    r"рассматрива\w*.{0,80}?(?:перекласс\w*|переквалиф\w*)"
+    r"|предлага\w*.{0,60}?(?:отнести|перекласс\w*|переквалиф\w*)"
+    r"|на\s+предмет\s+возможн\w*\s+(?:перекласс\w*|переквалиф\w*)"
+    r")"
+    r"(?:.{0,80}?как\s+(?P<to>[^;,\n.]{2,80}))?"
+    r".{0,260}?"
+    r"(?:"
+    r"первоначальн\w*\s+классификац\w*.{0,40}?сохраня"
+    r"|корректировк\w*.{0,40}?(?:не\s+производи|не\s+требуется|не\s+требует)"
+    r"|предложен\w*.{0,40}?отклонен"
+    r"|рассмотрен\w*.{0,40}?отклонен"
+    r")"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
 
-def _clean_category(raw: str) -> str:
+_REJECTED_RECLASS_RU_ADJ = re.compile(
+    r"(?P<body>"
+    r"(?:Операция\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+    r"(?:\s*\((?P<money>\$[\d,]+(?:\.\d{2})?)[^)]*\))?"
+    r"[^.\n]{0,200}?"
+    r"(?:"
+    r"(?:запрошен\w*|проверена|рассмотрен\w*|по\s+результатам\s+рассмотрения)"
+    r".{0,120}?"
+    r")?"
+    r"(?:"
+    r"корректировк\w*.{0,60}?(?:не\s+требуется|не\s+требует|не\s+производи)"
+    r"|первоначальн\w*\s+классификац\w*.{0,40}?сохраня"
+    r")"
+    r"(?:.{0,120}?"
+    r"(?:первоначальн\w*\s+классификац\w*.{0,40}?сохраня"
+    r"|корректировк\w*.{0,40}?(?:не\s+требуется|не\s+требует|не\s+производи))"
+    r")?"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_REJECTED_RECLASS_EN = re.compile(
+    r"(?P<body>"
+    r"(?:Transaction\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+    r"[^.\n]{0,200}?"
+    r"(?:\((?P<money>\$[\d,]+(?:\.\d{2})?)\))?"
+    r"[^.\n]{0,160}?"
+    r"(?:"
+    r"considered\s+for\s+reclass\w*"
+    r"|proposed\s+reclass\w*"
+    r"|reviewed\s+(?:at\s+lender\s+request|for\s+reclass\w*)"
+    r")"
+    r"(?:.{0,80}?(?:to|as)\s+(?P<to>[^;,\n.]{2,80}))?"
+    r"(?:.{0,80}?(?:from|originally\s+(?:recorded|classified)\s+as)\s+"
+    r"(?P<from>[^;,\n.]{2,80}))?"
+    r".{0,220}?"
+    r"(?:"
+    r"original\s+classification\s+(?:remains|retained)"
+    r"|adjustment\s+(?:was\s+)?not\s+(?:made|required)"
+    r"|proposal\s+rejected"
+    r"|considered\s+and\s+rejected"
+    r")"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _clean_category(raw: str | None) -> str | None:
     """Normalize captured category text (stop at clause/purpose connectors)."""
-    text = raw.strip(" ,.;:\n\t")
+    if raw is None:
+        return None
+    text = raw.strip(" ,.;:\n\t()")
+    if not text:
+        return None
     text = re.split(
-        r"\s+(?:для\s+целей|был|была|были|was|were|for\s+covenant|Основание)\b",
+        r"\s+(?:для\s+целей|был|была|были|was|were|for\s+covenant|Основание|"
+        r"рассматрива|proposed|considered)\b",
         text,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
-    return text.strip(" ,.;:\n\t")
+    cleaned = text.strip(" ,.;:\n\t()")
+    return cleaned or None
+
+
+def _joined_document_text(
+    document: CanonicalDocument,
+) -> tuple[str, list[tuple[int, int, str]]]:
+    """Join pages with newlines; return (joined, [(global_start, page_number, page_text)])."""
+    slices = page_text_slices(document)
+    parts: list[str] = []
+    index: list[tuple[int, int, str]] = []
+    offset = 0
+    for page_number, text in slices:
+        index.append((offset, page_number, text))
+        parts.append(text)
+        offset += len(text) + 1
+    return "\n".join(parts), index
+
+
+def _map_joined_offset(global_offset: int, index: list[tuple[int, int, str]]) -> tuple[int, int]:
+    """Map joined-text offset → (page_number, page_local_offset)."""
+    for start, page_number, text in index:
+        end = start + len(text)
+        if start <= global_offset <= end:
+            return page_number, global_offset - start
+        if global_offset == end + 1:
+            # Boundary newline — attribute to this page end.
+            return page_number, len(text)
+    if index:
+        start, page_number, text = index[-1]
+        return page_number, min(len(text), max(0, global_offset - start))
+    return 1, 0
 
 
 def extract_reclassification(
@@ -154,49 +262,172 @@ def extract_reclassification(
     authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
-    for page_number, text in page_text_slices(document):
-        for pattern in (_RECLASS_RU, _RECLASS_EN):
-            for match in pattern.finditer(text):
-                body = match.group("body").strip()
-                money = parse_money(match.group("money"))
-                if money is None:
-                    continue
-                amount = MoneyAmount(value=money[0], currency=money[1])
-                cp = match.group("cp").strip(" ,.;")
-                from_cat = _clean_category(match.group("from"))
-                to_cat = _clean_category(match.group("to"))
-                if not from_cat or not to_cat or from_cat.casefold() == to_cat.casefold():
-                    continue
-                context = text[match.start() : min(len(text), match.end() + 120)].casefold()
-                disposition = (
-                    ReclassificationDisposition.REJECTED
-                    if any(m in context for m in _REJECTED_MARKERS)
-                    else ReclassificationDisposition.ACCEPTED
+    seen_keys: set[str] = set()
+    # Join pages so proposal/rejection sentences that cross page breaks still match.
+    text, page_index = _joined_document_text(document)
+
+    def _emit(
+        match: re.Match[str],
+        *,
+        disposition: ReclassificationDisposition,
+        reason_code: str,
+        from_cat: str | None,
+        to_cat: str | None,
+        money_raw: str | None,
+        txn_id: str | None,
+        counterparty: str | None = None,
+    ) -> None:
+        if disposition is ReclassificationDisposition.ACCEPTED:
+            dedupe = f"{txn_id}|{from_cat}|{to_cat}|ACCEPTED|{money_raw or ''}"
+        else:
+            dedupe = f"{txn_id}|{from_cat}|{to_cat}|REJECTED|{money_raw or ''}"
+        if dedupe in seen_keys:
+            return
+        g_start = match.start("body")
+        g_end = match.end("body")
+        page_number, local_start = _map_joined_offset(g_start, page_index)
+        # Quote must be an exact substring of a single page for evidence alignment.
+        page_text = next((t for s, p, t in page_index if p == page_number), "")
+        local_end = min(len(page_text), local_start + (g_end - g_start))
+        # If the match spans pages, prefer the page that contains the TXN id / money.
+        quote = page_text[local_start:local_end]
+        if txn_id and txn_id not in quote:
+            for _start, pnum, ptext in page_index:
+                if txn_id in ptext:
+                    idx = ptext.find(txn_id)
+                    # Take a bounded statement window on that page.
+                    q0 = max(0, ptext.rfind("\n", 0, idx) + 1)
+                    q1 = ptext.find("\n\n", idx)
+                    if q1 < 0:
+                        q1 = min(len(ptext), idx + 500)
+                    # Extend to cover rejection cues still on this page.
+                    page_number = pnum
+                    local_start = q0
+                    local_end = q1
+                    quote = ptext[local_start:local_end].strip()
+                    local_start = ptext.find(quote)
+                    local_end = local_start + len(quote)
+                    break
+        # Evidence must cover stated amount/categories when present on the quote page.
+        if money_raw and money_raw not in quote:
+            for _start, pnum, ptext in page_index:
+                if money_raw in ptext and (txn_id is None or txn_id in ptext):
+                    idx = ptext.find(txn_id or money_raw)
+                    q0 = max(0, idx - 40)
+                    q1 = min(len(ptext), idx + 420)
+                    snippet = ptext[q0:q1]
+                    page_number = pnum
+                    local_start = q0
+                    local_end = q1
+                    quote = snippet
+                    break
+        try:
+            amount = None
+            if money_raw:
+                money = parse_money(money_raw)
+                if money is not None:
+                    amount = MoneyAmount(value=money[0], currency=money[1])
+            if disposition is ReclassificationDisposition.ACCEPTED:
+                if not from_cat or not to_cat:
+                    return
+            elif not any((txn_id, amount, from_cat, to_cat)):
+                return
+            payload = TransactionReclassificationPayload(
+                transaction_id=txn_id,
+                counterparty=counterparty,
+                amount=amount,
+                from_category=from_cat,
+                to_category=to_cat,
+                disposition=disposition,
+            )
+        except Exception:
+            return
+        seen_keys.add(dedupe)
+        out.append(
+            _candidate(
+                requirement=requirement,
+                document=document,
+                authority_domain=authority_domain,
+                kind=FactKind.TRANSACTION_RECLASSIFICATION,
+                payload=payload,
+                quote=quote if quote.strip() else match.group("body")[:500],
+                page_number=page_number,
+                char_start=local_start,
+                char_end=local_end if local_end > local_start else local_start + len(quote),
+                reason_code=reason_code,
+            )
+        )
+
+    for pattern in (_RECLASS_RU, _RECLASS_EN):
+        for match in pattern.finditer(text):
+            money = parse_money(match.group("money"))
+            if money is None:
+                continue
+            cp = match.group("cp").strip(" ,.;")
+            from_cat = _clean_category(match.group("from"))
+            to_cat = _clean_category(match.group("to"))
+            if not from_cat or not to_cat or from_cat.casefold() == to_cat.casefold():
+                continue
+            context = text[match.start() : min(len(text), match.end() + 120)].casefold()
+            disposition = (
+                ReclassificationDisposition.REJECTED
+                if any(m in context for m in _REJECTED_MARKERS)
+                else ReclassificationDisposition.ACCEPTED
+            )
+            txn_ids = find_txn_ids(match.group("body"))
+            _emit(
+                match,
+                disposition=disposition,
+                reason_code="DET_RECLASS",
+                from_cat=from_cat,
+                to_cat=to_cat,
+                money_raw=match.group("money"),
+                txn_id=txn_ids[0] if txn_ids else None,
+                counterparty=cp or None,
+            )
+
+    for pattern, reason in (
+        (_REJECTED_RECLASS_RU, "DET_RECLASS_REJECTED"),
+        (_REJECTED_RECLASS_RU_ADJ, "DET_RECLASS_REJECTED_ADJ"),
+        (_REJECTED_RECLASS_EN, "DET_RECLASS_REJECTED_EN"),
+    ):
+        for match in pattern.finditer(text):
+            groups = match.groupdict()
+            txn_id = groups.get("txn")
+            from_cat = _clean_category(groups.get("from"))
+            to_cat = _clean_category(groups.get("to"))
+            if from_cat is None:
+                restated = re.search(
+                    r"первоначальн\w*\s+классификац\w*\s*\((?P<fc>[^)]{2,80})\)",
+                    match.group("body"),
+                    re.IGNORECASE,
                 )
-                txn_ids = find_txn_ids(body)
-                txn_id = txn_ids[0] if txn_ids else None
-                payload = TransactionReclassificationPayload(
-                    transaction_id=txn_id,
-                    counterparty=cp or None,
-                    amount=amount,
-                    from_category=from_cat,
-                    to_category=to_cat,
-                    disposition=disposition,
+                if restated:
+                    from_cat = _clean_category(restated.group("fc"))
+            money_raw = groups.get("money")
+            if money_raw is None:
+                money_hit = re.search(r"\$[\d,]+(?:\.\d{2})?", match.group("body"))
+                money_raw = money_hit.group(0) if money_hit else None
+            # Skip generic absence statements (CONFIRMED_NONE territory).
+            body_fold = match.group("body").casefold()
+            if (
+                re.search(
+                    r"переклассификац\w*\s+(?:за\s+ковенантн\w*\s+период\w*\s+)?не\s+требовал",
+                    body_fold,
                 )
-                out.append(
-                    _candidate(
-                        requirement=requirement,
-                        document=document,
-                        authority_domain=authority_domain,
-                        kind=FactKind.TRANSACTION_RECLASSIFICATION,
-                        payload=payload,
-                        quote=text[match.start("body") : match.end("body")],
-                        page_number=page_number,
-                        char_start=match.start("body"),
-                        char_end=match.end("body"),
-                        reason_code="DET_RECLASS",
-                    )
-                )
+                and "рассматрива" not in body_fold
+                and "предлага" not in body_fold
+            ):
+                continue
+            _emit(
+                match,
+                disposition=ReclassificationDisposition.REJECTED,
+                reason_code=reason,
+                from_cat=from_cat,
+                to_cat=to_cat,
+                money_raw=money_raw,
+                txn_id=txn_id,
+            )
     return out
 
 
@@ -231,6 +462,25 @@ def _period_dates(text: str, match_start: int, match_end: int) -> tuple[date | N
     return _parse_iso_date(m.group("start")), _parse_iso_date(m.group("end"))
 
 
+def _period_evidence_span(
+    text: str, match: re.Match[str], start: object, end: object
+) -> tuple[str, int, int]:
+    """Expand quote so service_start/service_end dates are covered when present nearby."""
+    body_start = match.start("body")
+    body_end = match.end("body")
+    if start is not None and end is not None:
+        window_start = max(0, match.start() - 80)
+        window = text[window_start : min(len(text), match.end() + 160)]
+        date_match = _SERVICE_RANGE.search(window)
+        if date_match is not None:
+            abs_start = window_start + date_match.start()
+            abs_end = window_start + date_match.end()
+            q0 = min(body_start, abs_start)
+            q1 = max(body_end, abs_end)
+            return text[q0:q1], q0, q1
+    return text[body_start:body_end], body_start, body_end
+
+
 def extract_period(
     requirement: FactRequirement,
     document: CanonicalDocument,
@@ -239,9 +489,9 @@ def extract_period(
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         for match in _PERIOD_EXCLUDE.finditer(text):
-            body = match.group("body").strip()
             label = (match.group("label") or "").strip(" ,.;") or None
             start, end = _period_dates(text, match.start(), match.end())
+            quote, q0, q1 = _period_evidence_span(text, match, start, end)
             payload = TransactionPeriodPayload(
                 transaction_id=match.group("txn"),
                 disposition=PeriodDisposition.EXCLUDE_FROM_PERIOD,
@@ -256,20 +506,19 @@ def extract_period(
                     authority_domain=authority_domain,
                     kind=FactKind.TRANSACTION_PERIOD,
                     payload=payload,
-                    quote=body[:500],
+                    quote=quote[:500],
                     page_number=page_number,
-                    char_start=match.start(),
-                    char_end=match.end(),
+                    char_start=q0,
+                    char_end=q1,
                     reason_code="DET_PERIOD_EXCLUDE",
                 )
             )
         for match in _PERIOD_ASSIGN.finditer(text):
-            body = match.group("body").strip()
             label = (match.group("label") or "").strip(" ,.;") or None
             start, end = _period_dates(text, match.start(), match.end())
-            # Prefer explicit service range as label when present.
             if start and end and not label:
                 label = f"{start.isoformat()}..{end.isoformat()}"
+            quote, q0, q1 = _period_evidence_span(text, match, start, end)
             payload = TransactionPeriodPayload(
                 transaction_id=match.group("txn"),
                 disposition=PeriodDisposition.ASSIGN_TO_PERIOD,
@@ -284,21 +533,65 @@ def extract_period(
                     authority_domain=authority_domain,
                     kind=FactKind.TRANSACTION_PERIOD,
                     payload=payload,
-                    quote=body[:500],
+                    quote=quote[:500],
                     page_number=page_number,
-                    char_start=match.start(),
-                    char_end=match.end(),
+                    char_start=q0,
+                    char_end=q1,
                     reason_code="DET_PERIOD_ASSIGN",
                 )
             )
     return out
 
 
+_LEGAL_FORM = r"(?:LLP|JSC|Inc\.?|LLC|Ltd\.?|PLC|ТОО|АО|ООО|TOO)"
+# Line-local rows only — do not let \\s bridge a header line into "LLP 42.3%".
 _OWNERSHIP_ROW = re.compile(
-    r"(?P<body>(?P<entity>[A-Za-zА-Яа-яЁё][\w .,&'\-]{1,80}?)\s+"
-    r"(?P<pct>\d+(?:[.,]\d+)?)\s*%)",
+    r"(?P<body>"
+    r"(?:"
+    r"[\"«„](?P<qname>[^\"»“\n]{2,80}?)[\"»“][ \t]*(?P<qform>" + _LEGAL_FORM + r")"
+    r"|"
+    r"[\"«„](?P<qname2>[^\"»“\n]{2,80}?)[\"»“]"
+    r"|"
+    r"(?P<entity>[A-Za-zА-Яа-яЁё0-9][A-Za-zА-Яа-яЁё0-9 .,&'\-]{0,80}?)"
+    r"(?:[ \t]+(?P<form>" + _LEGAL_FORM + r"))?"
+    r")"
+    r"[ \t]+(?P<pct>\d+(?:[.,]\d+)?)\s*%"
+    r")",
     re.UNICODE,
 )
+
+
+def _ownership_entity_name(match: re.Match[str]) -> str | None:
+    qname = match.groupdict().get("qname") or match.groupdict().get("qname2")
+    if qname:
+        form = match.groupdict().get("qform")
+        name = qname.strip(" ,.;:\t")
+        if form:
+            return f"{name} {form.strip()}"
+        return name
+    entity = (match.groupdict().get("entity") or "").strip(" :-\t,")
+    form = match.groupdict().get("form")
+    if not entity:
+        return None
+    # If entity already ends with legal form, keep as-is.
+    if form and not re.search(_LEGAL_FORM + r"\s*$", entity, re.IGNORECASE):
+        return f"{entity} {form.strip()}"
+    return entity
+
+
+def _page_has_ownership_signal(text: str) -> bool:
+    corpus = cue_corpus(text).casefold()
+    cues = ("владе", "ownership", "голосующ", "бенефициар", "доли участия")
+    if any(cue in corpus for cue in cues):
+        return True
+    # Structural fallback: multiple entity+% rows (OCR/mojibake may destroy cue words).
+    rows = list(_OWNERSHIP_ROW.finditer(text))
+    meaningful = 0
+    for match in rows:
+        name = _ownership_entity_name(match)
+        if name and is_meaningful_entity_name(name):
+            meaningful += 1
+    return meaningful >= 2
 
 
 def extract_ownership(
@@ -306,14 +599,14 @@ def extract_ownership(
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
-    ownership_cues = ("владе", "ownership", "голосующ", "бенефициар", "доли участия")
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
-        lowered = text.casefold()
-        if not any(cue in lowered for cue in ownership_cues):
+        if not _page_has_ownership_signal(text):
             continue
         for match in _OWNERSHIP_ROW.finditer(text):
-            entity = match.group("entity").strip(" :-\t")
+            entity = _ownership_entity_name(match)
+            if not entity:
+                continue
             # Skip table headers / boilerplate.
             if entity.casefold() in {
                 "организация",
@@ -325,10 +618,9 @@ def extract_ownership(
                 continue
             if not is_meaningful_entity_name(entity):
                 continue
-            pct = parse_percentage(match.group(0))
+            pct = parse_percentage(match.group("pct") + "%")
             if pct is None:
                 continue
-            # Prefer corporate-looking names (LLP/JSC/Inc or Latin letters).
             if not re.search(r"[A-Za-z]|ООО|АО|ТОО|LLP|JSC|Inc", entity):
                 continue
             payload = OwnershipPayload(
@@ -354,7 +646,7 @@ def extract_ownership(
 
 _RP_THRESHOLD = re.compile(
     r"(?P<body>(?:владеет|owns)\s+(?P<pct>\d+(?:[.,]\d+)?)\s*%\s+"
-    r"(?:и\s+более|or\s+more|или\s+более)[^.]{0,80}?"
+    r"(?:и\s+более|or\s+more|или\s+более)[^.]{0,100}?"
     r"(?:связанн\w*\s+сторон\w*|related\s+part(?:y|ies)))",
     re.IGNORECASE | re.DOTALL,
 )
@@ -367,11 +659,35 @@ def extract_related_party_threshold(
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
-        for match in _RP_THRESHOLD.finditer(text):
+        repaired = cue_corpus(text)
+        search_text = repaired if repaired != text else text
+        for match in _RP_THRESHOLD.finditer(search_text):
             pct = parse_percentage(match.group("pct") + "%")
             if pct is None:
                 continue
-            body = match.group("body").strip()
+            token = f"{match.group('pct')}%"
+            # Quote must be an exact substring of the original page text.
+            idx = text.find(token)
+            if idx < 0:
+                alt = token.replace(".", ",")
+                idx = text.find(alt)
+                token = alt if idx >= 0 else token
+            if idx < 0:
+                continue
+            line_start = text.rfind("\n", 0, idx) + 1
+            line_end = text.find("\n", idx)
+            if line_end < 0:
+                line_end = len(text)
+            # Include following line when related-party wording wraps.
+            next_end = text.find("\n", line_end + 1)
+            if next_end < 0:
+                next_end = min(len(text), line_end + 200)
+            quote = text[line_start:next_end].strip()
+            q0 = text.find(quote, line_start)
+            if q0 < 0:
+                q0 = line_start
+                quote = text[line_start:line_end]
+            q1 = q0 + len(quote)
             payload = RelatedPartyThresholdPayload(threshold_percent=pct)
             out.append(
                 _candidate(
@@ -380,10 +696,10 @@ def extract_related_party_threshold(
                     authority_domain=authority_domain,
                     kind=FactKind.RELATED_PARTY_THRESHOLD,
                     payload=payload,
-                    quote=body[:400],
+                    quote=quote[:400],
                     page_number=page_number,
-                    char_start=match.start(),
-                    char_end=match.end(),
+                    char_start=q0,
+                    char_end=q1,
                     reason_code="DET_RP_THRESHOLD",
                 )
             )
