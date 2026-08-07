@@ -4,13 +4,14 @@ Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
 One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
-**Stage 4: VERIFIED.** **Stage 5A: VERIFIED** (merged). **Stage 5A.4.1: VERIFIED** (Tesseract selective OCR; 7/7 public blocking pages recovered in bounded smoke).
+**Stage 4: VERIFIED.** **Stage 5A: VERIFIED** (merged). **Stage 5A.4.1: VERIFIED** (Tesseract selective OCR). **Stage 5B: implemented on branch** (deterministic scenario/entity routing).
 
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
 - **Modes** — `HALYK_MODE=competition` (default): solver consumes only a sanitized manifest and never opens/deserializes answer-key content (preflight may quarantine candidates). `HALYK_MODE=training` enables the isolated scorer only.
 - **Trust** — one `PostParseQualityGate` for every public parse path; pypdf/Docling page visual metadata uses KNOWN vs UNKNOWN (never silent zero).
 - **Selective OCR** — blocking pages only via Tesseract CLI (`eng+rus+kaz`); exe-relative tessdata discovery; no silent RapidOCR fallback; no automatic downloads.
+- **Scenario routing (Stage 5B)** — deterministic template→ledger→document identity mapping; exact account IDs first; no fuzzy/embedding ownership; no covenant evaluation yet.
 
 ## Requirements
 
@@ -61,9 +62,18 @@ uv run python -m halyk_agent ocr-diagnose --documents ./agentic-bank-public/docu
 # Selective OCR probe / run (Stage 5A.4) — no downloads; run exits non-zero if backend not offline-ready
 uv run python -m halyk_agent ocr probe --json-output
 # uv run python -m halyk_agent ocr run --parsed ./work/parsed-full --output ./work/ocr-enriched --overwrite --only-required --backend tesseract_cli --source-root ./agentic-bank-public/documents
+
+# Stage 5B — deterministic scenario/entity routing (no covenants, no LLM)
+uv run python -m halyk_agent route `
+  --dataset-manifest ./work/preflight/sanitized_manifest.json `
+  --parsed ./work/ocr-enriched `
+  --output ./work/routing `
+  --overwrite
 ```
 
 Outputs for solve: `submission.json`, `run_manifest.json`, `unresolved_cells.jsonl`, `failure_events.jsonl`, `solver_summary.md`.
+
+Outputs for route: `routing_manifest.json`, `scenario_routes.jsonl`, `document_links.jsonl`, `transaction_links.jsonl`, `entity_conflicts.jsonl`, `routing_summary.md`.
 
 Competition solver opened-file audit must never include ground truth or quarantined answer keys. Preflight may list them as quarantine metadata only.
 

@@ -124,8 +124,9 @@ Stage 4.3 verified the competition path against local PostgreSQL 18.4 with `post
 - Stage 3: document parsing to canonical evidence spans. No embeddings, retrieval, LLM extraction, or workers.
 - Stage 4: structure-aware chunking and hybrid retrieval only. No DeepSeek, fact extraction, version resolver, or workers.
 - Stage 5A + 5A′ / 5A.1–5A.3: preflight quarantine, sanitized-manifest solver, baseline submission, isolated training scorer, shared PostParseQualityGate with page visual metadata (KNOWN|UNKNOWN), parse-cache v2 gate identity.
-- Stage 5A.4: selective provenance-safe OCR for blocking pages only (probe + planner + merge + CLI). Offline backend currently blocked (no Tesseract CLI / eng+rus+kaz). No covenant calculation, no DeepSeek, no Stage 5B+.
-- Stage 5B+: scenario/entity routing, model gateway, extraction, decisions, calculated submission (not started).
+- Stage 5A.4 / 5A.4.1: selective provenance-safe OCR for blocking pages (Tesseract CLI eng+rus+kaz offline-ready after probe fix). No covenant calculation, no DeepSeek.
+- Stage 5B: deterministic scenario/entity routing (template→account→txn→document). No covenant DSL, no authority/version selection, no DeepSeek.
+- Stage 5C+: document taxonomy/authority, model gateway, extraction, decisions, calculated submission (not started).
 
 ## Stage 5A.2 data flow
 
@@ -201,3 +202,32 @@ parse_report + documents
 ```
 
 Evidence spans from OCR blocks carry `text_origin=OCR`, backend identity, page number, exact quote.
+
+## Stage 5B scenario and entity routing
+
+```text
+SanitizedDatasetManifest
+  + submission template answers
+  + primary ledger rows
+  + OCR-enriched CanonicalDocuments
+  + evidence catalogue (lineage input)
+  → discover scenarios (template only; opaque IDs)
+  → route transactions (configurable txn-id token; validate vs universe)
+  → scenario → account set (supports 0/1/N; conflicts explicit)
+  → extract exact account tokens + borrower declarations (EvidenceSpan required)
+  → document routing precedence:
+       EXPLICIT_ACCOUNT_ID (EXACT)
+       → EXPLICIT_BORROWER_DECLARATION (DECLARED)
+       → DECLARED_ENTITY_RELATION (record only)
+       → NORMALIZED_LEGAL_NAME (full token equality; DERIVED)
+       → UNRESOLVED
+  → RoutingManifest + JSONL links + conflicts/diagnostics
+```
+
+### Identity precedence and normalization
+
+1. Exact complete account identifiers beat company-name similarity (`IDENTIFIER_NAME_CONFLICT` when they disagree).
+2. Legal-name equality requires full normalized token sequences after NFKC / casefold / quote / punctuation / optional legal-suffix transforms — no fuzzy, substring, or embedding match.
+3. Retrieval may diagnose unresolved docs later; it must not assign scenario ownership in Stage 5B.
+4. Stage 5B does not choose final-vs-draft document authority (Stage 5C).
+5. No DeepSeek / LLM entity resolver in this stage.

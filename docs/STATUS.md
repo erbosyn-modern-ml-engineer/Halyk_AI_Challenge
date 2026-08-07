@@ -1,8 +1,8 @@
 # Status
 
-Current stage: **5A.4.1** (Tesseract probe fix + bounded OCR smoke)  
-Stage status: **VERIFIED** (7/7 selected pages OCR-succeeded; remaining blocking = 0)  
-Previous: Stage 5A.4 contracts landed on `stage-5a.4/selective-ocr`; Stage 5A / 5A.1–5A.3 **VERIFIED** on main
+Current stage: **5B** (deterministic scenario and entity routing)  
+Stage status: **COMPLETE on branch** `stage-5b/scenario-entity-routing` (not merged)  
+Previous: Stage 5A.4.1 Tesseract probe fix **VERIFIED** on main (`107b1e4`)
 
 Authoritative profile: **FULL** (competition)
 
@@ -14,50 +14,51 @@ Docker-free
 → Stage 5A:
     preflight → sanitized-manifest solver → baseline submission
     PostParseQualityGate (visual metadata KNOWN|UNKNOWN)
-→ Stage 5A.4 (this stage):
-    parse outputs → selective blocking-page plan
-    → OCR backend probe (no download)
-    → selective OCR (only if offline-ready)
-    → OCR quality validation
-    → provenance-preserving merge
-    → PostParseQualityGate again
+→ Stage 5A.4 / 5A.4.1:
+    selective OCR for blocking pages (Tesseract eng+rus+kaz)
+→ Stage 5B (this stage):
+    sanitized manifest + template + ledger + OCR-enriched CanonicalDocuments
+    → scenario universe (template only)
+    → transaction/account graph
+    → exact document identity routing + borrower candidates
+    → RoutingManifest (+ conflicts / diagnostics)
 ```
 
-## Stage 5A.4.1 readiness (measured)
+## Stage 5B readiness (measured public smoke)
 
-| Component | State |
-|-----------|--------|
-| Tesseract CLI | **offline_ready** (v5.4.0.20240606) |
-| tessdata eng/rus/kaz | **present** (exe-relative discovery; measured tessdata ≈ 23.3 MB) |
-| Probe bug fixed | empty `TESSDATA_PREFIX=""` no longer injected; sibling `tessdata/` discovered |
-| RapidOCR | still not selected (no onnxruntime / cyrillic; no silent fallback) |
-| Bounded public OCR | **7 selected / 7 succeeded / 0 remaining blocking** |
-| Downloads performed | **none** |
+| Signal | Measured |
+|--------|----------|
+| Scenarios from template | **12** (36 cells) |
+| Primary accounts | **12/12** (one account each) |
+| Scenario ledger rows linked | **673** / 1473 total |
+| Cross-scenario txn contamination | **0** |
+| Documents exact-account-linked | **55** |
+| Documents unresolved/noise | **145** |
+| Multi-scenario documents | **0** |
+| Near-name contamination (Shymkent / Ekibastuz) | **none** (distinct borrower norms) |
+| DeepSeek / LLM | **none** |
+| Retrieval used for ownership | **no** |
+| GT reads in solver audit | **0** |
 
-### Selective OCR command
+### Route command
 
 ```powershell
-uv run python -m halyk_agent ocr probe --json-output
-uv run python -m halyk_agent ocr run --parsed ./work/parsed-full --output ./work/ocr-enriched --overwrite --only-required --backend tesseract_cli --source-root ./agentic-bank-public/documents
-```
-
-### Commands
-
-```bash
-uv run python -m halyk_agent ocr probe
-uv run python -m halyk_agent ocr probe --json-output
-# ocr run requires offline-ready backend; exits non-zero otherwise
+uv run python -m halyk_agent route `
+  --dataset-manifest ./work/preflight/sanitized_manifest.json `
+  --parsed ./work/ocr-enriched `
+  --output ./work/routing `
+  --overwrite
 ```
 
 ### Invariants
 
-- Selective OCR only (default `--only-required`); no whole-document / all-PDF OCR.
-- Explicit backend selection; **no silent fallback** between engines.
-- No automatic model/language download.
-- OCR text has origin=`OCR` + backend identity; embedded text preserved.
-- Synthetic failure strings never become evidence.
-- Temporary render files use system temp and must be cleaned up.
+- Scenario IDs are opaque and come only from the submission template.
+- Exact complete account tokens only (`ACC-7801` ≠ `ACC-7801-08`).
+- Account identifiers outrank normalized legal names.
+- Conflicts are first-class records; no fuzzy/embedding ownership.
+- Document identity assertions require EvidenceSpan provenance.
+- Stage 5B does **not** select document authority/version (Stage 5C).
 
 ## Next gate
 
-**Stage 5B — Scenario and Entity Routing** — selective OCR is verified (7/7). Prepare Stage 5B after merge of `stage-5a.4.1/tesseract-probe-fix`.
+**Stage 5C — Document Taxonomy and Authority Resolution**
