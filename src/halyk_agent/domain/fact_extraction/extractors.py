@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import date
 from decimal import Decimal
 
+from halyk_agent.domain.authority.models import AuthorityDomain
+from halyk_agent.domain.fact_extraction.entity_quality import is_meaningful_entity_name
 from halyk_agent.domain.fact_extraction.models import (
     AmountCorrectionPayload,
     ExtractionMethod,
@@ -20,6 +23,7 @@ from halyk_agent.domain.fact_extraction.models import (
     OneTimeAddBackPayload,
     OwnershipPayload,
     PeriodDisposition,
+    RateSource,
     ReclassificationDisposition,
     RelatedPartyThresholdPayload,
     SubsidiaryKind,
@@ -40,15 +44,25 @@ from halyk_agent.domain.ids import deterministic_id
 from halyk_agent.domain.parsing import CanonicalDocument
 
 ExtractorFn = Callable[
-    [FactRequirement, CanonicalDocument],
+    [FactRequirement, CanonicalDocument, AuthorityDomain],
     list[FactCandidate],
 ]
+
+
+def _parse_iso_date(raw: str | None) -> date | None:
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError:
+        return None
 
 
 def _candidate(
     *,
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
     kind: FactKind,
     payload: object,
     quote: str,
@@ -73,7 +87,7 @@ def _candidate(
         scenario_id=requirement.scenario_id,
         fact_kind=kind,
         payload=payload,  # type: ignore[arg-type]
-        authority_domain=requirement.authority_domain,
+        authority_domain=authority_domain,
         source_document_id=document.document_id,
         source_file=document.source_file,
         source_sha256=document.source_sha256,
@@ -137,6 +151,7 @@ def _clean_category(raw: str) -> str:
 def extract_reclassification(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -172,6 +187,7 @@ def extract_reclassification(
                     _candidate(
                         requirement=requirement,
                         document=document,
+                        authority_domain=authority_domain,
                         kind=FactKind.TRANSACTION_RECLASSIFICATION,
                         payload=payload,
                         quote=text[match.start("body") : match.end("body")],
@@ -201,26 +217,43 @@ _PERIOD_ASSIGN = re.compile(
     r"(?:\s+(?:с\s+)?(?P<label>[^.\n]{2,80}))?)",
     re.IGNORECASE | re.DOTALL,
 )
+_SERVICE_RANGE = re.compile(
+    r"(?:с|from)\s+(?P<start>\d{4}-\d{2}-\d{2})\s+(?:по|to|until|-)\s+(?P<end>\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _period_dates(text: str, match_start: int, match_end: int) -> tuple[date | None, date | None]:
+    window = text[max(0, match_start - 80) : min(len(text), match_end + 120)]
+    m = _SERVICE_RANGE.search(window)
+    if m is None:
+        return None, None
+    return _parse_iso_date(m.group("start")), _parse_iso_date(m.group("end"))
 
 
 def extract_period(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         for match in _PERIOD_EXCLUDE.finditer(text):
             body = match.group("body").strip()
             label = (match.group("label") or "").strip(" ,.;") or None
+            start, end = _period_dates(text, match.start(), match.end())
             payload = TransactionPeriodPayload(
                 transaction_id=match.group("txn"),
                 disposition=PeriodDisposition.EXCLUDE_FROM_PERIOD,
                 period_label=label,
+                service_start=start,
+                service_end=end,
             )
             out.append(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.TRANSACTION_PERIOD,
                     payload=payload,
                     quote=body[:500],
@@ -233,15 +266,22 @@ def extract_period(
         for match in _PERIOD_ASSIGN.finditer(text):
             body = match.group("body").strip()
             label = (match.group("label") or "").strip(" ,.;") or None
+            start, end = _period_dates(text, match.start(), match.end())
+            # Prefer explicit service range as label when present.
+            if start and end and not label:
+                label = f"{start.isoformat()}..{end.isoformat()}"
             payload = TransactionPeriodPayload(
                 transaction_id=match.group("txn"),
                 disposition=PeriodDisposition.ASSIGN_TO_PERIOD,
                 period_label=label,
+                service_start=start,
+                service_end=end,
             )
             out.append(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.TRANSACTION_PERIOD,
                     payload=payload,
                     quote=body[:500],
@@ -264,6 +304,7 @@ _OWNERSHIP_ROW = re.compile(
 def extract_ownership(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     ownership_cues = ("владе", "ownership", "голосующ", "бенефициар", "доли участия")
     out: list[FactCandidate] = []
@@ -282,6 +323,8 @@ def extract_ownership(
                 continue
             if "доля" in entity.casefold() and len(entity) < 40:
                 continue
+            if not is_meaningful_entity_name(entity):
+                continue
             pct = parse_percentage(match.group(0))
             if pct is None:
                 continue
@@ -296,6 +339,7 @@ def extract_ownership(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.OWNERSHIP,
                     payload=payload,
                     quote=match.group("body").strip(),
@@ -319,6 +363,7 @@ _RP_THRESHOLD = re.compile(
 def extract_related_party_threshold(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -332,6 +377,7 @@ def extract_related_party_threshold(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.RELATED_PARTY_THRESHOLD,
                     payload=payload,
                     quote=body[:400],
@@ -355,6 +401,7 @@ _SEVERANCE = re.compile(
 def extract_off_ledger(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -371,6 +418,7 @@ def extract_off_ledger(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.OFF_LEDGER_AMOUNT,
                     payload=payload,
                     quote=body[:400],
@@ -409,6 +457,7 @@ _SUBSIDIARY = re.compile(
 def extract_subsidiary_status(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -434,6 +483,7 @@ def extract_subsidiary_status(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.SUBSIDIARY_STATUS,
                     payload=payload,
                     quote=body,
@@ -456,7 +506,7 @@ _FX = re.compile(
     re.IGNORECASE,
 )
 
-# Invoice in foreign currency settled in USD → implied settlement rate.
+# Invoice in foreign currency settled in another currency — preserve amounts; never invent rate.
 _FX_SETTLEMENT = re.compile(
     r"(?P<body>(?:счёт|invoice|amount)\s+на\s+сумму\s+"
     r"(?P<foreign>[\d,]+(?:\.\d+)?)\s*(?P<from>EUR|GBP|KZT|USD)"
@@ -464,7 +514,7 @@ _FX_SETTLEMENT = re.compile(
     r"(?:урегулирован|settled|оплачен)\w*"
     r"[^.]{0,80}?"
     r"(?:размере|of|amount)\s*"
-    r"(?P<money>\$[\d,]+(?:\.\d{2})?|(?P=from)\s*[\d,]+(?:\.\d{2})?))",
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?|(?:USD|EUR|GBP|KZT)\s*[\d,]+(?:\.\d{2})?))",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -472,6 +522,7 @@ _FX_SETTLEMENT = re.compile(
 def extract_fx_rate(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -492,13 +543,15 @@ def extract_fx_rate(
             payload = FxRatePayload(
                 from_currency=from_c,
                 to_currency=to_c,
-                rate=rate,
+                explicit_rate=rate,
+                rate_source=RateSource.EXPLICIT,
                 transaction_id=txn[0] if txn else None,
             )
             out.append(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.FX_RATE,
                     payload=payload,
                     quote=body[:400],
@@ -523,19 +576,23 @@ def extract_fx_rate(
             to_c = money[1]
             if from_c == to_c:
                 continue
-            rate = (money[0] / foreign).quantize(Decimal("0.000001"))
             body = match.group("body").strip()
             txn = find_txn_ids(text[max(0, match.start() - 80) : match.end() + 40])
+            # Source-faithful: keep both amounts; do NOT calculate a rate.
             payload = FxRatePayload(
                 from_currency=from_c,
                 to_currency=to_c,
-                rate=rate,
+                source_amount=MoneyAmount(value=foreign, currency=from_c),
+                settlement_amount=MoneyAmount(value=money[0], currency=to_c),
+                explicit_rate=None,
+                rate_source=RateSource.NOT_STATED,
                 transaction_id=txn[0] if txn else None,
             )
             out.append(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.FX_RATE,
                     payload=payload,
                     quote=body[:400],
@@ -558,6 +615,7 @@ _ONE_TIME = re.compile(
 def extract_one_time_add_back(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -574,6 +632,7 @@ def extract_one_time_add_back(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.ONE_TIME_ADD_BACK,
                     payload=payload,
                     quote=body[:400],
@@ -587,7 +646,9 @@ def extract_one_time_add_back(
 
 
 _AMOUNT_CORR = re.compile(
-    r"(?P<body>(?:сумма|amount)\s+(?:корректировк\w*|correction|adjusted\s+to)\s+"
+    r"(?P<body>(?:(?:уточн[её]нн\w*|исправленн\w*|correct(?:ed)?)\s+)?"
+    r"(?:сумма|amount)\s+"
+    r"(?:корректировк\w*|correction|adjusted\s+to|should\s+read|должна\s+составлять)?\s*"
     r"(?P<money>\$[\d,]+(?:\.\d{2})?)"
     r"(?:[^.]{0,60}?(?P<txn>TXN-[A-Za-z0-9]+-\d+))?)",
     re.IGNORECASE,
@@ -607,6 +668,7 @@ _AMOUNT_MISSING_LEDGER = re.compile(
 def extract_amount_correction(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -629,6 +691,7 @@ def extract_amount_correction(
                     _candidate(
                         requirement=requirement,
                         document=document,
+                        authority_domain=authority_domain,
                         kind=FactKind.AMOUNT_CORRECTION,
                         payload=payload,
                         quote=body[:400],
@@ -652,6 +715,7 @@ _TREATMENT = re.compile(
 def extract_treatment(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -672,6 +736,7 @@ def extract_treatment(
                 _candidate(
                     requirement=requirement,
                     document=document,
+                    authority_domain=authority_domain,
                     kind=FactKind.TRANSACTION_TREATMENT,
                     payload=payload,
                     quote=body[:400],
@@ -701,12 +766,19 @@ _EXTRACTORS: dict[FactKind, ExtractorFn] = {
 def extract_candidates(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    *,
+    authority_domain: AuthorityDomain | None = None,
 ) -> list[FactCandidate]:
     """Run the deterministic extractor for the requirement's FactKind."""
     fn = _EXTRACTORS.get(requirement.fact_kind)
     if fn is None:
         return []
-    return fn(requirement, document)
+    domain = authority_domain or (
+        requirement.allowed_authority_domains[0]
+        if requirement.allowed_authority_domains
+        else AuthorityDomain.FINANCIAL_ADJUSTMENTS
+    )
+    return fn(requirement, document, domain)
 
 
 # Silence unused import lint when TXN_ID_RE only used indirectly in some builds.
