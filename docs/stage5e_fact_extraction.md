@@ -1,6 +1,6 @@
 # Stage 5E — Structured Fact Extraction
 
-**Status:** `LIVE_PROVIDER_UNVERIFIED` (DeepSeek wired offline; no live API verification in CI)
+**Status:** `STAGE_5E_2_CLOSED` (source-fidelity + model-eligibility closure; DeepSeek wired offline; no live API verification in CI)
 
 ## Architecture
 
@@ -28,11 +28,26 @@ CovenantDefinitions + AuthorityDecisions (+ winning docs for source triggers)
  Model gateway  [--allow-network-models]
    DeepSeek V4 Flash primary (thinking disabled)
    DeepSeek thinking escalation (enabled + reasoning_effort=high)
-   max_external_attempts budget counts every HTTP (retries/escalation)
+   ExternalAttemptBudget claim-BEFORE each HTTP (retries/escalation)
+   JSON example + max_tokens in request; usage/latency on ModelCallRecord
+   cache identity includes provider_revision/cache_epoch + validator_version
 ```
 
 **Defaults:** deterministic-only, `allow_network=False`, fail-closed.
 No ledger mutation. No covenant actuals (Stage 5F). No `ground_truth.json` reads.
+
+### Stage 5E.2 closure notes
+
+- Rejected reclassifications (proposal/review + original-remains) are facts with
+  `disposition=REJECTED`, not `CONFIRMED_NONE`. Generic “не требовалось” stays
+  `CONFIRMED_NONE`. One requirement may resolve to multiple facts.
+- Ownership rows support quoted names (`"Name" LLP`, `«Name» LLP`) and keep legal form.
+- FX `SOURCE_TRIGGERED` requires a concrete FX **event** cue — not Note 5 policy boilerplate.
+- Subsidiary model eligibility requires subsidiary/дочерн/restricted language — bare
+  “групп”/“group” is insufficient (`ABSENT_FROM_SOURCE`).
+- Selected NEEDS_MODEL windows must themselves contain answer-capable evidence.
+- API model id remains `deepseek-v4-flash`; `HALYK_LLM_PROVIDER_REVISION` (default
+  `deepseek-v4-flash-2026-07-31`) is cache identity only.
 
 ## Packages
 
@@ -86,6 +101,8 @@ uv run halyk-agent models probe
 | `HALYK_LLM_MAX_THINKING_ESCALATIONS` | thinking escalations (default `2`) |
 | `HALYK_LLM_MAX_CONCURRENCY` | concurrency cap |
 | `HALYK_LLM_TEMPERATURE` | default `0` |
+| `HALYK_LLM_MAX_TOKENS` | DeepSeek output cap (default `2048`) |
+| `HALYK_LLM_PROVIDER_REVISION` | cache epoch only (default `deepseek-v4-flash-2026-07-31`) |
 | `DEEPSEEK_API_KEY` | DeepSeek runtime key |
 | `XAI_API_KEY` | **experimental / disabled** — not auto-selected |
 | `ANTHROPIC_API_KEY` | **experimental / disabled** — not auto-selected |
@@ -108,9 +125,13 @@ Network remains off unless `--allow-network-models` is passed, even if
 ## DeepSeek runtime notes
 
 - Base URL: `https://api.deepseek.com`
+- API model: `deepseek-v4-flash` (revision/cache epoch is separate metadata)
 - `response_format: {type: json_object}`
+- Prompt includes fact-kind-specific literal JSON example + `max_tokens`
 - Primary: `thinking: {type: disabled}`
 - Escalation: `thinking: {type: enabled}`, `reasoning_effort: high`
-- Cache identity includes thinking enabled/disabled + reasoning_effort
-- Empty content: at most one in-provider retry; each HTTP counts toward budget
+- Cache identity includes thinking mode, `max_tokens`, `provider_revision`, validator version
+- Empty content: at most one in-provider retry; each HTTP claims budget **before** the request
+- `ModelCallRecord` stores `latency_ms` + tolerant token usage (cache/reasoning optional)
 - Prompt forbids calculating unstated FX rates / values
+- Do not migrate to Responses API in Stage 5E
