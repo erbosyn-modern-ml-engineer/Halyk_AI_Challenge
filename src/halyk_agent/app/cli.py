@@ -215,6 +215,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail when a required authority domain has an unresolved conflict",
     )
 
+    covenant_parser = subparsers.add_parser(
+        "covenant",
+        help="Compile typed covenant definitions from authority (Stage 5D)",
+    )
+    covenant_sub = covenant_parser.add_subparsers(dest="covenant_command", required=True)
+    covenant_compile = covenant_sub.add_parser(
+        "compile",
+        help="Compile CovenantDefinitions for all template covenant cells",
+    )
+    covenant_compile.add_argument(
+        "--authority",
+        required=True,
+        type=Path,
+        help="Stage 5C authority output directory",
+    )
+    covenant_compile.add_argument(
+        "--parsed",
+        required=True,
+        type=Path,
+        help="OCR-enriched or Stage 5A parse output directory",
+    )
+    covenant_compile.add_argument(
+        "--template",
+        required=True,
+        type=Path,
+        help="Submission template JSON (answers universe)",
+    )
+    covenant_compile.add_argument("--output", required=True, type=Path)
+    covenant_compile.add_argument("--overwrite", action="store_true")
+    covenant_compile.add_argument("--json-output", action="store_true")
+
     return parser
 
 
@@ -523,6 +554,39 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print_authority_summary(authority_report)
         return 0
+
+    if args.command == "covenant":
+        if args.covenant_command == "compile":
+            from halyk_agent.app.covenant import (
+                CovenantServiceError,
+                covenant_from_paths,
+                print_covenant_summary,
+            )
+            from halyk_agent.app.covenant import (
+                report_to_json as covenant_report_to_json,
+            )
+
+            try:
+                covenant_report = covenant_from_paths(
+                    authority_dir=args.authority,
+                    parsed_dir=args.parsed,
+                    template_path=args.template,
+                    output_dir=args.output,
+                    overwrite=bool(args.overwrite),
+                )
+            except CovenantServiceError as exc:
+                print(f"covenant failed: {exc.message}", file=sys.stderr)
+                return 1
+            except Exception as exc:
+                print(f"covenant failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+                return 1
+            if args.json_output:
+                print(covenant_report_to_json(covenant_report), end="")
+            else:
+                print_covenant_summary(covenant_report)
+            return 0
+        parser.error(f"unknown covenant command: {args.covenant_command}")
+        return 2
 
     parser.error(f"unknown command: {args.command}")
     return 2
