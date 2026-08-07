@@ -54,6 +54,12 @@ def test_same_input_byte_identical_manifest() -> None:
     assert a.manifest.model_dump_json() == b.manifest.model_dump_json()
     assert a.manifest.dataset_manifest_hash == b.manifest.dataset_manifest_hash
     assert [d.document_id for d in a.document_links] == [d.document_id for d in b.document_links]
+    assert [e.assertion_id for e in a.identity_evidence] == [
+        e.assertion_id for e in b.identity_evidence
+    ]
+    assert "\n".join(e.model_dump_json() for e in a.identity_evidence) == "\n".join(
+        e.model_dump_json() for e in b.identity_evidence
+    )
 
 
 def test_no_cross_scenario_contamination_from_near_names() -> None:

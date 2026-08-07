@@ -102,10 +102,99 @@ def test_group_segment_declaration_routes() -> None:
     doc = make_document(
         artifact="group",
         raw_text=(
-            "Sarybel Holding JSC consolidated report.\n"
-            "The Group’s thermal generation segment is conducted through "
-            "Ekibastuz Power Services JSC as a standalone subsidiary."
+            "Note 6 — Segment Information.\n"
+            "The Group's generation segment is conducted through Alpha Energy JSC,\n"
+            "which operates as a standalone subsidiary."
         ),
+    )
+    bundle = _route(
+        doc,
+        accounts=(),
+        borrowers=(),
+        scenario_accounts={"P9": frozenset({"ACC-7809"})},
+        identities={"P9": frozenset({"alpha energy jsc"})},
+        raws={"alpha energy jsc": ("Alpha Energy JSC",)},
+    )
+    link = bundle.links[0]
+    assert link.method is ResolutionMethod.GROUP_SEGMENT_DECLARATION
+    assert link.group_document is True
+    assert link.scenario_ids == ("P9",)
+    assert link.evidence_span_ids
+
+
+def test_group_false_positive_boilerplate_falls_to_level4() -> None:
+    doc = make_document(
+        artifact="press",
+        raw_text=("About Alpha Energy JSC: the group operates across its key regional markets."),
+    )
+    bundle = _route(
+        doc,
+        accounts=(),
+        borrowers=(),
+        scenario_accounts={"P9": frozenset({"ACC-7809"})},
+        identities={"P9": frozenset({"alpha energy jsc"})},
+        raws={"alpha energy jsc": ("Alpha Energy JSC",)},
+    )
+    link = bundle.links[0]
+    assert link.method is ResolutionMethod.NORMALIZED_LEGAL_NAME
+    assert link.group_document is False
+    assert link.scenario_ids == ("P9",)
+
+
+def test_bare_segment_not_group_relation() -> None:
+    doc = make_document(
+        artifact="seg",
+        raw_text="Alpha Energy JSC — segment update",
+    )
+    bundle = _route(
+        doc,
+        accounts=(),
+        borrowers=(),
+        scenario_accounts={"P9": frozenset({"ACC-7809"})},
+        identities={"P9": frozenset({"alpha energy jsc"})},
+        raws={"alpha energy jsc": ("Alpha Energy JSC",)},
+    )
+    link = bundle.links[0]
+    assert link.method is ResolutionMethod.NORMALIZED_LEGAL_NAME
+    assert link.group_document is False
+
+
+def test_group_relation_multi_borrower_conflict() -> None:
+    doc = make_document(
+        artifact="multi",
+        raw_text=(
+            "The generation segment is conducted through Alpha Energy JSC "
+            "and Beta Power JSC as wholly owned subsidiaries."
+        ),
+    )
+    bundle = _route(
+        doc,
+        accounts=(),
+        borrowers=(),
+        scenario_accounts={
+            "P9": frozenset({"ACC-7809"}),
+            "P8": frozenset({"ACC-7808"}),
+        },
+        identities={
+            "P9": frozenset({"alpha energy jsc"}),
+            "P8": frozenset({"beta power jsc"}),
+        },
+        raws={
+            "alpha energy jsc": ("Alpha Energy JSC",),
+            "beta power jsc": ("Beta Power JSC",),
+        },
+    )
+    assert bundle.multi_scenario_count == 1
+    link = bundle.links[0]
+    assert link.method is ResolutionMethod.GROUP_SEGMENT_DECLARATION
+    assert link.notes == "MULTI_SCENARIO_DOCUMENT"
+    assert set(link.scenario_ids) == {"P8", "P9"}
+
+
+def test_whitespace_layout_name_routes_level4() -> None:
+    doc = make_document(
+        artifact="layout",
+        raw_text="Letterhead\nEkibastuz Power\nServices JSC\nInternal memo",
     )
     bundle = _route(
         doc,
@@ -116,7 +205,6 @@ def test_group_segment_declaration_routes() -> None:
         raws={"ekibastuz power services jsc": ("Ekibastuz Power Services JSC",)},
     )
     link = bundle.links[0]
-    assert link.method is ResolutionMethod.GROUP_SEGMENT_DECLARATION
-    assert link.group_document is True
+    assert link.method is ResolutionMethod.NORMALIZED_LEGAL_NAME
     assert link.scenario_ids == ("P5",)
     assert link.evidence_span_ids
