@@ -236,6 +236,8 @@ def test_deepseek_primary_request_shape(monkeypatch: Any) -> None:
     assert body["response_format"] == {"type": "json_object"}
     assert body["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in body
+    assert body["max_tokens"] == 2048
+    assert "json_example" in body["messages"][1]["content"]
 
 
 def test_deepseek_thinking_escalation_shape(monkeypatch: Any) -> None:
