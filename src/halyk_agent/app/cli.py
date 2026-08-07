@@ -246,6 +246,59 @@ def build_parser() -> argparse.ArgumentParser:
     covenant_compile.add_argument("--overwrite", action="store_true")
     covenant_compile.add_argument("--json-output", action="store_true")
 
+    facts_parser = subparsers.add_parser(
+        "facts",
+        help="Structured fact extraction (Stage 5E)",
+    )
+    facts_sub = facts_parser.add_subparsers(dest="facts_command", required=True)
+    facts_extract = facts_sub.add_parser(
+        "extract",
+        help="Extract structured facts from authoritative documents",
+    )
+    facts_extract.add_argument(
+        "--authority",
+        required=True,
+        type=Path,
+        help="Stage 5C authority output directory",
+    )
+    facts_extract.add_argument(
+        "--covenants",
+        required=True,
+        type=Path,
+        help="Stage 5D covenant output directory (or covenant_definitions.jsonl)",
+    )
+    facts_extract.add_argument(
+        "--parsed",
+        required=True,
+        type=Path,
+        help="OCR-enriched or Stage 5A parse output directory",
+    )
+    facts_extract.add_argument(
+        "--ledger",
+        type=Path,
+        default=None,
+        help="Optional ledger CSV for TXN id semantic checks",
+    )
+    facts_extract.add_argument("--output", required=True, type=Path)
+    facts_extract.add_argument("--overwrite", action="store_true")
+    facts_extract.add_argument(
+        "--allow-network-models",
+        action="store_true",
+        help="Enable model gateway HTTP (default: deterministic-only, fail-closed)",
+    )
+    facts_extract.add_argument("--json-output", action="store_true")
+
+    models_probe = models_sub.add_parser(
+        "probe",
+        help="Show configured LLM providers (never HTTP unless --allow-network)",
+    )
+    models_probe.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="Acknowledge network mode; probe still does not call providers",
+    )
+    models_probe.add_argument("--json-output", action="store_true")
+
     return parser
 
 
@@ -379,6 +432,22 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         for line in lines:
             print(line)
+        return 0
+
+    if args.command == "models" and args.models_command == "probe":
+        from halyk_agent.app.facts import probe_models
+
+        probe = probe_models(
+            allow_network=bool(args.allow_network),
+            settings=get_settings(),
+        )
+        if args.json_output:
+            import json
+
+            print(json.dumps(probe, indent=2, sort_keys=True) + "\n", end="")
+        else:
+            for key, value in sorted(probe.items()):
+                print(f"{key}={value}")
         return 0
 
     if args.command == "dataset" and args.dataset_command == "preflight":
@@ -586,6 +655,43 @@ def main(argv: list[str] | None = None) -> int:
                 print_covenant_summary(covenant_report)
             return 0
         parser.error(f"unknown covenant command: {args.covenant_command}")
+        return 2
+
+    if args.command == "facts":
+        if args.facts_command == "extract":
+            from halyk_agent.app.facts import (
+                FactServiceError,
+                facts_from_paths,
+                print_facts_summary,
+            )
+            from halyk_agent.app.facts import report_to_json as facts_report_to_json
+
+            try:
+                facts_report = facts_from_paths(
+                    authority_dir=args.authority,
+                    covenants_dir=args.covenants,
+                    parsed_dir=args.parsed,
+                    output_dir=args.output,
+                    ledger_path=args.ledger,
+                    overwrite=bool(args.overwrite),
+                    allow_network_models=bool(args.allow_network_models),
+                    settings=get_settings(),
+                )
+            except FactServiceError as exc:
+                print(f"facts extract failed: {exc.message}", file=sys.stderr)
+                return 1
+            except Exception as exc:
+                print(
+                    f"facts extract failed: {exc.__class__.__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            if args.json_output:
+                print(facts_report_to_json(facts_report), end="")
+            else:
+                print_facts_summary(facts_report)
+            return 0
+        parser.error(f"unknown facts command: {args.facts_command}")
         return 2
 
     parser.error(f"unknown command: {args.command}")

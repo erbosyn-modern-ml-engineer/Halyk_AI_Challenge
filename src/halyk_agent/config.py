@@ -67,6 +67,18 @@ class Settings(BaseSettings):
     quality_max_duplicate_line_ratio: float = Field(default=0.9, ge=0.0, le=1.0)
     quality_max_pages_without_text_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
 
+    # Stage 5E structured model gateway (prefix HALYK_)
+    llm_primary_provider: str = Field(default="xai")
+    llm_primary_model: str = Field(default="grok-4.5")
+    llm_escalation_provider: str = Field(default="anthropic")
+    llm_escalation_model: str = Field(default="claude-opus-5")
+    llm_timeout_seconds: float = Field(default=60.0, gt=0.0)
+    llm_max_calls: int = Field(default=50, ge=0)
+    llm_max_concurrency: int = Field(default=2, ge=1)
+    llm_max_retries: int = Field(default=1, ge=0)
+    llm_escalation_max_calls: int = Field(default=5, ge=0)
+    llm_temperature: float = Field(default=0.0, ge=0.0)
+
     def execution_profile(self) -> ExecutionProfile:
         """Return the configured FAST or FULL profile declaration."""
         return load_profile(self.profile)
