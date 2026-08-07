@@ -338,8 +338,8 @@ class CanonicalDocument(BaseModel):
     def _document_invariants(self) -> CanonicalDocument:
         if self.status is ParseStatus.SUCCESS and not self.pages:
             raise ValueError("SUCCESS requires at least one page")
-        if self.status is ParseStatus.FAILED and any(page.raw_text.strip() for page in self.pages):
-            raise ValueError("FAILED must not contain trusted page content")
+        # FAILED means no trusted usable pages (PostParseQualityGate). Observational
+        # text may remain on blocking pages for diagnostics; it is not trusted content.
         sorted_pages = sorted(self.pages, key=lambda page: page.page_number)
         object.__setattr__(self, "pages", sorted_pages)
         return self

@@ -153,33 +153,31 @@ def apply_post_parse_quality_gate(
         page_visuals=ordered_visuals,
     )
 
-    usable_text = any(
-        page.raw_text.strip() and not is_blocking_page_quality(state)
+    # Trusted usable pages: non-blocking page-quality AND usable extracted text.
+    # Text on a blocking page never makes that page trusted.
+    trusted_usable_pages = [
+        page
         for page, state in zip(document.pages, page_states, strict=False)
-    )
-    # Also treat TEXT_OK / LOW_TEXT with content as usable even if somehow listed.
-    usable_text = usable_text or any(
-        page.raw_text.strip()
-        and state
-        in {PageQualityState.TEXT_OK, PageQualityState.LOW_TEXT, PageQualityState.OCR_SUCCEEDED}
-        for page, state in zip(document.pages, page_states, strict=False)
-    )
+        if page.raw_text.strip() and not is_blocking_page_quality(state)
+    ]
+    has_blocking = any(is_blocking_page_quality(s) for s in page_states)
 
     status = document.status
-    has_blocking = any(is_blocking_page_quality(s) for s in page_states)
-    if has_blocking:
-        if usable_text:
-            if status is ParseStatus.SUCCESS:
-                status = ParseStatus.PARTIAL
+    if status in {
+        ParseStatus.SUCCESS,
+        ParseStatus.PARTIAL,
+        ParseStatus.FAILED,
+        ParseStatus.QUALITY_REJECTED,
+    }:
+        if not trusted_usable_pages:
+            # C/D: every page blocking, or no trusted usable content → FAILED
+            status = ParseStatus.FAILED
+        elif has_blocking:
+            # B: at least one trusted usable page + at least one blocking page
+            status = ParseStatus.PARTIAL
         else:
-            # No trusted usable text → FAILED (empty pages are allowed on FAILED).
-            if not any(page.raw_text.strip() for page in document.pages):
-                status = ParseStatus.FAILED
-            elif status is ParseStatus.SUCCESS:
-                status = ParseStatus.PARTIAL
-    elif not usable_text and status is ParseStatus.SUCCESS:
-        # No blocking labels but also no trusted extract → never SUCCESS.
-        status = ParseStatus.FAILED
+            # A: no blocking pages and trusted usable content
+            status = ParseStatus.SUCCESS
 
     if status is document.status and warnings == list(document.warnings):
         return PostParseGateResult(document=document, summary=summary)

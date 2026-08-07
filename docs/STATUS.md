@@ -1,10 +1,10 @@
 # Status
 
-Current stage: **5A.2** (final trust-gate and isolation fixes)  
-Stage status: **IMPLEMENTED** (awaiting Opus 5 final read-only review of H2-1/2/3 and B1-a/b)  
-Previous: Stage 5A.1 IMPLEMENTED; Stage 4 **VERIFIED** (merged)
+Current stage: **5A.3** (final medium fixes and merge gate)  
+Stage status: **IMPLEMENTED** (awaiting merge after report verification)  
+Previous: Stage 5A.2 IMPLEMENTED (B1/H1/H2 fixed); Stage 4 **VERIFIED** (merged)
 
-**Not VERIFIED.** Do not mark Stage 5A VERIFIED until the final Opus gate passes.
+**Not VERIFIED.** Do not mark Stage 5A VERIFIED until merge review completes.
 
 Authoritative profile: **FULL** (competition)
 
@@ -99,6 +99,11 @@ uv run python -m halyk_agent ocr-diagnose --documents ./agentic-bank-public/docu
 - Covenant calculation / document authority / DSL (not started)
 - DeepSeek / LLM fact extraction (not started)
 
+### Stage 5A.3 medium fixes
+
+- Image counting uses `len(page.images)` (no ImageFile materialisation / decode).
+- Trust status: PARTIAL requires ≥1 trusted usable (non-blocking) page; all-blocking documents are FAILED.
+
 ## Next gate
 
-**Opus 5 final read-only review of H2-1/H2-2/H2-3 and B1-a/B1-b** — do not merge until reviewed. Do not begin Stage 5B.
+**Merge `stage-5a.3/final-medium-fixes` into main after report verification.** Do not begin Stage 5B.

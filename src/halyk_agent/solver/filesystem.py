@@ -42,6 +42,23 @@ def require_audited_opener(opener: object) -> FileOpener:
             "solver FileOpener must implement read_bytes and opened_paths; "
             "unaudited openers are rejected before any input is read"
         )
-    # Touch property to ensure it is usable.
-    _ = list(opener.opened_paths)
+    try:
+        opened = opener.opened_paths
+    except Exception as exc:
+        raise LeakageAttemptError(
+            "solver FileOpener.opened_paths is unusable; "
+            "unaudited openers are rejected before any input is read"
+        ) from exc
+    if opened is None:
+        raise LeakageAttemptError(
+            "solver FileOpener.opened_paths must be a sequence, not None; "
+            "unaudited openers are rejected before any input is read"
+        )
+    try:
+        _ = list(opened)
+    except TypeError as exc:
+        raise LeakageAttemptError(
+            "solver FileOpener.opened_paths must be an iterable sequence; "
+            "unaudited openers are rejected before any input is read"
+        ) from exc
     return opener

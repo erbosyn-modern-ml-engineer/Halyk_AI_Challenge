@@ -155,10 +155,11 @@ pypdf PageVisualSignals (page.images / XObject) ──┐
 Docling pictures[].prov[].page_no (or UNKNOWN) ──┼→ finalize → PostParseQualityGate
 Protocol parse() / app batch / cache hit ────────┘
 
-Authoritative mapping:
-  usable pages, no blocking → SUCCESS
-  some usable text + blocking pages → PARTIAL
-  no trusted usable text → FAILED
+Authoritative mapping (trusted_usable = usable text AND non-blocking state):
+  trusted usable pages, no blocking → SUCCESS
+  ≥1 trusted usable page + ≥1 blocking page → PARTIAL
+  every page blocking, or zero trusted usable pages → FAILED
+  text on a blocking page never counts as trusted
   UNKNOWN visuals + empty/low text → conservative non-SUCCESS
   verified image_count>=1 + empty text → OCR_REQUIRED (blocking)
 
