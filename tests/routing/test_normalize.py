@@ -44,3 +44,20 @@ def test_compat_wrapper_defaults_to_identity_key() -> None:
     key, tokens, _ = normalize_legal_name("Aktau Port Services JSC")
     assert key == "aktau port services jsc"
     assert tokens[-1] == "jsc"
+
+
+def test_legal_form_punctuation_variants_match() -> None:
+    assert names_match_exact("Kazyna Capital LLP", "Kazyna Capital LLP.")
+    assert names_match_exact("Kazyna Capital LLP", "Kazyna Capital L.L.P.")
+    assert names_match_exact("Kazyna Capital LLP.", "Kazyna Capital L.L.P.")
+    assert names_match_exact("Alpha Energy JSC", "Alpha Energy J.S.C.")
+    assert names_match_exact("Alpha Energy JSC", "Alpha Energy J.S.C")
+
+
+def test_legal_form_classes_remain_distinct_under_punctuation() -> None:
+    assert not names_match_exact("Alpha Energy JSC", "Alpha Energy LLP")
+    assert not names_match_exact("Alpha Energy J.S.C.", "Alpha Energy L.L.P.")
+    assert not names_match_exact("Alpha Energy JSC", "Alpha Energy TOO")
+    assert not names_match_exact("Alpha Energy LLP", "Alpha Energy TOO")
+    # Same base name, different legal form — still distinct.
+    assert not names_match_exact("Alpha Energy JSC", "Alpha Energy Services JSC")

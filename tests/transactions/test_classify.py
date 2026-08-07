@@ -18,10 +18,35 @@ def test_capitalised_interest_is_capex_not_conflict() -> None:
     assert hit.category is MetricCategory.CAPEX
 
 
-def test_rent_inflow_is_revenue_not_rent_expense() -> None:
+def test_rent_credit_is_not_customer_revenue() -> None:
     hit = classify_description("Sublet rent received — February")
     assert hit.status == "CLASSIFIED"
+    assert hit.category is MetricCategory.RENT
+    assert hit.category is not MetricCategory.REVENUE
+
+
+def test_genuine_customer_revenue() -> None:
+    hit = classify_description("Customer invoice collection — March settlement")
+    assert hit.status == "CLASSIFIED"
     assert hit.category is MetricCategory.REVENUE
+
+
+def test_ad_campaign_is_opex_not_revenue() -> None:
+    hit = classify_description("Product launch ad campaign — Q1")
+    assert hit.status == "CLASSIFIED"
+    assert hit.category is MetricCategory.OPEX
+
+
+def test_payroll_rebate_is_labor_credit() -> None:
+    hit = classify_description("Payroll agency rebate — hub 2025")
+    assert hit.status == "CLASSIFIED"
+    assert hit.category is MetricCategory.LABOR
+
+
+def test_telecom_leased_line_is_lease() -> None:
+    hit = classify_description("Telecom leased line — site office")
+    assert hit.status == "CLASSIFIED"
+    assert hit.category is MetricCategory.LEASE_PAYMENTS
 
 
 def test_lease_vs_rent_collision_when_both_expense() -> None:
