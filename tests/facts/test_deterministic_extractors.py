@@ -1,5 +1,7 @@
 """Deterministic extractor tests with RU/EN fixture documents."""
 
+# ruff: noqa: RUF001
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -8,25 +10,15 @@ from halyk_agent.domain.authority.models import AuthorityDomain
 from halyk_agent.domain.fact_extraction.extractors import extract_candidates
 from halyk_agent.domain.fact_extraction.models import (
     FactKind,
-    FactRequirement,
     OffLedgerAmountPayload,
     OwnershipPayload,
+    RateSource,
     ReclassificationDisposition,
     RelatedPartyThresholdPayload,
     TransactionReclassificationPayload,
 )
 from tests.authority.helpers import make_document
-
-
-def _req(kind: FactKind, domain: AuthorityDomain, *cues: str) -> FactRequirement:
-    return FactRequirement(
-        requirement_id=f"req-{kind.value}",
-        scenario_id="S1",
-        fact_kind=kind,
-        authority_domain=domain,
-        reason_code="TEST",
-        lexical_cues=cues,
-    )
+from tests.facts.helpers import make_requirement
 
 
 def test_reclassification_ru_pattern() -> None:
@@ -37,10 +29,10 @@ def test_reclassification_ru_pattern() -> None:
     )
     doc = make_document(raw_text=text)
     cands = extract_candidates(
-        _req(
+        make_requirement(
             FactKind.TRANSACTION_RECLASSIFICATION,
-            AuthorityDomain.FINANCIAL_ADJUSTMENTS,
             "перекласс",
+            domain=AuthorityDomain.FINANCIAL_ADJUSTMENTS,
         ),
         doc,
     )
@@ -69,7 +61,7 @@ def test_period_exclude_and_amount_missing_ledger() -> None:
     )
     doc = make_document(raw_text=period_text)
     period = extract_candidates(
-        _req(FactKind.TRANSACTION_PERIOD, AuthorityDomain.FINANCIAL_ADJUSTMENTS, "TXN-"),
+        make_requirement(FactKind.TRANSACTION_PERIOD, "TXN-"),
         doc,
     )
     assert period
@@ -84,13 +76,60 @@ def test_period_exclude_and_amount_missing_ledger() -> None:
     )
     doc2 = make_document(raw_text=amount_text)
     amounts = extract_candidates(
-        _req(FactKind.AMOUNT_CORRECTION, AuthorityDomain.FINANCIAL_ADJUSTMENTS, "TXN-"),
+        make_requirement(FactKind.AMOUNT_CORRECTION, "TXN-"),
         doc2,
     )
     assert amounts
     assert isinstance(amounts[0].payload, AmountCorrectionPayload)
     assert amounts[0].payload.transaction_id == "TXN-P8-0031"
     assert amounts[0].payload.amount.value == Decimal("884204.16")
+
+
+def test_period_preserves_service_dates() -> None:
+    from datetime import date
+
+    from halyk_agent.domain.fact_extraction.models import TransactionPeriodPayload
+
+    text = (
+        "Операция TXN-B4-0001 относится к услугам, оказанным в период с 2026-01-15 по 2026-03-20."
+    )
+    doc = make_document(raw_text=text)
+    cands = extract_candidates(make_requirement(FactKind.TRANSACTION_PERIOD, "TXN-"), doc)
+    assert cands
+    payload = cands[0].payload
+    assert isinstance(payload, TransactionPeriodPayload)
+    assert payload.service_start == date(2026, 1, 15)
+    assert payload.service_end == date(2026, 3, 20)
+
+
+def test_fx_settlement_no_calculated_rate() -> None:
+    from halyk_agent.domain.fact_extraction.models import FxRatePayload
+
+    text = "Счёт на сумму 100 EUR урегулирован в размере $116.00."
+    doc = make_document(raw_text=text)
+    cands = extract_candidates(make_requirement(FactKind.FX_RATE, "курс", "eur"), doc)
+    assert cands
+    payload = cands[0].payload
+    assert isinstance(payload, FxRatePayload)
+    assert payload.rate_source is RateSource.NOT_STATED
+    assert payload.explicit_rate is None
+    assert payload.source_amount is not None
+    assert payload.source_amount.value == Decimal("100")
+    assert payload.settlement_amount is not None
+    assert payload.settlement_amount.value == Decimal("116.00")
+
+
+def test_fx_explicit_rate_kept() -> None:
+    from halyk_agent.domain.fact_extraction.models import FxRatePayload
+
+    text = "обменный курс составил 1.16 EUR/USD"
+    doc = make_document(raw_text=text)
+    cands = extract_candidates(make_requirement(FactKind.FX_RATE, "курс"), doc)
+    assert cands
+    payload = cands[0].payload
+    assert isinstance(payload, FxRatePayload)
+    assert payload.rate_source is RateSource.EXPLICIT
+    assert payload.explicit_rate == Decimal("1.16")
 
 
 def test_rejected_reclassification() -> None:
@@ -100,16 +139,30 @@ def test_rejected_reclassification() -> None:
     )
     doc = make_document(raw_text=text)
     cands = extract_candidates(
-        _req(
+        make_requirement(
             FactKind.TRANSACTION_RECLASSIFICATION,
-            AuthorityDomain.FINANCIAL_ADJUSTMENTS,
             "перекласс",
+            domain=AuthorityDomain.FINANCIAL_ADJUSTMENTS,
         ),
         doc,
     )
     assert cands
     assert isinstance(cands[0].payload, TransactionReclassificationPayload)
     assert cands[0].payload.disposition is ReclassificationDisposition.REJECTED
+
+
+def test_ownership_rejects_legal_form_only() -> None:
+    text = "Бенефициарное владение\nLLP 31.4%\nErtis Capital, LLP 31.4%\n"
+    doc = make_document(raw_text=text)
+    own = extract_candidates(
+        make_requirement(
+            FactKind.OWNERSHIP, "владе", "%", domain=AuthorityDomain.KYC_RELATIONSHIPS
+        ),
+        doc,
+    )
+    names = [c.payload.entity_name for c in own if isinstance(c.payload, OwnershipPayload)]
+    assert all(n.casefold() not in {"llp", "jsc", "тоо", "ао"} for n in names)
+    assert any(n.startswith("Ertis") for n in names)
 
 
 def test_ownership_and_kyc_threshold() -> None:
@@ -123,7 +176,9 @@ def test_ownership_and_kyc_threshold() -> None:
     )
     doc = make_document(raw_text=text)
     own = extract_candidates(
-        _req(FactKind.OWNERSHIP, AuthorityDomain.KYC_RELATIONSHIPS, "владе", "%"),
+        make_requirement(
+            FactKind.OWNERSHIP, "владе", "%", domain=AuthorityDomain.KYC_RELATIONSHIPS
+        ),
         doc,
     )
     assert any(
@@ -133,10 +188,10 @@ def test_ownership_and_kyc_threshold() -> None:
         for c in own
     )
     thr = extract_candidates(
-        _req(
+        make_requirement(
             FactKind.RELATED_PARTY_THRESHOLD,
-            AuthorityDomain.KYC_RELATIONSHIPS,
             "связанн",
+            domain=AuthorityDomain.KYC_RELATIONSHIPS,
         ),
         doc,
     )
@@ -152,11 +207,7 @@ def test_severance_off_ledger() -> None:
     )
     doc = make_document(raw_text=text)
     cands = extract_candidates(
-        _req(
-            FactKind.OFF_LEDGER_AMOUNT,
-            AuthorityDomain.FINANCIAL_ADJUSTMENTS,
-            "выходн",
-        ),
+        make_requirement(FactKind.OFF_LEDGER_AMOUNT, "выходн"),
         doc,
     )
     assert cands

@@ -22,6 +22,11 @@ from halyk_agent.domain.covenants.models import (
     ScopeKind,
 )
 from halyk_agent.domain.covenants.quantity import QuantityType, TypedQuantity
+from halyk_agent.domain.fact_extraction.models import (
+    DerivationKind,
+    FactKind,
+    FactRequirement,
+)
 from halyk_agent.domain.ids import deterministic_id
 
 
@@ -82,3 +87,26 @@ def reclass_modifier(
     kind: CovenantModifierKind = CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
 ) -> CovenantModifier:
     return CovenantModifier(kind=kind, detail="reclass")
+
+
+def make_requirement(
+    kind: FactKind,
+    *cues: str,
+    domain: AuthorityDomain = AuthorityDomain.FINANCIAL_ADJUSTMENTS,
+    domains: tuple[AuthorityDomain, ...] | None = None,
+    derivation: DerivationKind = DerivationKind.SEMANTIC_REQUIRED,
+    strong: tuple[str, ...] = (),
+    reason: str = "TEST",
+) -> FactRequirement:
+    allowed = domains or (domain,)
+    return FactRequirement(
+        requirement_id=f"req-{kind.value}",
+        scenario_id="S1",
+        fact_kind=kind,
+        derivation_kind=derivation,
+        trigger_rule="test",
+        allowed_authority_domains=allowed,
+        reason_code=reason,
+        lexical_cues=cues,
+        strong_lexical_cues=strong or cues,
+    )

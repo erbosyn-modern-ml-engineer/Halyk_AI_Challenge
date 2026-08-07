@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from halyk_agent.domain.authority.models import AuthorityDomain
 from halyk_agent.domain.fact_extraction.models import (
+    DerivationKind,
     ExtractionMethod,
     FactCandidate,
     FactKind,
@@ -15,6 +16,7 @@ from halyk_agent.domain.fact_extraction.models import (
     MoneyAmount,
     OffLedgerAmountPayload,
     OwnershipPayload,
+    RateSource,
     TransactionReclassificationPayload,
 )
 from halyk_agent.domain.fact_extraction.validators import (
@@ -22,7 +24,20 @@ from halyk_agent.domain.fact_extraction.validators import (
     validate_candidate,
     validate_evidence,
 )
+from halyk_agent.domain.fact_extraction.windows import EvidenceFragment, EvidenceWindow
 from tests.authority.helpers import make_document
+
+
+def _req(kind: FactKind = FactKind.OWNERSHIP) -> FactRequirement:
+    return FactRequirement(
+        requirement_id="r1",
+        scenario_id="S1",
+        fact_kind=kind,
+        derivation_kind=DerivationKind.SEMANTIC_REQUIRED,
+        trigger_rule="t",
+        allowed_authority_domains=(AuthorityDomain.KYC_RELATIONSHIPS,),
+        reason_code="T",
+    )
 
 
 def _cand(
@@ -35,6 +50,7 @@ def _cand(
     payload: object,
     kind: FactKind = FactKind.OWNERSHIP,
     domain: AuthorityDomain = AuthorityDomain.KYC_RELATIONSHIPS,
+    fragment_ids: tuple[str, ...] = (),
 ) -> FactCandidate:
     return FactCandidate(
         candidate_id="c1",
@@ -52,6 +68,7 @@ def _cand(
         page_number=page,
         char_start=start,
         char_end=end,
+        fragment_ids=fragment_ids,
     )
 
 
@@ -102,13 +119,12 @@ def test_wrong_domain_doc_rejected() -> None:
 
 def test_bad_ownership_percent() -> None:
     status, reason = semantic_validate(
-        OwnershipPayload(entity_name="X", ownership_percent=Decimal("50"))
+        OwnershipPayload(entity_name="X Corp", ownership_percent=Decimal("50"))
     )
     assert status is FactValidatorStatus.ACCEPTED
-    # Bypass model validator by constructing via model_construct
     bad = OwnershipPayload.model_construct(
         kind=FactKind.OWNERSHIP,
-        entity_name="X",
+        entity_name="X Corp",
         ownership_percent=Decimal("150"),
         holder_label="GROUP",
         voting_rights=True,
@@ -118,12 +134,23 @@ def test_bad_ownership_percent() -> None:
     assert reason == "OWNERSHIP_OUT_OF_RANGE"
 
 
+def test_ownership_legal_form_only_rejected() -> None:
+    status, reason = semantic_validate(
+        OwnershipPayload(entity_name="LLP", ownership_percent=Decimal("10"))
+    )
+    assert status is FactValidatorStatus.REJECTED_SEMANTIC
+    assert reason == "OWNERSHIP_LEGAL_FORM_ONLY"
+
+
 def test_bad_fx_and_unknown_txn() -> None:
     bad_fx = FxRatePayload.model_construct(
         kind=FactKind.FX_RATE,
         from_currency="USD",
         to_currency="EUR",
-        rate=Decimal("0"),
+        source_amount=None,
+        settlement_amount=None,
+        explicit_rate=Decimal("0"),
+        rate_source=RateSource.EXPLICIT,
         as_of_date=None,
         transaction_id=None,
     )
@@ -155,13 +182,7 @@ def test_off_ledger_ok_without_txn() -> None:
 def test_validate_candidate_accepts_exact_quote() -> None:
     text = "Ertis Capital, LLP 31.4%"
     doc = make_document(raw_text=text)
-    req = FactRequirement(
-        requirement_id="r1",
-        scenario_id="S1",
-        fact_kind=FactKind.OWNERSHIP,
-        authority_domain=AuthorityDomain.KYC_RELATIONSHIPS,
-        reason_code="T",
-    )
+    req = _req()
     cand = _cand(
         quote=text,
         page=1,
@@ -182,3 +203,48 @@ def test_validate_candidate_accepts_exact_quote() -> None:
     assert status is FactValidatorStatus.ACCEPTED
     assert span is not None
     assert span.quote == text
+
+
+def test_quote_outside_fragment_rejected() -> None:
+    text = "AAAA ownership prefix. Ertis Capital, LLP 31.4% trailing noise BBBB"
+    doc = make_document(raw_text=text)
+    frag_text = "Ertis Capital, LLP 31.4%"
+    frag_start = text.find(frag_text)
+    window = EvidenceWindow(
+        window_id="w",
+        requirement_id="r1",
+        document_id=doc.document_id,
+        source_sha256=doc.source_sha256,
+        fragments=(
+            EvidenceFragment(
+                fragment_id="F001",
+                page_number=1,
+                char_start=frag_start,
+                char_end=frag_start + len(frag_text),
+                text=frag_text,
+            ),
+        ),
+        window_hash="h",
+    )
+    # Quote exists in document but outside the fragment interval.
+    outside = "AAAA ownership prefix"
+    cand = _cand(
+        quote=outside,
+        page=1,
+        start=0,
+        end=len(outside),
+        doc_id=doc.document_id,
+        payload=OwnershipPayload(
+            entity_name="Ertis Capital, LLP", ownership_percent=Decimal("31.4")
+        ),
+        fragment_ids=("F001",),
+    )
+    status, _, reason = validate_evidence(
+        cand,
+        doc,
+        authoritative_doc_ids={doc.document_id},
+        requirement=_req(),
+        window=window,
+    )
+    assert status is FactValidatorStatus.REJECTED_EVIDENCE
+    assert reason == "QUOTE_OUTSIDE_FRAGMENT"

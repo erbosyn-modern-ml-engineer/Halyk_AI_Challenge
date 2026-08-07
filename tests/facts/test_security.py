@@ -11,6 +11,7 @@ from halyk_agent.app.facts import FactServiceError, assert_no_gt_access
 from halyk_agent.domain.authority.models import AuthorityDomain, AuthorityStatus
 from halyk_agent.domain.fact_extraction.engine import run_fact_extraction
 from halyk_agent.domain.fact_extraction.models import (
+    DerivationKind,
     ExtractionMethod,
     FactCandidate,
     FactKind,
@@ -42,7 +43,6 @@ def test_non_authoritative_doc_cannot_become_accepted() -> None:
     auth_doc = make_document(artifact="auth", source_file="auth.pdf", raw_text="no facts here")
     other = make_document(artifact="other", source_file="other.pdf", raw_text=text, sha="c" * 64)
     definitions = (make_definition(modifiers=(reclass_modifier(),)),)
-    # Authoritative winner is auth_doc (no reclass text); other has the text but is not winning.
     decisions = (
         make_decision(
             domain=AuthorityDomain.FINANCIAL_ADJUSTMENTS,
@@ -66,13 +66,15 @@ def test_fragment_not_in_window_rejected() -> None:
         requirement_id="r1",
         scenario_id="S1",
         fact_kind=FactKind.OWNERSHIP,
-        authority_domain=AuthorityDomain.KYC_RELATIONSHIPS,
+        derivation_kind=DerivationKind.SEMANTIC_REQUIRED,
+        trigger_rule="t",
+        allowed_authority_domains=(AuthorityDomain.KYC_RELATIONSHIPS,),
         reason_code="T",
         lexical_cues=("ownership", "%"),
+        strong_lexical_cues=("ownership",),
     )
     window = select_windows(req, doc)
     assert window is not None
-    # Craft a candidate claiming a fragment id outside the window
     fake_window = EvidenceWindow(
         window_id="w",
         requirement_id=req.requirement_id,
