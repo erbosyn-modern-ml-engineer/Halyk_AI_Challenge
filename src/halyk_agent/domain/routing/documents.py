@@ -1,4 +1,4 @@
-"""Document ↔ scenario routing with exact-ID-first precedence (Stage 5B.1)."""
+"""Document ↔ scenario routing with exact-ID-first precedence (Stage 5B.2)."""
 
 from __future__ import annotations
 
@@ -26,20 +26,39 @@ from halyk_agent.domain.routing.normalize import (
     legal_form_mismatch,
     normalize_legal_name_keys,
 )
+from halyk_agent.domain.routing.whitespace_search import (
+    build_whitespace_normalized_view,
+    find_next_whitespace_normalized,
+    normalize_needle,
+)
 
-_RELATION_MARKER_RE = re.compile(
-    r"(?i)\b(?:"
-    r"segment|subsidiary|group|standalone\s+subsidiary|"
-    r"conducted\s+through|operated\s+through|"
-    r"\u0441\u0435\u0433\u043c\u0435\u043d\u0442|"
+# Strong structural relation predicates only.
+# Bare nouns (group / группа / топ / segment / сегмент) are intentionally absent.
+_STRONG_RELATION_RE = re.compile(
+    r"(?ix)"
+    r"(?:"
+    r"wholly[\s_-]+owned[\s_-]+subsidiar(?:y|ies)|"
+    r"majority[\s_-]*owned[\s_-]+subsidiar(?:y|ies)|"
+    r"standalone[\s_-]+subsidiar(?:y|ies)|"
+    r"subsidiaries|"
+    r"subsidiary|"
+    r"parent[\s_-]+compan(?:y|ies)|"
+    r"segment\s+is\s+conducted\s+through|"
+    r"segment\s+is\s+operated\s+through|"
+    r"conducted\s+through|"
+    r"operated\s+through|"
+    r"held\s+through|"
     r"\u0434\u043e\u0447\u0435\u0440\u043d\w*|"
-    r"\u0433\u0440\u0443\u043f\u043f\u0430|"
     r"\u043e\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043b\u044f\u0435\u0442\u0441\u044f\s+\u0447\u0435\u0440\u0435\u0437|"
-    r"\u043f\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u043b\u0435\u043d\s+\u0447\u0435\u0440\u0435\u0437|"
-    r"\u0435\u043d\u0448\u0456\u043b\u0435\u0441|"
-    r"\u0442\u043e\u043f|"
-    r"\u0430\u0440\u049b\u044b\u043b\u044b"
-    r")\b"
+    r"\u0434\u0435\u044f\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c\s+\u0432\u0435\u0434\u0435\u0442\u0441\u044f\s+\u0447\u0435\u0440\u0435\u0437|"
+    r"\u0432\u0445\u043e\u0434\u0438\u0442\s+\u0432\s+\u0433\u0440\u0443\u043f\u043f\u0443|"
+    r"\u043c\u0430\u0442\u0435\u0440\u0438\u043d\u0441\u043a\u0430\u044f\s+\u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044f|"
+    r"\u043a\u043e\u043d\u0441\u043e\u043b\u0438\u0434\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u0430\u044f\s+\u0433\u0440\u0443\u043f\u043f\u0430|"
+    r"\u0435\u043d\u0448\u0456\u043b\u0435\u0441\s+(?:\u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044f|\u04b1\u0439\u044b\u043c)|"
+    r"\u0431\u0430\u0441\s+\u043a\u043e\u043c\u043f\u0430\u043d\u0438\u044f|"
+    r"\u0442\u043e\u043f\s+\u049b\u04b1\u0440\u0430\u043c\u044b\u043d\u0430\s+\u043a\u0456\u0440\u0435\u0434\u0456|"
+    r".{0,40}\u0430\u0440\u049b\u044b\u043b\u044b\s+\u0436\u04af\u0437\u0435\u0433\u0435\s+\u0430\u0441\u044b\u0440\u044b\u043b\u0430\u0434\u044b"
+    r")"
 )
 
 # Prefer longer raw mentions first to avoid partial collisions.
@@ -57,6 +76,18 @@ class DocumentRoutingBundle:
     multi_scenario_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class _IdentityMention:
+    scenario_id: str
+    identity_key: str
+    entity_span: EvidenceSpan
+    page_number: int
+    char_start: int
+    char_end: int
+    relation_span: EvidenceSpan | None
+    relation_type: str | None
+
+
 def _account_to_scenarios(
     scenario_accounts: dict[str, frozenset[str]],
 ) -> dict[str, frozenset[str]]:
@@ -67,29 +98,95 @@ def _account_to_scenarios(
     return {account: frozenset(scenarios) for account, scenarios in inverse.items()}
 
 
+def _classify_relation(matched: str) -> str:
+    low = matched.casefold()
+    if (
+        "subsidiar" in low
+        or "\u0434\u043e\u0447\u0435\u0440\u043d" in low
+        or "\u0435\u043d\u0448\u0456\u043b\u0435\u0441" in low
+    ):
+        return "SUBSIDIARY"
+    if (
+        "through" in low
+        or "\u0447\u0435\u0440\u0435\u0437" in low
+        or "\u0430\u0440\u049b\u044b\u043b\u044b" in low
+    ):
+        return "OPERATED_THROUGH"
+    if (
+        "parent" in low
+        or "\u043c\u0430\u0442\u0435\u0440\u0438\u043d\u0441\u043a" in low
+        or "\u0431\u0430\u0441 \u043a\u043e\u043c\u043f\u0430\u043d" in low
+    ):
+        return "PARENT"
+    if (
+        "\u0432\u0445\u043e\u0434\u0438\u0442 \u0432 \u0433\u0440\u0443\u043f\u043f" in low
+        or "\u0442\u043e\u043f \u049b\u04b1\u0440\u0430\u043c\u044b\u043d\u0430" in low
+        or "\u043a\u043e\u043d\u0441\u043e\u043b\u0438\u0434\u0438\u0440\u043e\u0432" in low
+    ):
+        return "GROUP_MEMBERSHIP"
+    return "STRUCTURAL_RELATION"
+
+
+def _relation_in_window(
+    document: CanonicalDocument,
+    *,
+    page_number: int,
+    text: str,
+    entity_start: int,
+    entity_end: int,
+) -> tuple[EvidenceSpan | None, str | None]:
+    window_start = max(0, entity_start - _WINDOW)
+    window_end = min(len(text), entity_end + _WINDOW)
+    window = text[window_start:window_end]
+    match = _STRONG_RELATION_RE.search(window)
+    if match is None:
+        return None, None
+    rel_start = window_start + match.start()
+    rel_end = window_start + match.end()
+    span_result = create_identity_span(
+        document,
+        page_number=page_number,
+        char_start=rel_start,
+        char_end=rel_end,
+    )
+    if span_result.rejected_low_trust_ocr or span_result.span is None:
+        # Relation predicate itself may be OCR; still allow entity-only LEVEL 4.
+        return None, None
+    return span_result.span, _classify_relation(match.group(0))
+
+
 def _find_identity_mentions(
     document: CanonicalDocument,
     *,
     search_terms: tuple[tuple[str, str, str], ...],
     # (raw_needle, identity_key, scenario_id)
-) -> list[tuple[str, str, EvidenceSpan, bool]]:
-    """Return (scenario_id, identity_key, span, has_relation_marker)."""
-    hits: list[tuple[str, str, EvidenceSpan, bool]] = []
+) -> list[_IdentityMention]:
+    """Return identity mentions with optional bounded structural relation spans."""
+    hits: list[_IdentityMention] = []
     seen_span_ids: set[str] = set()
     for page in document.pages:
         text = page.raw_text or ""
+        if not text:
+            continue
+        view = build_whitespace_normalized_view(text)
         for raw_needle, identity_key, scenario_id in search_terms:
-            start = 0
+            if not normalize_needle(raw_needle):
+                continue
+            norm_cursor = 0
             while True:
-                idx = text.find(raw_needle, start)
-                if idx < 0:
+                found = find_next_whitespace_normalized(
+                    text,
+                    raw_needle,
+                    view=view,
+                    norm_start=norm_cursor,
+                )
+                if found is None:
                     break
-                end = idx + len(raw_needle)
-                # Validate identity_key equality on the matched substring.
+                idx, end, reject_advance = found
                 matched = text[idx:end]
                 keys = normalize_legal_name_keys(matched, record_aliases=False)
                 if keys.identity_key != identity_key:
-                    start = idx + 1
+                    norm_cursor = reject_advance
                     continue
                 span_result = create_identity_span(
                     document,
@@ -97,17 +194,67 @@ def _find_identity_mentions(
                     char_start=idx,
                     char_end=end,
                 )
-                start = end
+                # Advance past this accepted match in normalized space.
+                needle_norm_len = len(normalize_needle(raw_needle))
+                # Map raw end back: continue after this match.
+                # reject_advance is idx+1 in norm; for success advance by full needle.
+                # Recompute accepted norm start from raw idx via view.
+                accepted_norm_start = 0
+                while (
+                    accepted_norm_start < len(view.norm_to_raw)
+                    and view.norm_to_raw[accepted_norm_start] < idx
+                ):
+                    accepted_norm_start += 1
+                norm_cursor = accepted_norm_start + needle_norm_len
+
                 if span_result.rejected_low_trust_ocr or span_result.span is None:
                     continue
                 span = span_result.span
                 if span.id in seen_span_ids:
                     continue
                 seen_span_ids.add(span.id)
-                window = text[max(0, idx - _WINDOW) : min(len(text), end + _WINDOW)]
-                has_relation = _RELATION_MARKER_RE.search(window) is not None
-                hits.append((scenario_id, identity_key, span, has_relation))
+                relation_span, relation_type = _relation_in_window(
+                    document,
+                    page_number=page.page_number,
+                    text=text,
+                    entity_start=idx,
+                    entity_end=end,
+                )
+                if relation_span is not None and relation_span.id not in seen_span_ids:
+                    seen_span_ids.add(relation_span.id)
+                hits.append(
+                    _IdentityMention(
+                        scenario_id=scenario_id,
+                        identity_key=identity_key,
+                        entity_span=span,
+                        page_number=page.page_number,
+                        char_start=idx,
+                        char_end=end,
+                        relation_span=relation_span,
+                        relation_type=relation_type,
+                    )
+                )
     return hits
+
+
+def _scenarios_in_local_window(
+    mentions: list[_IdentityMention],
+    *,
+    page_number: int,
+    center_start: int,
+    center_end: int,
+    page_len: int,
+) -> frozenset[str]:
+    window_start = max(0, center_start - _WINDOW)
+    window_end = min(page_len, center_end + _WINDOW)
+    found: set[str] = set()
+    for mention in mentions:
+        if mention.page_number != page_number:
+            continue
+        if mention.char_end <= window_start or mention.char_start >= window_end:
+            continue
+        found.add(mention.scenario_id)
+    return frozenset(found)
 
 
 def route_documents(
@@ -123,7 +270,7 @@ def route_documents(
     Precedence:
       1. EXPLICIT_ACCOUNT_ID (EXACT)
       2. EXPLICIT_BORROWER_DECLARATION (DECLARED) — declaration + account anchor
-      3. GROUP_SEGMENT_DECLARATION (DECLARED)
+      3. GROUP_SEGMENT_DECLARATION (DECLARED) — anchored identity + structural relation
       4. NORMALIZED_LEGAL_NAME (DERIVED) — identity_key equality only
       5. UNRESOLVED
     """
@@ -202,8 +349,8 @@ def route_documents(
                     code=DiagnosticCode.DOCUMENT_MULTIPLE_SCENARIOS,
                     severity=DiagnosticSeverity.WARNING,
                     message=(
-                        f"document {document.document_id} maps to multiple scenarios: "
-                        f"{', '.join(scenario_ids)}"
+                        f"document {document.document_id} maps to multiple scenarios "
+                        f"via account IDs: {', '.join(scenario_ids)}"
                     ),
                     document_id=document.document_id,
                 )
@@ -225,10 +372,11 @@ def route_documents(
 
         if len(scenario_hits) == 1:
             scenario_id = next(iter(scenario_hits))
-            accs = scenario_hits[scenario_id]
-            account_ids = tuple(sorted({a.account_id_normalized for a in accs}))
-            span_ids = tuple(sorted({a.evidence_span_id for a in accs if a.evidence_span_id}))
-
+            accounts = scenario_hits[scenario_id]
+            account_ids = tuple(sorted({a.account_id_normalized for a in accounts}))
+            span_ids = tuple(
+                sorted({acc.evidence_span_id for acc in accounts if acc.evidence_span_id})
+            )
             # Name conflict diagnostics (account retains precedence).
             name_conflict_scenarios: set[str] = set()
             for borrower in doc_borrowers:
@@ -271,7 +419,6 @@ def route_documents(
                         scenario_id=scenario_id,
                     )
                 )
-
             links.append(
                 DocumentEntityLink(
                     document_id=document.document_id,
@@ -286,17 +433,17 @@ def route_documents(
             resolved += 1
             continue
 
-        # LEVEL 2 — explicit borrower declaration anchored to known account
+        # LEVEL 2 — anchored borrower declaration on this document
         declared_scenarios: set[str] = set()
         declared_accounts: set[str] = set()
         declared_spans: set[str] = set()
         for borrower in doc_borrowers:
-            if not borrower.account_id_normalized:
+            if not borrower.anchored or not borrower.account_id_normalized:
                 continue
             if borrower.account_id_normalized not in account_scenarios:
                 continue
-            declared_spans.add(borrower.evidence_span_id)
             declared_accounts.add(borrower.account_id_normalized)
+            declared_spans.add(borrower.evidence_span_id)
             declared_scenarios.update(account_scenarios[borrower.account_id_normalized])
 
         if len(declared_scenarios) == 1:
@@ -349,16 +496,16 @@ def route_documents(
         # LEVEL 3 / 4 — exact identity mentions in evidence-bearing text
         mentions = _find_identity_mentions(document, search_terms=tuple(search_terms))
         if mentions:
-            for _, _, span, _ in mentions:
-                extra_spans.append(span)
+            for mention in mentions:
+                extra_spans.append(mention.entity_span)
+                if mention.relation_span is not None:
+                    extra_spans.append(mention.relation_span)
 
-            relation_scenarios = {s for s, _, _, rel in mentions if rel}
-            name_scenarios = {s for s, _, _, _ in mentions}
+            name_scenarios = {m.scenario_id for m in mentions}
             # Legal-form mismatch diagnostics vs other known forms with same base.
             for borrower in doc_borrowers:
                 for scenario_id, keys in borrower_identity_by_scenario.items():
                     for key in keys:
-                        # Reconstruct a comparison raw from known raws
                         for raw in borrower_raw_by_identity.get(key, ()):
                             if legal_form_mismatch(borrower.legal_name_raw, raw):
                                 diagnostics.append(
@@ -392,10 +539,48 @@ def route_documents(
                                     )
                                 )
 
+            # LEVEL 3 — structural relation + exact anchored identity in local window
+            page_lengths = {page.page_number: len(page.raw_text or "") for page in document.pages}
+            relation_scenarios: set[str] = set()
+            relation_ambiguous = False
+            relation_span_ids: set[str] = set()
+            relation_types: set[str] = set()
+            for mention in mentions:
+                if mention.relation_span is None or mention.relation_type is None:
+                    continue
+                local = _scenarios_in_local_window(
+                    mentions,
+                    page_number=mention.page_number,
+                    center_start=min(
+                        mention.char_start,
+                        mention.relation_span.char_start
+                        if mention.relation_span.char_start is not None
+                        else mention.char_start,
+                    ),
+                    center_end=max(
+                        mention.char_end,
+                        mention.relation_span.char_end
+                        if mention.relation_span.char_end is not None
+                        else mention.char_end,
+                    ),
+                    page_len=page_lengths.get(mention.page_number, 0),
+                )
+                if len(local) > 1:
+                    relation_ambiguous = True
+                    relation_scenarios.update(local)
+                else:
+                    relation_scenarios.add(mention.scenario_id)
+                relation_span_ids.add(mention.entity_span.id)
+                relation_span_ids.add(mention.relation_span.id)
+                relation_types.add(mention.relation_type)
+
             if relation_scenarios:
-                if len(relation_scenarios) > 1:
+                relation_type = (
+                    sorted(relation_types)[0] if len(relation_types) == 1 else "GROUP_SEGMENT"
+                )
+                span_ids = tuple(sorted(relation_span_ids))
+                if relation_ambiguous or len(relation_scenarios) > 1:
                     multi += 1
-                    span_ids = tuple(sorted({span.id for _, _, span, rel in mentions if rel}))
                     conflicts.append(
                         EntityResolutionConflict(
                             conflict_id=deterministic_id(
@@ -408,7 +593,21 @@ def route_documents(
                             scenario_ids=tuple(sorted(relation_scenarios)),
                             document_ids=(document.document_id,),
                             evidence_span_ids=span_ids,
-                            detail="group/segment markers for multiple scenarios",
+                            detail=(
+                                "structural relation context contains exact identities "
+                                "from multiple scenarios"
+                            ),
+                        )
+                    )
+                    diagnostics.append(
+                        RoutingDiagnostic(
+                            code=DiagnosticCode.DOCUMENT_MULTIPLE_SCENARIOS,
+                            severity=DiagnosticSeverity.WARNING,
+                            message=(
+                                f"group relation context in {document.document_id} "
+                                f"names multiple scenarios"
+                            ),
+                            document_id=document.document_id,
                         )
                     )
                     links.append(
@@ -422,24 +621,13 @@ def route_documents(
                             evidence_span_ids=span_ids,
                             notes="MULTI_SCENARIO_DOCUMENT",
                             group_document=True,
-                            relation_type="GROUP_SEGMENT",
-                        )
-                    )
-                    diagnostics.append(
-                        RoutingDiagnostic(
-                            code=DiagnosticCode.GROUP_DOCUMENT,
-                            severity=DiagnosticSeverity.INFO,
-                            message=f"group document {document.document_id} is multi-scenario",
-                            document_id=document.document_id,
+                            relation_type=relation_type,
                         )
                     )
                     resolved += 1
                     continue
 
                 scenario_id = next(iter(relation_scenarios))
-                span_ids = tuple(
-                    sorted({span.id for s, _, span, rel in mentions if rel and s == scenario_id})
-                )
                 links.append(
                     DocumentEntityLink(
                         document_id=document.document_id,
@@ -450,7 +638,7 @@ def route_documents(
                         confidence=ResolutionConfidence.DECLARED,
                         evidence_span_ids=span_ids,
                         group_document=True,
-                        relation_type="GROUP_SEGMENT",
+                        relation_type=relation_type,
                     )
                 )
                 diagnostics.append(
@@ -468,11 +656,11 @@ def route_documents(
                 resolved += 1
                 continue
 
-            # LEVEL 4 — exact identity_key without relation marker
+            # LEVEL 4 — exact identity_key without structural relation
             if len(name_scenarios) == 1:
                 scenario_id = next(iter(name_scenarios))
                 span_ids = tuple(
-                    sorted({span.id for s, _, span, _ in mentions if s == scenario_id})
+                    sorted({m.entity_span.id for m in mentions if m.scenario_id == scenario_id})
                 )
                 links.append(
                     DocumentEntityLink(
@@ -489,7 +677,7 @@ def route_documents(
                 continue
             if len(name_scenarios) > 1:
                 multi += 1
-                span_ids = tuple(sorted({span.id for _, _, span, _ in mentions}))
+                span_ids = tuple(sorted({m.entity_span.id for m in mentions}))
                 conflicts.append(
                     EntityResolutionConflict(
                         conflict_id=deterministic_id(
