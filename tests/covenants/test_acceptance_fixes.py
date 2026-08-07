@@ -313,7 +313,12 @@ def test_ru_modifier_families_from_source_phrasing(
     text: str, expected: CovenantModifierKind
 ) -> None:
     matches = extract_modifier_matches(text)
-    assert any(m.kind is expected for m in matches)
+    kinds = {m.kind for m in matches}
+    assert expected in kinds
+    if expected is CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE:
+        assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE not in kinds
+    if expected is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE:
+        assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE not in kinds
     hit = next(m for m in matches if m.kind is expected)
     assert hit.quotes
     for quote in hit.quotes:
@@ -349,6 +354,10 @@ def test_ru_modifier_families_from_source_phrasing(
 def test_en_modifier_parity_positives(text: str, expected: CovenantModifierKind) -> None:
     kinds = {m.kind for m in extract_modifier_matches(text)}
     assert expected in kinds
+    if expected is CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE:
+        assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE not in kinds
+    if expected is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE:
+        assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE not in kinds
 
 
 @pytest.mark.parametrize(
@@ -362,6 +371,8 @@ def test_en_modifier_parity_positives(text: str, expected: CovenantModifierKind)
         "auditor discussed possible classifications without covenant effect",
         "employee was reclassified to another role",
         "administrative period adjustment for internal calendars",
+        "The auditor reclassified the expense.",
+        "reclassified by the auditor",
     ],
 )
 def test_modifier_negative_controls(text: str) -> None:
@@ -405,7 +416,9 @@ def test_exclude_modifier_handles_distant_cues() -> None:
         "ковенанта не засчитываются независимо от их первоначального отражения в учёте."
     )
     matches = extract_modifier_matches(text)
-    assert any(m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE for m in matches)
+    kinds = {m.kind for m in matches}
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE in kinds
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE not in kinds
     hit = next(
         m for m in matches if m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE
     )
@@ -421,3 +434,67 @@ def test_exclude_modifier_handles_distant_cues() -> None:
     )
     assert mod.evidence_span_ids
     assert len(mod.evidence_span_ids) >= 1
+
+
+def test_ru_exclude_only_polarity_no_include() -> None:
+    text = (
+        "Суммы, переклассифицированные аудиторами Заёмщика из указанной категории, "
+        "исключаются из расчёта."
+    )
+    kinds = {m.kind for m in extract_modifier_matches(text)}
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE in kinds
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE not in kinds
+    hit = next(
+        m
+        for m in extract_modifier_matches(text)
+        if m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE
+    )
+    joined = " ".join(hit.quotes).casefold()
+    assert "исключ" in joined or "исключаются" in " ".join(hit.quotes)
+
+
+def test_en_exclude_only_polarity_no_include() -> None:
+    text = "Amounts reclassified by the auditor as non-operating items shall not be counted."
+    kinds = {m.kind for m in extract_modifier_matches(text)}
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE in kinds
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE not in kinds
+
+
+def test_en_include_only_polarity_no_exclude() -> None:
+    text = "Amounts reclassified by the auditor shall be included in the covenant calculation."
+    kinds = {m.kind for m in extract_modifier_matches(text)}
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE in kinds
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE not in kinds
+
+
+def test_ru_include_reflection_polarity_no_exclude() -> None:
+    text = (
+        "сумма, которую аудиторы признают подлежащей отражению как Капитальные затраты, "
+        "учитывается при расчёте ковенанта."
+    )
+    kinds = {m.kind for m in extract_modifier_matches(text)}
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE in kinds
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE not in kinds
+
+
+def test_dual_instruction_retains_separate_include_and_exclude() -> None:
+    text = (
+        "Reclassifications of type A accepted by the auditor shall be included. "
+        "Amounts of type B reclassified as non-operating shall not be counted."
+    )
+    matches = extract_modifier_matches(text)
+    kinds = {m.kind for m in matches}
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE in kinds
+    assert CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE in kinds
+    include = next(
+        m for m in matches if m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE
+    )
+    exclude = next(
+        m for m in matches if m.kind is CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE
+    )
+    include_joined = " ".join(include.quotes).casefold()
+    exclude_joined = " ".join(exclude.quotes).casefold()
+    assert "included" in include_joined or "shall be included" in include_joined
+    assert "not be counted" in exclude_joined or "shall not" in exclude_joined
+    # Evidence regions must not be identical synthetic spans.
+    assert include.quotes != exclude.quotes
