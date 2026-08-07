@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -10,12 +11,15 @@ from halyk_agent.domain.common import NonEmptyStr
 
 ROUTING_SCHEMA_VERSION = "halyk.routing_manifest.v1"
 ROUTING_ALGORITHM_VERSION = "halyk.routing.v1"
-NORMALIZATION_VERSION = "halyk.legal_name_norm.v1"
+NORMALIZATION_VERSION = "halyk.legal_name_norm.v2"
 
 
 class ResolutionMethod(StrEnum):
     TXN_ID_PREFIX = "TXN_ID_PREFIX"
     ACCOUNT_ID_COLUMN = "ACCOUNT_ID_COLUMN"
+    ACCOUNT_ID_FALLBACK = "ACCOUNT_ID_FALLBACK"
+    TXN_ID_ACCOUNT_CONSISTENT = "TXN_ID_ACCOUNT_CONSISTENT"
+    TXN_ID_ACCOUNT_CONFLICT = "TXN_ID_ACCOUNT_CONFLICT"
     EXPLICIT_ACCOUNT_ID = "EXPLICIT_ACCOUNT_ID"
     EXPLICIT_BORROWER_DECLARATION = "EXPLICIT_BORROWER_DECLARATION"
     DECLARED_ENTITY_RELATION = "DECLARED_ENTITY_RELATION"
@@ -50,6 +54,7 @@ class ConflictKind(StrEnum):
     ACCOUNT_ID_MALFORMED = "ACCOUNT_ID_MALFORMED"
     SCENARIO_WITHOUT_ACCOUNT = "SCENARIO_WITHOUT_ACCOUNT"
     SCENARIO_WITH_MULTIPLE_ACCOUNTS = "SCENARIO_WITH_MULTIPLE_ACCOUNTS"
+    LEGAL_FORM_MISMATCH = "LEGAL_FORM_MISMATCH"
 
 
 class DiagnosticCode(StrEnum):
@@ -57,12 +62,15 @@ class DiagnosticCode(StrEnum):
     SCENARIO_WITH_MULTIPLE_ACCOUNTS = "SCENARIO_WITH_MULTIPLE_ACCOUNTS"
     TRANSACTION_UNKNOWN_SCENARIO = "TRANSACTION_UNKNOWN_SCENARIO"
     TRANSACTION_ACCOUNT_CONFLICT = "TRANSACTION_ACCOUNT_CONFLICT"
+    ACCOUNT_WITHOUT_SCENARIO_TOKEN = "ACCOUNT_WITHOUT_SCENARIO_TOKEN"
     DOCUMENT_NO_ENTITY_SIGNAL = "DOCUMENT_NO_ENTITY_SIGNAL"
     DOCUMENT_MULTIPLE_SCENARIOS = "DOCUMENT_MULTIPLE_SCENARIOS"
     DOCUMENT_IDENTIFIER_NAME_CONFLICT = "DOCUMENT_IDENTIFIER_NAME_CONFLICT"
     BORROWER_NAME_CONFLICT = "BORROWER_NAME_CONFLICT"
     ACCOUNT_ID_MALFORMED = "ACCOUNT_ID_MALFORMED"
     OCR_IDENTITY_LOW_TRUST = "OCR_IDENTITY_LOW_TRUST"
+    LEGAL_FORM_MISMATCH = "LEGAL_FORM_MISMATCH"
+    GROUP_DOCUMENT = "GROUP_DOCUMENT"
 
 
 class DiagnosticSeverity(StrEnum):
@@ -98,12 +106,14 @@ class AccountIdentity(BaseModel):
 
 
 class BorrowerIdentity(BaseModel):
-    """Explicit borrower declaration candidate (authority deferred to Stage 5C)."""
+    """Borrower declaration / mention candidate (authority deferred to Stage 5C)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     legal_name_raw: NonEmptyStr
     normalized_name: NonEmptyStr
+    identity_key: NonEmptyStr
+    base_key: NonEmptyStr
     declaration_type: NonEmptyStr
     document_id: NonEmptyStr
     document_version_id: NonEmptyStr
@@ -111,6 +121,7 @@ class BorrowerIdentity(BaseModel):
     evidence_span_id: NonEmptyStr
     account_id_normalized: NonEmptyStr | None = None
     scenario_id: NonEmptyStr | None = None
+    anchored: bool = False
 
 
 class CompanyAlias(BaseModel):
@@ -152,6 +163,8 @@ class DocumentEntityLink(BaseModel):
     confidence: ResolutionConfidence
     evidence_span_ids: tuple[NonEmptyStr, ...] = ()
     notes: NonEmptyStr | None = None
+    group_document: bool = False
+    relation_type: NonEmptyStr | None = None
 
 
 class TransactionEntityLink(BaseModel):
@@ -221,6 +234,8 @@ class RoutingManifest(BaseModel):
     schema_version: NonEmptyStr = ROUTING_SCHEMA_VERSION
     dataset_manifest_hash: NonEmptyStr
     canonical_documents_hash: NonEmptyStr
+    evidence_catalogue_hash: NonEmptyStr = ""
+    parsed_input_identity: dict[str, object] = Field(default_factory=dict)
     routing_algorithm_version: NonEmptyStr = ROUTING_ALGORITHM_VERSION
     normalization_version: NonEmptyStr = NORMALIZATION_VERSION
     scenario_count: int = Field(ge=0)
@@ -231,7 +246,29 @@ class RoutingManifest(BaseModel):
     template_cell_count: int = Field(ge=0)
     ledger_row_count: int = Field(ge=0)
     scenario_transaction_count: int = Field(ge=0)
+    txn_id_linked_count: int = Field(default=0, ge=0)
+    account_fallback_count: int = Field(default=0, ge=0)
     multi_scenario_document_count: int = Field(ge=0)
+    identity_evidence_count: int = Field(default=0, ge=0)
+
+
+class IdentityEvidenceAssertion(BaseModel):
+    """Persisted auditable identity/routing assertion (Stage 5B.1)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    assertion_id: NonEmptyStr
+    scenario_id: NonEmptyStr | None = None
+    document_id: NonEmptyStr | None = None
+    txn_id: NonEmptyStr | None = None
+    identity_type: NonEmptyStr
+    resolution_method: ResolutionMethod
+    evidence_span_id: NonEmptyStr
+    raw_quote: NonEmptyStr
+    page_number: int = Field(ge=1)
+    text_origin: NonEmptyStr
+    source_sha256: NonEmptyStr | None = None
+    ocr_backend_identity: str | None = None
 
 
 class RoutingReport(BaseModel):
@@ -250,6 +287,8 @@ class RoutingReport(BaseModel):
     conflicts: tuple[EntityResolutionConflict, ...]
     diagnostics: tuple[RoutingDiagnostic, ...]
     account_extractions: tuple[AccountIdentity, ...] = ()
+    identity_evidence: tuple[IdentityEvidenceAssertion, ...] = ()
+    identity_spans: tuple[Any, ...] = ()
 
     @model_validator(mode="after")
     def _counts_agree(self) -> RoutingReport:

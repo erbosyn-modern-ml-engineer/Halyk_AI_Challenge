@@ -1,4 +1,4 @@
-"""Deterministic transaction ↔ scenario routing from the ledger."""
+"""Deterministic transaction ↔ scenario routing from the ledger (Stage 5B.1)."""
 
 from __future__ import annotations
 
@@ -31,6 +31,8 @@ class TransactionRoutingBundle:
     duplicate_txn_ids: tuple[str, ...]
     scenario_transaction_count: int
     unresolved_transaction_count: int
+    txn_id_linked_count: int = 0
+    account_fallback_count: int = 0
 
 
 def route_transactions(
@@ -40,21 +42,24 @@ def route_transactions(
     parser_config: TxnIdParserConfig | None = None,
 ) -> TransactionRoutingBundle:
     """
-    Map ledger rows to scenarios via configurable txn-id token extraction.
+    Two-pass routing:
 
-    Proposed tokens must validate against the authoritative scenario universe.
+    1) Strong TXN_ID_PREFIX observations build scenario↔account anchors.
+    2) Malformed/unknown txn-id rows fall back to ACCOUNT_ID_FALLBACK when the
+       exact account belongs to exactly one anchored scenario.
     """
     config = parser_config or TxnIdParserConfig()
     pattern = re.compile(config.pattern)
 
-    links: list[TransactionEntityLink] = []
     diagnostics: list[RoutingDiagnostic] = []
     conflicts: list[EntityResolutionConflict] = []
     scenario_accounts: dict[str, set[str]] = defaultdict(set)
     seen_txn: dict[str, int] = {}
     duplicates: list[str] = []
-    scenario_txn_count = 0
-    unresolved_count = 0
+
+    # Pass 1 material: pending rows for fallback after anchors exist.
+    pending: list[tuple[LedgerRow, str, str | None, bool]] = []
+    # (row, account_norm, token_or_none, pattern_matched)
 
     for row in rows:
         txn_id = row.txn_id.strip()
@@ -84,21 +89,13 @@ def route_transactions(
         seen_txn[txn_id] = row.row_index
 
         match = pattern.match(txn_id)
-        token: str | None = None
-        scenario_id: str | None = None
-        method = ResolutionMethod.UNRESOLVED
-        confidence = ResolutionConfidence.UNRESOLVED
-
         if match is not None:
             token = match.group("scenario")
             if token in scenario_ids:
-                scenario_id = token
-                method = ResolutionMethod.TXN_ID_PREFIX
-                confidence = ResolutionConfidence.EXACT
-                scenario_accounts[scenario_id].add(account_norm)
-                scenario_txn_count += 1
+                scenario_accounts[token].add(account_norm)
+                pending.append((row, account_norm, token, True))
             else:
-                unresolved_count += 1
+                pending.append((row, account_norm, token, False))
                 diagnostics.append(
                     RoutingDiagnostic(
                         code=DiagnosticCode.TRANSACTION_UNKNOWN_SCENARIO,
@@ -109,10 +106,10 @@ def route_transactions(
                     )
                 )
         else:
-            unresolved_count += 1
+            pending.append((row, account_norm, None, False))
             diagnostics.append(
                 RoutingDiagnostic(
-                    code=DiagnosticCode.TRANSACTION_UNKNOWN_SCENARIO,
+                    code=DiagnosticCode.ACCOUNT_WITHOUT_SCENARIO_TOKEN,
                     severity=DiagnosticSeverity.INFO,
                     message=f"txn_id did not match configured pattern: {txn_id}",
                     txn_id=txn_id,
@@ -120,25 +117,14 @@ def route_transactions(
                 )
             )
 
-        links.append(
-            TransactionEntityLink(
-                txn_id=txn_id,
-                row_index=row.row_index,
-                ledger_source_file=row.ledger_source_file,
-                account_id_raw=row.account_id,
-                account_id_normalized=account_norm,
-                scenario_id=scenario_id,
-                scenario_token=token,
-                method=method,
-                confidence=confidence,
-                counterparty_raw=row.counterparty,
-            )
-        )
-
-    # Account consistency: for each scenario, detect multi-account sets.
     frozen_accounts = {
         scenario: frozenset(accounts) for scenario, accounts in scenario_accounts.items()
     }
+    account_to_scenarios: dict[str, set[str]] = defaultdict(set)
+    for scenario, accounts in frozen_accounts.items():
+        for account in accounts:
+            account_to_scenarios[account].add(scenario)
+
     for scenario, accounts in sorted(frozen_accounts.items()):
         if len(accounts) > 1:
             diagnostics.append(
@@ -167,15 +153,129 @@ def route_transactions(
                 )
             )
 
-    # Detect txn-level account disagreement vs other txns of same scenario
-    # when a scenario has a unique primary account and a txn disagrees.
+    # Detect accounts claimed by multiple distinct strong scenario tokens.
+    account_strong_tokens: dict[str, set[str]] = defaultdict(set)
+    for _row, account_norm, token, strong in pending:
+        if strong and token is not None:
+            account_strong_tokens[account_norm].add(token)
+
+    links: list[TransactionEntityLink] = []
+    scenario_txn_count = 0
+    unresolved_count = 0
+    txn_id_linked = 0
+    account_fallback = 0
+
+    for row, account_norm, token, strong in pending:
+        txn_id = row.txn_id.strip()
+        scenario_id: str | None = None
+        method = ResolutionMethod.UNRESOLVED
+        confidence = ResolutionConfidence.UNRESOLVED
+
+        if strong and token is not None:
+            claimed = account_strong_tokens.get(account_norm, set())
+            if len(claimed) > 1:
+                method = ResolutionMethod.TXN_ID_ACCOUNT_CONFLICT
+                confidence = ResolutionConfidence.UNRESOLVED
+                unresolved_count += 1
+                diagnostics.append(
+                    RoutingDiagnostic(
+                        code=DiagnosticCode.TRANSACTION_ACCOUNT_CONFLICT,
+                        severity=DiagnosticSeverity.ERROR,
+                        message=(
+                            f"txn {txn_id} account {account_norm} claimed by multiple "
+                            f"scenario tokens: {', '.join(sorted(claimed))}"
+                        ),
+                        scenario_id=token,
+                        txn_id=txn_id,
+                        account_id=account_norm,
+                    )
+                )
+                conflicts.append(
+                    EntityResolutionConflict(
+                        conflict_id=deterministic_id(
+                            "txn-id-account-conflict-v1",
+                            txn_id,
+                            account_norm,
+                            *sorted(claimed),
+                        ),
+                        kind=ConflictKind.TRANSACTION_ACCOUNT_CONFLICT,
+                        severity=DiagnosticSeverity.ERROR,
+                        scenario_ids=tuple(sorted(claimed)),
+                        account_ids=(account_norm,),
+                        txn_ids=(txn_id,),
+                        detail="same account claimed by multiple txn-id scenario tokens",
+                    )
+                )
+            else:
+                scenario_id = token
+                method = ResolutionMethod.TXN_ID_PREFIX
+                confidence = ResolutionConfidence.EXACT
+                scenario_txn_count += 1
+                txn_id_linked += 1
+        else:
+            # Fallback: exact known account belonging to exactly one scenario.
+            candidates = account_to_scenarios.get(account_norm, set())
+            if len(candidates) == 1:
+                scenario_id = next(iter(candidates))
+                method = ResolutionMethod.ACCOUNT_ID_FALLBACK
+                confidence = ResolutionConfidence.DERIVED
+                scenario_txn_count += 1
+                account_fallback += 1
+            elif len(candidates) > 1:
+                unresolved_count += 1
+                diagnostics.append(
+                    RoutingDiagnostic(
+                        code=DiagnosticCode.TRANSACTION_ACCOUNT_CONFLICT,
+                        severity=DiagnosticSeverity.ERROR,
+                        message=(
+                            f"txn {txn_id} account {account_norm} belongs to multiple scenarios"
+                        ),
+                        txn_id=txn_id,
+                        account_id=account_norm,
+                    )
+                )
+                conflicts.append(
+                    EntityResolutionConflict(
+                        conflict_id=deterministic_id(
+                            "txn-account-multi-scenario-v1",
+                            txn_id,
+                            account_norm,
+                            *sorted(candidates),
+                        ),
+                        kind=ConflictKind.TRANSACTION_ACCOUNT_CONFLICT,
+                        severity=DiagnosticSeverity.ERROR,
+                        scenario_ids=tuple(sorted(candidates)),
+                        account_ids=(account_norm,),
+                        txn_ids=(txn_id,),
+                        detail="account belongs to multiple scenarios during fallback",
+                    )
+                )
+            else:
+                unresolved_count += 1
+
+        links.append(
+            TransactionEntityLink(
+                txn_id=txn_id,
+                row_index=row.row_index,
+                ledger_source_file=row.ledger_source_file,
+                account_id_raw=row.account_id,
+                account_id_normalized=account_norm,
+                scenario_id=scenario_id,
+                scenario_token=token,
+                method=method,
+                confidence=confidence,
+                counterparty_raw=row.counterparty,
+            )
+        )
+
+    # Within-scenario primary-account disagreement for strong links.
     primary = {
         scenario: next(iter(accounts))
         for scenario, accounts in frozen_accounts.items()
         if len(accounts) == 1
     }
     for link in links:
-        if link.scenario_id is None:
+        if link.scenario_id is None or link.method is not ResolutionMethod.TXN_ID_PREFIX:
             continue
         expected = primary.get(link.scenario_id)
         if expected is None:
@@ -220,4 +320,6 @@ def route_transactions(
         duplicate_txn_ids=tuple(sorted(set(duplicates))),
         scenario_transaction_count=scenario_txn_count,
         unresolved_transaction_count=unresolved_count,
+        txn_id_linked_count=txn_id_linked,
+        account_fallback_count=account_fallback,
     )
