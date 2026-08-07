@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 from importlib.metadata import PackageNotFoundError, version
@@ -15,6 +16,8 @@ from halyk_agent.domain.ocr import (
     OcrBackendKind,
     OcrProbeReport,
 )
+
+_LANG_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,31}$")
 
 
 def _pkg_version(name: str) -> str | None:
@@ -28,7 +31,101 @@ def _find_spec(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def _run_bounded(cmd: list[str], *, timeout: float = 5.0) -> tuple[int, str, str]:
+def discover_tesseract_executable() -> str | None:
+    """Find tesseract without mutating PATH.
+
+    Order: PATH via shutil.which, then common install layouts derived from
+    environment roots (LOCALAPPDATA / ProgramFiles). Never hard-codes a user home.
+    """
+    for name in ("tesseract", "tesseract.exe"):
+        found = shutil.which(name)
+        if found:
+            return str(Path(found).resolve())
+
+    candidates: list[Path] = []
+    for root_key in ("LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(root_key)
+        if not root:
+            continue
+        candidates.append(Path(root) / "Programs" / "Tesseract-OCR" / "tesseract.exe")
+        candidates.append(Path(root) / "Tesseract-OCR" / "tesseract.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return None
+
+
+def discover_tessdata_dir(executable_path: str) -> Path | None:
+    """Prefer tessdata beside the executable; then valid TESSDATA_PREFIX variants."""
+    exe = Path(executable_path).resolve()
+    sibling = exe.parent / "tessdata"
+    if sibling.is_dir() and any(sibling.glob("*.traineddata")):
+        return sibling
+
+    raw = os.environ.get("TESSDATA_PREFIX")
+    if not raw or not raw.strip():
+        return sibling if sibling.is_dir() else None
+
+    prefix = Path(raw)
+    # Accept either .../tessdata or a parent that contains tessdata/.
+    for candidate in (prefix, prefix / "tessdata"):
+        if candidate.is_dir() and any(candidate.glob("*.traineddata")):
+            return candidate.resolve()
+    return sibling if sibling.is_dir() else None
+
+
+def languages_from_tessdata_dir(tessdata_dir: Path | None) -> list[str]:
+    if tessdata_dir is None or not tessdata_dir.is_dir():
+        return []
+    return sorted({p.stem for p in tessdata_dir.glob("*.traineddata") if p.is_file()})
+
+
+def normalize_language_token(token: str) -> str | None:
+    """Normalize a language line; ignore headers and path-like noise."""
+    value = token.strip()
+    if not value:
+        return None
+    lower = value.lower()
+    if lower.startswith("list of available languages"):
+        return None
+    if "tessdata" in lower.replace("\\", "/"):
+        # tessdata/eng, tessdata\eng, /path/tessdata/eng
+        value = Path(value.replace("\\", "/")).name
+    if not _LANG_LINE_RE.match(value):
+        return None
+    return value
+
+
+def parse_list_langs_output(stdout: str, stderr: str) -> list[str]:
+    """Parse `tesseract --list-langs` from stdout and/or stderr."""
+    text = "\n".join(part for part in (stdout, stderr) if part)
+    langs: set[str] = set()
+    for line in text.splitlines():
+        token = normalize_language_token(line)
+        if token is not None:
+            langs.add(token)
+    return sorted(langs)
+
+
+def _subprocess_env_without_broken_tessdata_prefix() -> dict[str, str]:
+    """Copy process env but never inject an empty TESSDATA_PREFIX.
+
+    An empty TESSDATA_PREFIX makes Windows Tesseract search a bogus build-time
+    mingw path and report zero languages.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "TESSDATA_PREFIX"}
+    raw = os.environ.get("TESSDATA_PREFIX")
+    if raw is not None and raw.strip():
+        env["TESSDATA_PREFIX"] = raw
+    return env
+
+
+def _run_bounded(
+    cmd: list[str],
+    *,
+    timeout: float = 5.0,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
             cmd,
@@ -36,7 +133,7 @@ def _run_bounded(cmd: list[str], *, timeout: float = 5.0) -> tuple[int, str, str
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "TESSDATA_PREFIX": os.environ.get("TESSDATA_PREFIX", "")},
+            env=env if env is not None else _subprocess_env_without_broken_tessdata_prefix(),
         )
         stdout = (proc.stdout or "")[:8000]
         stderr = (proc.stderr or "")[:8000]
@@ -49,7 +146,7 @@ def _run_bounded(cmd: list[str], *, timeout: float = 5.0) -> tuple[int, str, str
 
 def probe_tesseract_cli() -> OcrBackendAvailability:
     """Probe Tesseract CLI without OCR work or downloads."""
-    path = shutil.which("tesseract")
+    path = discover_tesseract_executable()
     missing: list[str] = []
     notes: list[str] = []
     if not path:
@@ -59,33 +156,54 @@ def probe_tesseract_cli() -> OcrBackendAvailability:
             offline_ready=False,
             missing_components=["tesseract_executable"],
             missing_languages=list(REQUIRED_OCR_LANGUAGES),
-            notes=["tesseract CLI not found on PATH"],
+            notes=["tesseract CLI not found on PATH or common install layouts"],
         )
 
-    code, out, err = _run_bounded([path, "--version"])
-    version_line = (out or err).splitlines()[0] if (out or err) else None
+    env = _subprocess_env_without_broken_tessdata_prefix()
+    tessdata = discover_tessdata_dir(path)
+    # Prefer explicit --tessdata-dir over mutating caller environment.
+    list_cmd = [path, "--list-langs"]
+    version_cmd = [path, "--version"]
+    if tessdata is not None:
+        list_cmd = [path, "--tessdata-dir", str(tessdata), "--list-langs"]
+
+    code, out, err = _run_bounded(version_cmd, env=env)
+    version_line = None
+    for stream in (out, err):
+        for line in stream.splitlines():
+            if line.strip():
+                version_line = line.strip()
+                break
+        if version_line:
+            break
     if code != 0 or not version_line:
         missing.append("tesseract_version")
         notes.append("tesseract --version failed")
 
-    _code_l, out_l, err_l = _run_bounded([path, "--list-langs"])
-    langs_raw = (out_l or err_l).splitlines()
-    langs = sorted(
-        {
-            line.strip()
-            for line in langs_raw
-            if line.strip() and "list of available languages" not in line.lower()
-        }
-    )
-    missing_langs = [lang for lang in REQUIRED_OCR_LANGUAGES if lang not in langs]
-    tessdata = os.environ.get("TESSDATA_PREFIX") or None
-    measured = None
-    if tessdata:
-        tess_path = Path(tessdata)
-        if tess_path.is_dir():
-            measured = sum(p.stat().st_size for p in tess_path.glob("*.traineddata") if p.is_file())
+    code_l, out_l, err_l = _run_bounded(list_cmd, env=env)
+    if code_l != 0:
+        notes.append(f"tesseract --list-langs failed rc={code_l}")
+    cmd_langs = parse_list_langs_output(out_l, err_l)
+    fs_langs = languages_from_tessdata_dir(tessdata)
+    if fs_langs and cmd_langs and set(fs_langs) != set(cmd_langs):
+        notes.append(
+            f"tessdata filesystem/command language disagreement: fs={fs_langs} cmd={cmd_langs}"
+        )
+    # Safe reconciliation: require both sources when both available.
+    if fs_langs and cmd_langs:
+        effective = sorted(set(fs_langs) & set(cmd_langs))
+    elif fs_langs:
+        effective = fs_langs
+        notes.append("using filesystem tessdata languages (command list empty/unavailable)")
+    else:
+        effective = cmd_langs
 
-    offline = bool(path and version_line and not missing_langs)
+    missing_langs = [lang for lang in REQUIRED_OCR_LANGUAGES if lang not in effective]
+    measured = None
+    if tessdata is not None and tessdata.is_dir():
+        measured = sum(p.stat().st_size for p in tessdata.glob("*.traineddata") if p.is_file())
+
+    offline = bool(path and version_line and not missing_langs and not missing)
     if missing_langs:
         missing.extend(f"tessdata_{lang}" for lang in missing_langs)
 
@@ -95,8 +213,8 @@ def probe_tesseract_cli() -> OcrBackendAvailability:
         offline_ready=offline,
         version=version_line,
         executable_path=path,
-        language_data_path=tessdata,
-        installed_languages=langs,
+        language_data_path=str(tessdata) if tessdata is not None else None,
+        installed_languages=effective,
         missing_languages=missing_langs,
         missing_components=missing,
         network_required=False,

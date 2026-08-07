@@ -10,7 +10,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from halyk_agent.adapters.archive.hashing import sha256_bytes
-from halyk_agent.adapters.ocr.probe import probe_tesseract_cli
+from halyk_agent.adapters.ocr.probe import (
+    _subprocess_env_without_broken_tessdata_prefix,
+    discover_tessdata_dir,
+    probe_tesseract_cli,
+)
 from halyk_agent.domain.ids import sha256_text
 from halyk_agent.domain.ocr import (
     REQUIRED_OCR_LANGUAGES,
@@ -239,13 +243,20 @@ def _run_tesseract(
         "--psm",
         str(psm),
     ]
+    tessdata = discover_tessdata_dir(executable)
+    if tessdata is not None:
+        cmd[1:1] = ["--tessdata-dir", str(tessdata)]
     try:
+        # UTF-8 with replacement: Windows defaults (e.g. cp1251) break Cyrillic OCR text.
         proc = subprocess.run(
             cmd,
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
+            env=_subprocess_env_without_broken_tessdata_prefix(),
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(str(exc)) from exc
