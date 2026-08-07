@@ -16,8 +16,13 @@ from halyk_agent.domain.covenants.ast import (
     money_sum,
 )
 from halyk_agent.domain.covenants.formulas import match_formula
-from halyk_agent.domain.covenants.models import Comparator
-from halyk_agent.domain.covenants.parse import parse_comparator, parse_threshold
+from halyk_agent.domain.covenants.models import Comparator, ScopeKind, ScopeProvenance
+from halyk_agent.domain.covenants.parse import (
+    parse_comparator,
+    parse_threshold,
+    related_party_phrase,
+    resolve_scope,
+)
 from halyk_agent.domain.covenants.quantity import CovenantTypeError, QuantityType, TypedQuantity
 from halyk_agent.domain.covenants.render import render_expr, render_quantity
 
@@ -73,18 +78,26 @@ def test_comparator_phrases(text: str, expected: Comparator) -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "qtype", "value"),
+    ("text", "qtype", "value", "currency"),
     [
-        ("превышал 0.42x", QuantityType.RATIO, Decimal("0.42")),
-        ("не менее $7,100,000.00", QuantityType.MONEY, Decimal("7100000.00")),
-        ("limit 12.5%", QuantityType.PERCENT, Decimal("12.5")),
+        ("превышал 0.42x", QuantityType.RATIO, Decimal("0.42"), None),
+        ("не менее $7,100,000.00", QuantityType.MONEY, Decimal("7100000.00"), "USD"),
+        ("limit 12.5%", QuantityType.PERCENT, Decimal("12.5"), None),
+        ("USD 1,000.00 ceiling", QuantityType.MONEY, Decimal("1000.00"), "USD"),
+        ("EUR 1,000.00 ceiling", QuantityType.MONEY, Decimal("1000.00"), "EUR"),
+        ("€1,000.00 ceiling", QuantityType.MONEY, Decimal("1000.00"), "EUR"),
+        ("₸1,000.00 ceiling", QuantityType.MONEY, Decimal("1000.00"), "KZT"),
     ],
 )
-def test_threshold_parsing(text: str, qtype: QuantityType, value: Decimal) -> None:
+def test_threshold_parsing(
+    text: str, qtype: QuantityType, value: Decimal, currency: str | None
+) -> None:
     parsed = parse_threshold(text)
-    assert parsed is not None
+    assert parsed.status == "ok"
+    assert parsed.quantity is not None
     assert parsed.quantity.quantity_type is qtype
     assert parsed.quantity.value == value
+    assert parsed.quantity.currency == currency
 
 
 def test_formula_capital_intensity() -> None:
@@ -118,3 +131,17 @@ def test_render_quantity_ratio_not_money() -> None:
     rendered = render_quantity(q)
     assert "0.42x" in rendered
     assert "USD" not in rendered
+
+
+def test_related_expenses_not_related_party_scope() -> None:
+    text = "выплаты персоналу и связанные с ними расходы за период"
+    assert related_party_phrase(text) is None
+    scope = resolve_scope(text, selectors=())
+    assert scope.scope_kind is ScopeKind.BORROWER
+    assert scope.provenance is ScopeProvenance.DEFAULT_BORROWER_BY_RULE
+
+
+def test_related_party_phrase_positive() -> None:
+    assert related_party_phrase("платежи связанным сторонам не должны превышать")
+    assert related_party_phrase("payments to related parties must not exceed")
+    assert related_party_phrase("related expenses") is None

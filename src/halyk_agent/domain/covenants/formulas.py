@@ -22,8 +22,8 @@ from halyk_agent.domain.covenants.ast import (
     money_sum,
 )
 from halyk_agent.domain.covenants.models import ActivationCondition, Comparator
-from halyk_agent.domain.covenants.parse import parse_all_money
-from halyk_agent.domain.covenants.quantity import TypedQuantity
+from halyk_agent.domain.covenants.parse import ThresholdRole, collect_threshold_candidates
+from halyk_agent.domain.covenants.quantity import QuantityType, TypedQuantity
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,13 +67,21 @@ def match_formula(clause_text: str) -> FormulaMatch | None:
     if "springing" in low or (
         "поступлений по финансированию" in low and "ebitda" in low and "только при условии" in low
     ):
-        moneys = parse_all_money(text)
+        money_candidates = [
+            c
+            for c in collect_threshold_candidates(text)
+            if c.quantity.quantity_type is QuantityType.MONEY
+        ]
         activation = None
-        if moneys:
+        if money_candidates:
+            preferred = next(
+                (c for c in money_candidates if c.role is ThresholdRole.ACTIVATION),
+                money_candidates[0],
+            )
             activation = ActivationCondition(
                 metric=money_sum(MetricCategory.FINANCING_INFLOWS),
                 comparator=Comparator.GT,
-                threshold=moneys[0][0],
+                threshold=preferred.quantity,
             )
         return FormulaMatch(
             family_id="SPRINGING_DRAWDOWN_LEVERAGE",

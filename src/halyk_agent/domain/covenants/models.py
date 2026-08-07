@@ -31,6 +31,7 @@ class PeriodKind(StrEnum):
     CLOSED_INTERVAL = "CLOSED_INTERVAL"
     AS_OF = "AS_OF"
     FINANCIAL_QUARTER = "FINANCIAL_QUARTER"
+    MIXED = "MIXED"
 
 
 class ScopeKind(StrEnum):
@@ -38,6 +39,14 @@ class ScopeKind(StrEnum):
     GROUP = "GROUP"
     BORROWER_AND_SUBSIDIARIES = "BORROWER_AND_SUBSIDIARIES"
     RELATED_PARTY_SET = "RELATED_PARTY_SET"
+    EXPRESSION_SCOPED = "EXPRESSION_SCOPED"
+
+
+class ScopeProvenance(StrEnum):
+    EXPLICIT_TEXT = "EXPLICIT_TEXT"
+    SELECTOR_DERIVED = "SELECTOR_DERIVED"
+    DEFAULT_BORROWER_BY_RULE = "DEFAULT_BORROWER_BY_RULE"
+    EXPRESSION_OPERAND_SCOPES = "EXPRESSION_OPERAND_SCOPES"
 
 
 class CompileStatus(StrEnum):
@@ -45,6 +54,7 @@ class CompileStatus(StrEnum):
     UNSUPPORTED_FORMULA = "UNSUPPORTED_FORMULA"
     AMBIGUOUS_OPERATOR = "AMBIGUOUS_OPERATOR"
     AMBIGUOUS_THRESHOLD = "AMBIGUOUS_THRESHOLD"
+    MALFORMED_THRESHOLD = "MALFORMED_THRESHOLD"
     UNRESOLVED_PERIOD = "UNRESOLVED_PERIOD"
     UNRESOLVED_SCOPE = "UNRESOLVED_SCOPE"
     MISSING_EVIDENCE = "MISSING_EVIDENCE"
@@ -56,6 +66,16 @@ class CompileStatus(StrEnum):
 class BoundaryInclusivity(StrEnum):
     INCLUSIVE = "INCLUSIVE"
     EXCLUSIVE = "EXCLUSIVE"
+
+
+class CovenantModifierKind(StrEnum):
+    """Covenant-side semantic instructions retained for later stages."""
+
+    AUDITOR_RECLASSIFICATION_INCLUDE = "AUDITOR_RECLASSIFICATION_INCLUDE"
+    AUDITOR_RECLASSIFICATION_EXCLUDE = "AUDITOR_RECLASSIFICATION_EXCLUDE"
+    REJECTED_RECLASSIFICATION_EXCLUDE = "REJECTED_RECLASSIFICATION_EXCLUDE"
+    MATERIALITY_FLOOR = "MATERIALITY_FLOOR"
+    BOTH_NUMERATOR_AND_DENOMINATOR_RECLASS = "BOTH_NUMERATOR_AND_DENOMINATOR_RECLASS"
 
 
 class PeriodDefinition(BaseModel):
@@ -71,13 +91,18 @@ class PeriodDefinition(BaseModel):
     end_inclusive: BoundaryInclusivity = BoundaryInclusivity.INCLUSIVE
     quarter: int | None = Field(default=None, ge=1, le=4)
     evidence_span_ids: tuple[NonEmptyStr, ...] = ()
+    # Optional secondary flow period when AS_OF coexists with a closed interval.
+    flow_start_date: date | None = None
+    flow_end_date: date | None = None
 
 
 class ScopeDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     scope_kind: ScopeKind
+    provenance: ScopeProvenance = ScopeProvenance.DEFAULT_BORROWER_BY_RULE
     evidence_span_ids: tuple[NonEmptyStr, ...] = ()
+    matched_text: NonEmptyStr | None = None
 
 
 class ActivationCondition(BaseModel):
@@ -91,6 +116,16 @@ class ActivationCondition(BaseModel):
     evidence_span_ids: tuple[NonEmptyStr, ...] = ()
 
 
+class CovenantModifier(BaseModel):
+    """Covenant instruction that later stages must satisfy (not ledger facts)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: CovenantModifierKind
+    detail: NonEmptyStr
+    evidence_span_ids: tuple[NonEmptyStr, ...] = ()
+
+
 class CovenantEvidenceRefs(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -100,6 +135,8 @@ class CovenantEvidenceRefs(BaseModel):
     threshold_span_ids: tuple[NonEmptyStr, ...] = ()
     period_span_ids: tuple[NonEmptyStr, ...] = ()
     scope_span_ids: tuple[NonEmptyStr, ...] = ()
+    activation_span_ids: tuple[NonEmptyStr, ...] = ()
+    modifier_span_ids: tuple[NonEmptyStr, ...] = ()
 
 
 class CovenantDefinition(BaseModel):
@@ -122,6 +159,7 @@ class CovenantDefinition(BaseModel):
     period: PeriodDefinition
     scope: ScopeDefinition
     selectors: tuple[TransactionSelector, ...] = ()
+    modifiers: tuple[CovenantModifier, ...] = ()
     activation_condition: ActivationCondition | None = None
     evidence: CovenantEvidenceRefs
     rendered: NonEmptyStr

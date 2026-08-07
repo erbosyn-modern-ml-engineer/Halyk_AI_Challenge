@@ -22,6 +22,7 @@ from halyk_agent.domain.covenants.models import (
     PeriodDefinition,
     PeriodKind,
     ScopeDefinition,
+    ScopeKind,
 )
 from halyk_agent.domain.covenants.quantity import QuantityType, TypedQuantity
 
@@ -37,7 +38,7 @@ _COMPARATOR_RENDER = {
 def render_quantity(quantity: TypedQuantity) -> str:
     value = format(quantity.value, "f")
     if quantity.quantity_type is QuantityType.MONEY:
-        currency = quantity.currency or "USD"
+        currency = quantity.currency or "?"
         return f"{currency} {value}"
     if quantity.quantity_type is QuantityType.RATIO:
         return f"{value}x"
@@ -50,12 +51,14 @@ def render_expr(expr: Expr) -> str:
     if isinstance(expr, Constant):
         return render_quantity(expr.quantity)
     if isinstance(expr, TransactionSet):
-        flags = []
+        flags: list[str] = []
         if expr.selector.related_party_only:
             flags.append("related_party")
         if expr.selector.group_level:
-            flags.append("group")
-        suffix = f"[{','.join(flags)}]" if flags else ""
+            flags.append("GROUP")
+        else:
+            flags.append("BORROWER")
+        suffix = f"[{','.join(flags)}]"
         return f"{expr.selector.category.value}{suffix}"
     if isinstance(expr, Sum):
         return f"SUM({render_expr(expr.of)})"
@@ -77,8 +80,27 @@ def render_expr(expr: Expr) -> str:
 
 
 def render_period(period: PeriodDefinition) -> str:
+    if period.period_kind is PeriodKind.MIXED:
+        flow_start = (
+            period.flow_start_date.isoformat()
+            if period.flow_start_date
+            else (period.start_date.isoformat() if period.start_date else "?")
+        )
+        flow_end = (
+            period.flow_end_date.isoformat()
+            if period.flow_end_date
+            else (period.end_date.isoformat() if period.end_date else "?")
+        )
+        as_of = period.as_of_date.isoformat() if period.as_of_date else "?"
+        return f"flow {flow_start}..{flow_end} + as-of {as_of}"
     if period.period_kind is PeriodKind.AS_OF:
-        return f"as of {period.as_of_date.isoformat() if period.as_of_date else '?'}"
+        as_of = period.as_of_date.isoformat() if period.as_of_date else "?"
+        if period.start_date and period.end_date:
+            return (
+                f"flow {period.start_date.isoformat()}..{period.end_date.isoformat()} "
+                f"+ as-of {as_of}"
+            )
+        return f"as of {as_of}"
     if period.period_kind is PeriodKind.FINANCIAL_QUARTER:
         end = period.end_date.isoformat() if period.end_date else "?"
         q = period.quarter or "?"
@@ -89,7 +111,9 @@ def render_period(period: PeriodDefinition) -> str:
 
 
 def render_scope(scope: ScopeDefinition) -> str:
-    return scope.scope_kind.value
+    if scope.scope_kind is ScopeKind.EXPRESSION_SCOPED:
+        return "EXPRESSION_SCOPED(operand selectors authoritative)"
+    return f"{scope.scope_kind.value}({scope.provenance.value})"
 
 
 def render_activation(condition: ActivationCondition) -> str:
@@ -108,6 +132,9 @@ def render_covenant_definition(definition: CovenantDefinition) -> str:
         f"scope={render_scope(definition.scope)}",
         f"family={definition.family_id}",
     ]
+    if definition.modifiers:
+        mods = ",".join(item.kind.value for item in definition.modifiers)
+        parts.append(f"modifiers={mods}")
     if definition.activation_condition is not None:
         parts.append(render_activation(definition.activation_condition))
     return " | ".join(parts)
