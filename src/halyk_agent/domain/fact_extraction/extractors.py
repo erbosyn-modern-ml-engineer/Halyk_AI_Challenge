@@ -33,6 +33,7 @@ from halyk_agent.domain.fact_extraction.models import (
     TransactionTreatmentPayload,
     TreatmentDisposition,
 )
+from halyk_agent.domain.fact_extraction.ownership_context import ownership_context_reason
 from halyk_agent.domain.fact_extraction.text_locate import (
     TXN_ID_RE,
     find_txn_ids,
@@ -547,7 +548,7 @@ def extract_period(
 
 
 _LEGAL_FORM = r"(?:LLP|JSC|Inc\.?|LLC|Ltd\.?|PLC|ТОО|АО|ООО|TOO)"
-# Line-local rows only — do not let \\s bridge a header line into "LLP 42.3%".
+# Line-local rows only — do not let \\s bridge a header line into "LLP 37.5%".
 _OWNERSHIP_ROW = re.compile(
     r"(?P<body>"
     r"(?:"
@@ -582,31 +583,21 @@ def _ownership_entity_name(match: re.Match[str]) -> str | None:
     return entity
 
 
-def _page_has_ownership_signal(text: str) -> bool:
-    corpus = cue_corpus(text).casefold()
-    cues = ("владе", "ownership", "голосующ", "бенефициар", "доли участия")
-    if any(cue in corpus for cue in cues):
-        return True
-    # Structural fallback: multiple entity+% rows (OCR/mojibake may destroy cue words).
-    rows = list(_OWNERSHIP_ROW.finditer(text))
-    meaningful = 0
-    for match in rows:
-        name = _ownership_entity_name(match)
-        if name and is_meaningful_entity_name(name):
-            meaningful += 1
-    return meaningful >= 2
-
-
 def extract_ownership(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
 ) -> list[FactCandidate]:
+    """
+    Emit ownership rows only when local preceding table/section context is
+    ownership/voting-rights (not pledged-assets / collateral tables).
+    """
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
-        if not _page_has_ownership_signal(text):
-            continue
         for match in _OWNERSHIP_ROW.finditer(text):
+            context_reason = ownership_context_reason(text, match.start())
+            if context_reason is None:
+                continue
             entity = _ownership_entity_name(match)
             if not entity:
                 continue
@@ -615,6 +606,7 @@ def extract_ownership(
                 "организация",
                 "entity",
                 "организация доля голосующих прав",
+                "дочерняя организация",
             }:
                 continue
             if "доля" in entity.casefold() and len(entity) < 40:
@@ -641,7 +633,7 @@ def extract_ownership(
                     page_number=page_number,
                     char_start=match.start(),
                     char_end=match.end(),
-                    reason_code="DET_OWNERSHIP",
+                    reason_code=f"DET_{context_reason}",
                 )
             )
     return out
