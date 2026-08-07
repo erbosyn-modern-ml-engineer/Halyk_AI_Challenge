@@ -12,7 +12,10 @@ from halyk_agent.domain.parsing import CanonicalDocument
 from halyk_agent.domain.routing.accounts import ACCOUNT_TOKEN_RE
 from halyk_agent.domain.routing.evidence import create_identity_span
 from halyk_agent.domain.routing.models import BorrowerIdentity
-from halyk_agent.domain.routing.normalize import normalize_account_id, normalize_legal_name
+from halyk_agent.domain.routing.normalize import (
+    normalize_account_id,
+    normalize_legal_name_keys,
+)
 
 _COMPANY_NAME = (
     r"(?P<name>(?-i:"
@@ -101,10 +104,10 @@ def extract_borrower_declarations(
                 raw_name = re.sub(r"\s+", " ", match.group("name")).strip()
                 if not raw_name:
                     continue
-                normalized, _, _ = normalize_legal_name(raw_name)
-                if not normalized:
+                normalized_keys = normalize_legal_name_keys(raw_name)
+                if not normalized_keys.identity_key:
                     continue
-                key = (normalized, declaration_type, page.page_number)
+                key = (normalized_keys.identity_key, declaration_type, page.page_number)
                 if key in seen:
                     continue
                 name_start = match.start("name")
@@ -123,7 +126,9 @@ def extract_borrower_declarations(
                 borrowers.append(
                     BorrowerIdentity(
                         legal_name_raw=raw_name,
-                        normalized_name=normalized,
+                        normalized_name=normalized_keys.identity_key,
+                        identity_key=normalized_keys.identity_key,
+                        base_key=normalized_keys.base_key,
                         declaration_type=declaration_type,
                         document_id=document.document_id,
                         document_version_id=document.document_version_id,
@@ -131,6 +136,7 @@ def extract_borrower_declarations(
                         evidence_span_id=span.id,
                         account_id_normalized=_nearby_account(text, match.start(), match.end()),
                         scenario_id=None,
+                        anchored=False,
                     )
                 )
 

@@ -134,6 +134,23 @@ def extract_account_identities(
             item.evidence_span_id or "",
         )
     )
+    # Diagnose prefix collisions among extracted complete tokens (ACC-7801 vs ACC-7801-08).
+    norms = sorted({a.account_id_normalized for a in accounts})
+    for i, shorter in enumerate(norms):
+        for longer in norms[i + 1 :]:
+            if is_prefix_collision(shorter, longer):
+                diagnostics.append(
+                    RoutingDiagnostic(
+                        code=DiagnosticCode.ACCOUNT_ID_MALFORMED,
+                        severity=DiagnosticSeverity.INFO,
+                        message=(
+                            f"complete-token prefix collision observed: "
+                            f"{shorter} vs {longer} (kept distinct)"
+                        ),
+                        document_id=document.document_id,
+                        account_id=shorter,
+                    )
+                )
     spans.sort(key=lambda item: item.id)
     return AccountExtractionBundle(
         accounts=tuple(accounts),

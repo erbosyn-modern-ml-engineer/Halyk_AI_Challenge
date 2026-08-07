@@ -8,7 +8,7 @@ from halyk_agent.domain.routing.models import (
     CounterpartyIdentity,
     TransactionEntityLink,
 )
-from halyk_agent.domain.routing.normalize import normalize_legal_name
+from halyk_agent.domain.routing.normalize import normalize_legal_name_keys
 
 
 @dataclass
@@ -27,7 +27,7 @@ def build_counterparty_identities(
     by_raw: dict[str, _CounterpartyBucket] = {}
     for link in links:
         raw = link.counterparty_raw
-        normalized, _, _ = normalize_legal_name(raw, strip_suffixes=False)
+        normalized = normalize_legal_name_keys(raw, record_aliases=False).identity_key
         bucket = by_raw.get(raw)
         if bucket is None:
             bucket = _CounterpartyBucket(normalized=normalized)
