@@ -149,7 +149,8 @@ _REJECTED_RECLASS_RU = re.compile(
     r"|предлага\w*.{0,60}?(?:отнести|перекласс\w*|переквалиф\w*)"
     r"|на\s+предмет\s+возможн\w*\s+(?:перекласс\w*|переквалиф\w*)"
     r")"
-    r"(?:.{0,80}?как\s+(?P<to>[^;,\n.]{2,80}))?"
+    r"(?:.{0,80}?как\s+(?P<to>[A-Za-zА-Яа-яЁё][\w\s\-]{1,60}?)"
+    r"(?=\s*;|\s*по\s+итогам|\s*,\s*по\s+итогам))?"
     r".{0,260}?"
     r"(?:"
     r"первоначальн\w*\s+классификац\w*.{0,40}?сохраня"
@@ -212,16 +213,18 @@ def _clean_category(raw: str | None) -> str | None:
     """Normalize captured category text (stop at clause/purpose connectors)."""
     if raw is None:
         return None
-    text = raw.strip(" ,.;:\n\t()")
+    text = re.sub(r"\s+", " ", raw).strip(" ,.;:\n\t()")
     if not text:
         return None
     text = re.split(
         r"\s+(?:для\s+целей|был|была|были|was|were|for\s+covenant|Основание|"
-        r"рассматрива|proposed|considered)\b",
+        r"рассматрива|proposed|considered|по\s+итогам|;)\b",
         text,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0]
+    # Stop before trailing clause markers that may remain after newline joins.
+    text = re.split(r"\s*;\s*", text, maxsplit=1)[0]
     cleaned = text.strip(" ,.;:\n\t()")
     return cleaned or None
 
