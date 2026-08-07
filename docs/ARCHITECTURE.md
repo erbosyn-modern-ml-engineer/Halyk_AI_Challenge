@@ -203,7 +203,7 @@ parse_report + documents
 
 Evidence spans from OCR blocks carry `text_origin=OCR`, backend identity, page number, exact quote.
 
-## Stage 5B / 5B.1 scenario and entity routing
+## Stage 5B / 5B.1 / 5B.2 scenario and entity routing
 
 ```text
 SanitizedDatasetManifest
@@ -215,12 +215,27 @@ SanitizedDatasetManifest
   → document precedence:
        1 EXPLICIT_ACCOUNT_ID
        2 EXPLICIT_BORROWER_DECLARATION
-       3 GROUP_SEGMENT_DECLARATION
-       4 NORMALIZED_LEGAL_NAME (identity_key)
+       3 GROUP_SEGMENT_DECLARATION (anchored identity + strong relation)
+       4 NORMALIZED_LEGAL_NAME (identity_key via whitespace-normalized search)
        5 UNRESOLVED
   → RoutingManifest + JSONL + identity_evidence.jsonl
-  → open audit → staged publish
+       (document_span + ledger_row provenance; source_sha256 required for docs)
+  → open audit → staged publish (replace after staged validation)
 ```
+
+### Whitespace-normalized matching (5B.2)
+
+Matching collapses Unicode whitespace runs to one ASCII space while mapping every
+normalized index back to raw offsets. Evidence quotes remain exact raw substrings
+(`quote == raw_text[start:end]`), including embedded newlines. A layout hit still
+requires exact `identity_key` equality.
+
+### Group / segment relations (5B.2)
+
+Bare nouns (`group` / `группа` / `топ` / `segment` / `сегмент`) are insufficient.
+LEVEL 3 requires an exact anchored borrower identity and a strong structural
+predicate in a bounded local window (subsidiary / conducted through / дочерн* /
+входит в группу / …).
 
 ### Routing vs Stage 5C
 

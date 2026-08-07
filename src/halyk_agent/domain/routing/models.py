@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from halyk_agent.domain.common import NonEmptyStr
 
 ROUTING_SCHEMA_VERSION = "halyk.routing_manifest.v1"
-ROUTING_ALGORITHM_VERSION = "halyk.routing.v1"
+ROUTING_ALGORITHM_VERSION = "halyk.routing.v2"
 NORMALIZATION_VERSION = "halyk.legal_name_norm.v2"
 
 
@@ -253,7 +253,7 @@ class RoutingManifest(BaseModel):
 
 
 class IdentityEvidenceAssertion(BaseModel):
-    """Persisted auditable identity/routing assertion (Stage 5B.1)."""
+    """Persisted auditable identity/routing assertion (Stage 5B.2)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -261,14 +261,48 @@ class IdentityEvidenceAssertion(BaseModel):
     scenario_id: NonEmptyStr | None = None
     document_id: NonEmptyStr | None = None
     txn_id: NonEmptyStr | None = None
+    account_id: NonEmptyStr | None = None
     identity_type: NonEmptyStr
     resolution_method: ResolutionMethod
-    evidence_span_id: NonEmptyStr
-    raw_quote: NonEmptyStr
-    page_number: int = Field(ge=1)
-    text_origin: NonEmptyStr
+    confidence: ResolutionConfidence | None = None
+    # Document-span provenance (EvidenceSpan). Optional for ledger-row assertions.
+    evidence_span_id: NonEmptyStr | None = None
+    raw_quote: NonEmptyStr | None = None
+    page_number: int | None = Field(default=None, ge=1)
+    text_origin: NonEmptyStr | None = None
     source_sha256: NonEmptyStr | None = None
     ocr_backend_identity: str | None = None
+    # Structured ledger-row provenance (not an EvidenceSpan).
+    provenance_kind: NonEmptyStr = "document_span"
+    ledger_source_file: NonEmptyStr | None = None
+    ledger_row_index: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_provenance(self) -> IdentityEvidenceAssertion:
+        kind = self.provenance_kind
+        if kind == "document_span":
+            if (
+                not self.evidence_span_id
+                or not self.raw_quote
+                or self.page_number is None
+                or not self.text_origin
+            ):
+                raise ValueError(
+                    "document_span assertion requires evidence_span_id, raw_quote, "
+                    "page_number, and text_origin"
+                )
+            if self.document_id and not self.source_sha256:
+                raise ValueError("document-derived identity assertion requires source_sha256")
+        elif kind == "ledger_row":
+            if not self.txn_id or self.ledger_source_file is None or self.ledger_row_index is None:
+                raise ValueError(
+                    "ledger_row assertion requires txn_id, ledger_source_file, and ledger_row_index"
+                )
+            if self.evidence_span_id is not None or self.raw_quote is not None:
+                raise ValueError("ledger_row assertion must not invent EvidenceSpan fields")
+        else:
+            raise ValueError(f"unknown provenance_kind: {kind}")
+        return self
 
 
 class RoutingReport(BaseModel):

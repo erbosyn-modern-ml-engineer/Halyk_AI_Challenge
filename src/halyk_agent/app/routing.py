@@ -1,7 +1,8 @@
-"""Scenario and entity routing application service (Stage 5B / 5B.1)."""
+"""Scenario and entity routing application service (Stage 5B.2)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -53,6 +54,7 @@ def route_entities(
     evidence_catalogue: tuple[EvidenceSpan, ...] = (),
     txn_id_parser: TxnIdParserConfig | None = None,
     parsed_input_identity: dict[str, Any] | None = None,
+    ledger_source_sha256: str | None = None,
 ) -> RoutingReport:
     """
     Core typed routing API.
@@ -69,6 +71,7 @@ def route_entities(
             dataset_manifest_payload=manifest.model_dump(mode="json"),
             txn_id_parser=txn_id_parser,
             parsed_input_identity=parsed_input_identity,
+            ledger_source_sha256=ledger_source_sha256,
         )
     except ScenarioDiscoveryError as exc:
         raise RoutingServiceError(str(exc), code="SCENARIO_DISCOVERY") from exc
@@ -107,6 +110,38 @@ def _publish_staged(stage_dir: Path, output_dir: Path) -> None:
             else:
                 dest.unlink()
         os.replace(path, dest)
+
+
+def _replace_published_outputs(stage_dir: Path, output_dir: Path) -> None:
+    """
+    Publish only after staged outputs are complete.
+
+    Prefer: build staged set → validate → replace published children.
+    Previous published children are moved aside first so a mid-publish failure
+    can restore them; they are deleted only after the new set is in place.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir: Path | None = None
+    existing = list(output_dir.iterdir())
+    if existing:
+        backup_dir = Path(tempfile.mkdtemp(prefix=".routing-prev-", dir=str(output_dir.parent)))
+        for child in existing:
+            os.replace(child, backup_dir / child.name)
+    try:
+        _publish_staged(stage_dir, output_dir)
+    except Exception:
+        if backup_dir is not None:
+            for child in list(output_dir.iterdir()):
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            for child in backup_dir.iterdir():
+                os.replace(child, output_dir / child.name)
+        raise
+    finally:
+        if backup_dir is not None and backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def route_from_paths(
@@ -166,9 +201,11 @@ def route_from_paths(
             ledger_bytes,
             source_file=ledger_path.as_posix(),
         )
+        ledger_source_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
         _, documents = load_parsed_documents(parsed_dir)
         evidence = load_evidence_catalogue(parsed_dir / "evidence_catalog.jsonl")
         parsed_identity = _parsed_input_identity(parsed_dir, documents)
+        parsed_identity["ledger_source_sha256"] = ledger_source_sha256
     except LeakageAttemptError:
         raise
     except RoutingIOError as exc:
@@ -183,6 +220,7 @@ def route_from_paths(
         template_answers=template_answers,
         evidence_catalogue=evidence,
         parsed_input_identity=parsed_identity,
+        ledger_source_sha256=ledger_source_sha256,
     )
 
     # Stage outputs; publish only after a second open audit.
@@ -204,14 +242,8 @@ def route_from_paths(
             newline="\n",
         )
         assert_opens_allowlisted(file_opener, allowed=allowed, banned=banned)
-
-        if overwrite and output_dir.exists():
-            for child in list(output_dir.iterdir()):
-                if child.is_dir():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-        _publish_staged(stage_dir, output_dir)
+        # Staged set is complete; replace published artifacts atomically-ish.
+        _replace_published_outputs(stage_dir, output_dir)
     except Exception:
         shutil.rmtree(stage_dir, ignore_errors=True)
         raise

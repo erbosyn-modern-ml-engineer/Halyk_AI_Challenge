@@ -1,4 +1,4 @@
-"""Pure deterministic scenario/entity routing engine (Stage 5B.1)."""
+"""Pure deterministic scenario/entity routing engine (Stage 5B.2)."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from halyk_agent.domain.routing.models import (
     RoutingReport,
     ScenarioIdentity,
     ScenarioRoutingRecord,
+    TransactionEntityLink,
     TxnIdParserConfig,
 )
 from halyk_agent.domain.routing.normalize import normalize_legal_name_keys
@@ -171,13 +172,24 @@ def _anchor_borrowers(
     )
 
 
+_TXN_ASSERTION_METHODS = frozenset(
+    {
+        ResolutionMethod.TXN_ID_PREFIX,
+        ResolutionMethod.ACCOUNT_ID_FALLBACK,
+        ResolutionMethod.TXN_ID_ACCOUNT_CONSISTENT,
+    }
+)
+
+
 def _build_identity_evidence(
     *,
     document_links: tuple[Any, ...],
     borrowers: tuple[BorrowerIdentity, ...],
     account_extractions: tuple[AccountIdentity, ...],
+    transaction_links: tuple[TransactionEntityLink, ...],
     spans_by_id: dict[str, EvidenceSpan],
     documents_by_id: dict[str, CanonicalDocument],
+    ledger_source_sha256: str | None,
 ) -> tuple[IdentityEvidenceAssertion, ...]:
     assertions: list[IdentityEvidenceAssertion] = []
     for link in document_links:
@@ -190,6 +202,8 @@ def _build_identity_evidence(
             if span is None:
                 continue
             doc = documents_by_id.get(link.document_id)
+            if doc is None or not doc.source_sha256:
+                continue
             identity_type = {
                 ResolutionMethod.EXPLICIT_ACCOUNT_ID: "ACCOUNT_ID",
                 ResolutionMethod.EXPLICIT_BORROWER_DECLARATION: "BORROWER_DECLARATION",
@@ -210,12 +224,14 @@ def _build_identity_evidence(
                     document_id=link.document_id,
                     identity_type=identity_type,
                     resolution_method=link.method,
+                    confidence=link.confidence,
                     evidence_span_id=span_id,
                     raw_quote=span.quote,
                     page_number=span.page_number,
                     text_origin=span.text_origin.value,
-                    source_sha256=doc.source_sha256 if doc else None,
+                    source_sha256=doc.source_sha256,
                     ocr_backend_identity=span.ocr_backend_identity,
+                    provenance_kind="document_span",
                 )
             )
     for borrower in borrowers:
@@ -223,6 +239,8 @@ def _build_identity_evidence(
         if span is None:
             continue
         doc = documents_by_id.get(borrower.document_id)
+        if doc is None or not doc.source_sha256:
+            continue
         assertions.append(
             IdentityEvidenceAssertion(
                 assertion_id=deterministic_id(
@@ -243,32 +261,65 @@ def _build_identity_evidence(
                 raw_quote=span.quote,
                 page_number=span.page_number,
                 text_origin=span.text_origin.value,
-                source_sha256=doc.source_sha256 if doc else None,
+                source_sha256=doc.source_sha256,
                 ocr_backend_identity=span.ocr_backend_identity,
+                provenance_kind="document_span",
             )
         )
     for account in account_extractions:
-        if not account.evidence_span_id:
+        if not account.evidence_span_id or not account.document_id:
             continue
         span = spans_by_id.get(account.evidence_span_id)
         if span is None:
+            continue
+        doc = documents_by_id.get(account.document_id)
+        if doc is None or not doc.source_sha256:
             continue
         assertions.append(
             IdentityEvidenceAssertion(
                 assertion_id=deterministic_id(
                     "identity-assertion-v1",
-                    account.document_id or "",
+                    account.document_id,
                     account.evidence_span_id,
                     "ACCOUNT_EXTRACTION",
                 ),
                 document_id=account.document_id,
+                account_id=account.account_id_normalized,
                 identity_type="ACCOUNT_ID",
                 resolution_method=ResolutionMethod.EXPLICIT_ACCOUNT_ID,
                 evidence_span_id=account.evidence_span_id,
                 raw_quote=span.quote,
                 page_number=span.page_number,
                 text_origin=span.text_origin.value,
+                source_sha256=doc.source_sha256,
                 ocr_backend_identity=span.ocr_backend_identity,
+                provenance_kind="document_span",
+            )
+        )
+    for txn in transaction_links:
+        if txn.method not in _TXN_ASSERTION_METHODS:
+            continue
+        if not txn.scenario_id:
+            continue
+        assertions.append(
+            IdentityEvidenceAssertion(
+                assertion_id=deterministic_id(
+                    "txn-identity-assertion-v1",
+                    txn.ledger_source_file,
+                    str(txn.row_index),
+                    txn.txn_id,
+                    txn.method.value,
+                ),
+                scenario_id=txn.scenario_id,
+                txn_id=txn.txn_id,
+                account_id=txn.account_id_normalized,
+                identity_type=txn.method.value,
+                resolution_method=txn.method,
+                confidence=txn.confidence,
+                source_sha256=ledger_source_sha256,
+                provenance_kind="ledger_row",
+                ledger_source_file=txn.ledger_source_file,
+                ledger_row_index=txn.row_index,
             )
         )
     assertions.sort(key=lambda item: item.assertion_id)
@@ -288,6 +339,7 @@ def run_routing(
     dataset_manifest_payload: Mapping[str, Any],
     txn_id_parser: TxnIdParserConfig | None = None,
     parsed_input_identity: Mapping[str, Any] | None = None,
+    ledger_source_sha256: str | None = None,
 ) -> RoutingReport:
     scenarios = discover_scenarios(template_answers)
     universe = scenario_universe(scenarios)
@@ -398,12 +450,19 @@ def run_routing(
         )
 
     spans_by_id = {span.id: span for span in identity_spans}
+    ledger_sha = ledger_source_sha256
+    if ledger_sha is None and parsed_input_identity:
+        raw_sha = parsed_input_identity.get("ledger_source_sha256")
+        if isinstance(raw_sha, str) and raw_sha:
+            ledger_sha = raw_sha
     identity_evidence = _build_identity_evidence(
         document_links=doc_bundle.links,
         borrowers=anchored_borrowers,
         account_extractions=tuple(account_extractions),
+        transaction_links=txn_bundle.links,
         spans_by_id=spans_by_id,
         documents_by_id=documents_by_id,
+        ledger_source_sha256=ledger_sha,
     )
 
     conflicts_sorted = tuple(
