@@ -79,21 +79,21 @@ def _doc(
     )
 
 
-def test_probe_never_downloads_and_reports_missing_tesseract() -> None:
+def test_probe_never_downloads() -> None:
     report = probe_ocr_environment()
     assert report.downloads_performed is False
     tess = next(c for c in report.candidates if c.kind is OcrBackendKind.TESSERACT_CLI)
-    # Current environment has no Tesseract CLI.
-    assert tess.installed is False or tess.offline_ready is False
     assert "eng" in tess.required_languages
     assert "rus" in tess.required_languages
     assert "kaz" in tess.required_languages
+    assert tess.may_download is False
+    assert tess.network_required is False
 
 
-def test_probe_tesseract_missing_languages_structure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_probe_tesseract_missing_executable_structure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "halyk_agent.adapters.ocr.probe.shutil.which",
-        lambda _name: None,
+        "halyk_agent.adapters.ocr.probe.discover_tesseract_executable",
+        lambda: None,
     )
     avail = probe_tesseract_cli()
     assert avail.installed is False
