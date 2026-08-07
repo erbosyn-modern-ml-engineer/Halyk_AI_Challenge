@@ -4,14 +4,15 @@ Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
 One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
-**Stage 4: VERIFIED.** **Stage 5A: VERIFIED.** **Stage 5A.4.1: VERIFIED.** **Stage 5B.1: implemented on branch** (routing completeness + GT isolation).
+**Stage 4: VERIFIED.** **Stage 5A: VERIFIED.** **Stage 5A.4.1: VERIFIED.** **Stage 5B.2: VERIFIED on main.** **Stage 5C: implemented on branch** (document taxonomy + authority).
 
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
 - **Modes** — `HALYK_MODE=competition` (default): solver consumes only a sanitized manifest and never opens/deserializes answer-key content (preflight may quarantine candidates). `HALYK_MODE=training` enables the isolated scorer only.
 - **Trust** — one `PostParseQualityGate` for every public parse path; pypdf/Docling page visual metadata uses KNOWN vs UNKNOWN (never silent zero).
 - **Selective OCR** — blocking pages only via Tesseract CLI (`eng+rus+kaz`); exe-relative tessdata discovery; no silent RapidOCR fallback; no automatic downloads.
-- **Scenario routing (Stage 5B.1)** — audited sanitized inputs; exact-account-first; legal-form-preserving `identity_key`; group/segment + exact-name levels; no covenant evaluation yet.
+- **Scenario routing (Stage 5B)** — audited sanitized inputs; exact-account-first; legal-form-preserving `identity_key`; group/segment + exact-name levels.
+- **Document authority (Stage 5C)** — taxonomy + lifecycle + domain authority; obsolete agreements rejected; no covenant extraction yet.
 
 ## Requirements
 
@@ -69,11 +70,20 @@ uv run python -m halyk_agent route `
   --parsed ./work/ocr-enriched `
   --output ./work/routing `
   --overwrite
+
+# Stage 5C — document taxonomy and authority (no covenants, no LLM)
+uv run python -m halyk_agent authority `
+  --routing ./work/routing `
+  --parsed ./work/ocr-enriched `
+  --output ./work/authority `
+  --overwrite
 ```
 
 Outputs for solve: `submission.json`, `run_manifest.json`, `unresolved_cells.jsonl`, `failure_events.jsonl`, `solver_summary.md`.
 
-Outputs for route: `routing_manifest.json`, `scenario_routes.jsonl`, `document_links.jsonl`, `transaction_links.jsonl`, `entity_conflicts.jsonl`, `routing_summary.md`.
+Outputs for route: `routing_manifest.json`, `scenario_routes.jsonl`, `document_links.jsonl`, `transaction_links.jsonl`, `entity_conflicts.jsonl`, `identity_evidence.jsonl`, `routing_summary.md`.
+
+Outputs for authority: `authority_manifest.json`, `document_taxonomy.jsonl`, `document_metadata.jsonl`, `document_families.jsonl`, `authority_decisions.jsonl`, `authority_conflicts.jsonl`, `authority_evidence.jsonl`, `authority_summary.md`.
 
 Competition solver opened-file audit must never include ground truth or quarantined answer keys. Preflight may list them as quarantine metadata only.
 

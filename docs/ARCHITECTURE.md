@@ -239,8 +239,41 @@ predicate in a bounded local window (subsidiary / conducted through / дочер
 
 ### Routing vs Stage 5C
 
-- **Routing (5B):** which scenario/entity a document *concerns*.
-- **Stage 5C (not started):** whether that document is relevant, authoritative, or current.
+- **Routing (5B):** which scenario/entity a document *concerns* (ownership).
+- **Authority (5C):** what the document *is*, its lifecycle, and which fact domains it may establish.
+
+## Stage 5C document taxonomy and authority
+
+```text
+Stage 5B routing outputs + OCR-enriched CanonicalDocuments
+  → metadata extraction (title/dates/markers)
+  → DocumentType + DocumentLifecycleStatus + AuthorityDomain
+  → document families (agreement / audit / KYC / …)
+  → deterministic authority resolver per scenario × domain
+  → AuthorityManifest + taxonomy/metadata/families/decisions/conflicts/evidence
+```
+
+### Separated concepts
+
+| Concept | Examples |
+|---------|----------|
+| `DocumentType` | LOAN_AGREEMENT, AUDITOR_REPORT, KYC_DOSSIER, PRESS_RELEASE, … |
+| `DocumentLifecycleStatus` | CURRENT_EXECUTED, FINAL, DRAFT, SUPERSEDED, … |
+| `AuthorityDomain` | COVENANT_TERMS, FINANCIAL_ADJUSTMENTS, KYC_RELATIONSHIPS, GROUP_STRUCTURE, NONE |
+
+### Authority precedence (deterministic)
+
+1. Explicit superseded/obsolete → reject for authority domains
+2. Explicit current/executed or FINAL/APPROVED → prefer
+3. Amendment/family identity must match before date comparison
+4. Equal authoritative candidates → `AuthorityConflict` / UNRESOLVED (never silent pick)
+5. Prefer `MISSING_AUTHORITY` over false authoritative (draft/policy substitution)
+
+### Not in Stage 5C
+
+Covenant thresholds, transaction taxonomy, adjustments, calculations, DeepSeek/LLM,
+or final submission answers.
+
 
 ### Legal-name keys
 
