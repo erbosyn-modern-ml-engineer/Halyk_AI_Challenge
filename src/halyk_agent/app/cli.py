@@ -190,6 +190,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fail on structural conflicts that make a scenario unusable",
     )
 
+    authority_parser = subparsers.add_parser(
+        "authority",
+        help="Document taxonomy and authority resolution (Stage 5C)",
+    )
+    authority_parser.add_argument(
+        "--routing",
+        required=True,
+        type=Path,
+        help="Stage 5B routing output directory",
+    )
+    authority_parser.add_argument(
+        "--parsed",
+        required=True,
+        type=Path,
+        help="OCR-enriched or Stage 5A parse output directory",
+    )
+    authority_parser.add_argument("--output", required=True, type=Path)
+    authority_parser.add_argument("--overwrite", action="store_true")
+    authority_parser.add_argument("--json-output", action="store_true")
+    authority_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail when a required authority domain has an unresolved conflict",
+    )
+
     return parser
 
 
@@ -469,6 +494,34 @@ def main(argv: list[str] | None = None) -> int:
             print(report_to_json(routing_report), end="")
         else:
             print_route_summary(routing_report)
+        return 0
+
+    if args.command == "authority":
+        from halyk_agent.app.authority import (
+            AuthorityServiceError,
+            authority_from_paths,
+            print_authority_summary,
+        )
+        from halyk_agent.app.authority import report_to_json as authority_report_to_json
+
+        try:
+            authority_report = authority_from_paths(
+                routing_dir=args.routing,
+                parsed_dir=args.parsed,
+                output_dir=args.output,
+                overwrite=bool(args.overwrite),
+                strict=bool(args.strict),
+            )
+        except AuthorityServiceError as exc:
+            print(f"authority failed: {exc.message}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"authority failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        if args.json_output:
+            print(authority_report_to_json(authority_report), end="")
+        else:
+            print_authority_summary(authority_report)
         return 0
 
     parser.error(f"unknown command: {args.command}")
