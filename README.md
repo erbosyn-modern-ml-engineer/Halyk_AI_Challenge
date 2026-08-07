@@ -4,13 +4,13 @@ Evidence-first decision agent for the Halyk Bank Agentic Challenge.
 
 One shared domain core drives two runtime profiles. The **authoritative competition path is FULL**.
 
-**Stage 4: VERIFIED.** **Stage 5A: VERIFIED** (merged). **Stage 5A.4: IMPLEMENTED — BLOCKED_ON_OCR_BACKEND** (selective OCR contracts ready; no offline Tesseract).
+**Stage 4: VERIFIED.** **Stage 5A: VERIFIED** (merged). **Stage 5A.4.1: VERIFIED** (Tesseract selective OCR; 7/7 public blocking pages recovered in bounded smoke).
 
 - **FULL (default / competition)** — local PostgreSQL when available, pypdf + Docling parsing, **multilingual-e5-small** embeddings (384-d), PostgreSQL FTS + exact vectors (`postgres_numpy_exact`; optional pgvector if already installed), RRF. Reranker disabled by default.
 - **FAST** — experimental fallback; frozen; not the competition default (local SQLite/E5 path remains for shared chunking/RRF tests only).
 - **Modes** — `HALYK_MODE=competition` (default): solver consumes only a sanitized manifest and never opens/deserializes answer-key content (preflight may quarantine candidates). `HALYK_MODE=training` enables the isolated scorer only.
 - **Trust** — one `PostParseQualityGate` for every public parse path; pypdf/Docling page visual metadata uses KNOWN vs UNKNOWN (never silent zero).
-- **Selective OCR** — blocking pages only; explicit backend; no silent fallback; no automatic downloads. Currently blocked until Tesseract CLI + eng/rus/kaz are installed.
+- **Selective OCR** — blocking pages only via Tesseract CLI (`eng+rus+kaz`); exe-relative tessdata discovery; no silent RapidOCR fallback; no automatic downloads.
 
 ## Requirements
 
