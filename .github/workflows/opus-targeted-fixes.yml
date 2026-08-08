@@ -34,6 +34,19 @@ jobs:
       - name: Apply confirmed red-team fixes
         run: python tools/apply_opus_targeted_fixes.py
 
+      - name: Repair generated long-note literal
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tests/solver/test_competitive_fallbacks.py")
+          text = path.read_text(encoding="utf-8")
+          old = '+ ("narrative " * 400) + "\nRevaluations were recorded.\nNote 8 — Other\n"'
+          new = '+ ("narrative " * 400) + "\\nRevaluations were recorded.\\nNote 8 — Other\\n"'
+          if old not in text:
+              raise SystemExit("generated long-note literal not found")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+          PY
+
       - name: Normalize changed Python
         run: |
           uv run ruff format \
