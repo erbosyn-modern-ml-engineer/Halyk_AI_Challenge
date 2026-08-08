@@ -59,10 +59,7 @@ def test_strict_policy_never_changes_raw_breach() -> None:
     ],
 )
 def test_calibrated_ratio_lte_boundary(actual: str, expected: CovenantStatus) -> None:
-    assert (
-        _resolve(actual, policy=SubmissionStatusPolicy.BENCHMARK_CALIBRATED_V1)
-        is expected
-    )
+    assert _resolve(actual, policy=SubmissionStatusPolicy.BENCHMARK_CALIBRATED_V1) is expected
 
 
 def test_calibrated_percent_uses_percentage_point_units() -> None:
@@ -97,7 +94,9 @@ def test_ratio_actual_accepts_percent_threshold_conversion() -> None:
     assert verdict is CovenantStatus.COMPLIANT
 
 
-@pytest.mark.parametrize("comparator", [Comparator.LT, Comparator.GT, Comparator.GTE, Comparator.EQ])
+@pytest.mark.parametrize(
+    "comparator", [Comparator.LT, Comparator.GT, Comparator.GTE, Comparator.EQ]
+)
 def test_calibration_never_changes_other_comparators(comparator: Comparator) -> None:
     assert (
         _resolve(
@@ -172,10 +171,7 @@ def test_environment_defaults_to_strict(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_environment_can_explicitly_enable_calibration(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HALYK_SUBMISSION_STATUS_POLICY", "benchmark-calibrated-v1")
-    assert (
-        configured_submission_status_policy()
-        is SubmissionStatusPolicy.BENCHMARK_CALIBRATED_V1
-    )
+    assert configured_submission_status_policy() is SubmissionStatusPolicy.BENCHMARK_CALIBRATED_V1
 
 
 def test_invalid_environment_policy_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
