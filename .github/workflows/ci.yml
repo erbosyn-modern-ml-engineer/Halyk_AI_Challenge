@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   validate:
@@ -26,24 +26,7 @@ jobs:
       - name: Sync locked environment
         run: uv sync --frozen --extra full --extra retrieval-full
 
-      - name: Ruff normalize Stage 6 branch
-        if: github.event_name == 'push' && github.ref_name == 'stage-6/covenant-evaluator'
-        run: |
-          uv run ruff format .
-          uv run ruff check --fix --unsafe-fixes .
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/halyk_agent/adapters/evaluation \
-                    src/halyk_agent/app/evaluation.py \
-                    src/halyk_agent/app/evaluation_cli.py \
-                    src/halyk_agent/domain/covenant_evaluation \
-                    tests/covenant_evaluation
-            git commit -m "style(evaluation): apply ruff lint fixes"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-          fi
-
-      - name: Ruff format check
+      - name: Ruff format
         run: uv run ruff format --check .
 
       - name: Ruff lint
