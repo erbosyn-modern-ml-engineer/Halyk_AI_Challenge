@@ -212,11 +212,16 @@ def test_membership_helpers_labor_utilities_insurance() -> None:
         MetricCategory.UTILITIES,
         MetricCategory.INSURANCE_PREMIUMS,
         MetricCategory.RENT,
-        MetricCategory.TAXES,
     ):
         members = selector_memberships(primary)
         assert members[0] is primary
         assert MetricCategory.OPEX in members
+    assert MetricCategory.OPEX in selector_memberships(
+        MetricCategory.TAXES, description="Property tax assessment"
+    )
+    assert MetricCategory.OPEX not in selector_memberships(
+        MetricCategory.TAXES, description="Corporate income tax instalment"
+    )
     assert MetricCategory.OPEX not in selector_memberships(MetricCategory.LEASE_PAYMENTS)
     assert MetricCategory.OPEX not in selector_memberships(MetricCategory.CAPEX)
     assert MetricCategory.OPEX not in selector_memberships(MetricCategory.REVENUE)
@@ -230,8 +235,8 @@ def test_membership_helpers_labor_utilities_insurance() -> None:
         ("Insurance broker rebate — annual", MetricCategory.INSURANCE_PREMIUMS),
         ("Tax overpayment refunded", MetricCategory.TAXES),
         ("Marketing overbilling refund", MetricCategory.OPEX),
-        ("Interest income on treasury bills", MetricCategory.FINANCING_INFLOWS),
-        ("Interest credited on current account", MetricCategory.FINANCING_INFLOWS),
+        ("Interest income on treasury bills", MetricCategory.NON_OPERATING_INCOME),
+        ("Interest credited on current account", MetricCategory.NON_OPERATING_INCOME),
         ("Customer invoice collection — April", MetricCategory.REVENUE),
         ("Sales revenue settlement — export lot", MetricCategory.REVENUE),
     ],
@@ -401,7 +406,7 @@ def test_unrestricted_subsidiary_requires_evidence() -> None:
     )
     report = _run(rows, links, defs)
     inp = report.calculation_inputs[0]
-    assert inp.category is MetricCategory.CAPEX
+    assert inp.category is MetricCategory.CAPITAL_ASSET_TRANSFER
     assert inp.subsidiary_status is SubsidiaryStatusKind.UNKNOWN
     sel = TransactionSelector(category=MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS)
     assert not input_matches_selector(inp, sel)
@@ -492,12 +497,17 @@ def test_true_zero_vs_unresolved_selector() -> None:
     defs = (
         _definition("P10", MetricCategory.RENT, definition_id="P10-rent"),
         _definition("P10", MetricCategory.GROUP_CAPEX, definition_id="P10-gc"),
+        _definition("P10", MetricCategory.ONE_TIME_ADD_BACKS, definition_id="P10-ot"),
     )
     report = _run(rows, links, defs)
     rent = next(c for c in report.selector_coverage if c.definition_id == "P10-rent")
     gc = next(c for c in report.selector_coverage if c.definition_id == "P10-gc")
+    ot = next(c for c in report.selector_coverage if c.definition_id == "P10-ot")
     assert rent.status is SelectorReadinessStatus.TRUE_ZERO
     assert gc.status is SelectorReadinessStatus.UNRESOLVED
+    # Source-dependent ONE_TIME must not become TRUE_ZERO from empty/incomplete source.
+    assert ot.status is SelectorReadinessStatus.UNRESOLVED
+    assert ot.reason_code == "UNRESOLVED_SOURCE_QUALITY"
 
 
 def test_accepted_reclass_survives_memberships() -> None:
@@ -522,6 +532,8 @@ def test_accepted_reclass_survives_memberships() -> None:
     assert inp.category is MetricCategory.INSURANCE_PREMIUMS
     assert MetricCategory.OPEX in inp.selector_categories
     assert input_matches_selector(inp, TransactionSelector(category=MetricCategory.OPEX))
+    assert inp.source_amount == Decimal("-100.00")
+    assert inp.metric_amount == Decimal("100.00")
     assert any(
         a.event_type is AdjustmentEventType.CATEGORY_RECLASSIFICATION_ACCEPTED
         for a in report.adjustments
@@ -579,7 +591,8 @@ def test_amount_correction_and_off_ledger_no_duplicate() -> None:
     report = _run(rows, links, (_definition("P1", MetricCategory.TAXES),), facts)
     ledger_inputs = [i for i in report.calculation_inputs if i.transaction_id == "TXN-P1-am"]
     assert len(ledger_inputs) == 1
-    assert ledger_inputs[0].amount == Decimal("-120.00")
+    assert ledger_inputs[0].source_amount == Decimal("-120.00")
+    assert ledger_inputs[0].amount == Decimal("120.00")
     derived = [
         i for i in report.calculation_inputs if i.source_kind is InputSourceKind.AUTHORITATIVE_FACT
     ]
@@ -602,3 +615,34 @@ def test_scenario_universe_mismatch_fails_closed(tmp_path) -> None:
             output_dir=tmp_path / "out",
         )
     assert exc.value.code in {"MISSING_INPUT", "SCENARIO_UNIVERSE_MISMATCH"}
+
+
+def test_facts_covenants_authority_hash_mismatch_fails_closed(tmp_path) -> None:
+    import json
+    import shutil
+    from pathlib import Path
+
+    from halyk_agent.app.transactions import TransactionServiceError, transactions_from_paths
+
+    smoke_root = Path("work/smoke5f2")
+    if not (smoke_root / "routing" / "routing_manifest.json").exists():
+        pytest.skip("smoke5f2 artifacts required")
+
+    out = tmp_path / "bundle"
+    for name in ("routing", "covenants", "facts"):
+        shutil.copytree(smoke_root / name, out / name)
+    facts_manifest = out / "facts" / "fact_extraction_manifest.json"
+    data = json.loads(facts_manifest.read_text(encoding="utf-8"))
+    data["authority_manifest_hash"] = "0" * 64
+    facts_manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with pytest.raises(TransactionServiceError) as exc:
+        transactions_from_paths(
+            routing_dir=out / "routing",
+            covenants_dir=out / "covenants",
+            facts_dir=out / "facts",
+            ledger_path=Path("agentic-bank-public/master_ledger_2025.csv"),
+            output_dir=tmp_path / "tx-out",
+            overwrite=True,
+        )
+    assert exc.value.code == "AUTHORITY_MISMATCH"

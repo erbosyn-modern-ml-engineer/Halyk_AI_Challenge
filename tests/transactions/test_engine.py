@@ -210,7 +210,10 @@ def test_amount_correction_single_input_no_double_count() -> None:
     )
     inputs = [i for i in report.calculation_inputs if i.transaction_id == "TXN-P1-0003"]
     assert len(inputs) == 1
-    assert inputs[0].amount == Decimal("-120.00")
+    # Source signed flow preserved; metric_amount uses expense negate contract.
+    assert inputs[0].source_amount == Decimal("-120.00")
+    assert inputs[0].amount == Decimal("120.00")
+    assert inputs[0].metric_amount == Decimal("120.00")
 
 
 def test_conflicting_amount_corrections() -> None:
