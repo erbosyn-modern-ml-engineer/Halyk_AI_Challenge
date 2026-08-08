@@ -13,9 +13,13 @@ from halyk_agent.adapters.routing.io import load_ledger_csv
 from halyk_agent.adapters.transactions.io import (
     TransactionIOError,
     load_accepted_facts,
+    load_accepted_facts_file_order,
+    load_fact_evidence_spans,
+    load_fact_requirement_results,
     load_json_manifest,
     load_transaction_links,
     manifest_file_hash,
+    verify_fact_artifact_hashes,
     write_taxonomy_outputs,
 )
 from halyk_agent.domain.transaction_taxonomy.engine import run_transaction_taxonomy
@@ -110,6 +114,8 @@ def transactions_from_paths(
     links_path = _resolve_file(routing_dir, "transaction_links.jsonl")
     definitions_path = _resolve_file(covenants_dir, "covenant_definitions.jsonl")
     accepted_path = _resolve_file(facts_dir, "accepted_facts.jsonl")
+    results_path = _resolve_file(facts_dir, "fact_requirement_results.jsonl")
+    evidence_path = _resolve_file(facts_dir, "fact_evidence.jsonl")
 
     routing_manifest = load_json_manifest(routing_manifest_path)
     covenant_manifest = load_json_manifest(covenant_manifest_path)
@@ -144,6 +150,17 @@ def transactions_from_paths(
         )
 
     try:
+        # Integrity first — never publish Stage 5F outputs on doctored upstream facts.
+        facts_file_order = load_accepted_facts_file_order(accepted_path)
+        requirement_results = load_fact_requirement_results(results_path)
+        evidence_spans = load_fact_evidence_spans(evidence_path)
+        verify_fact_artifact_hashes(
+            facts_manifest=facts_manifest,
+            accepted_facts=facts_file_order,
+            requirement_results=requirement_results,
+            evidence_spans=evidence_spans,
+        )
+
         ledger_rows = load_ledger_csv(ledger_path)
         links = load_transaction_links(links_path)
         definitions = load_covenant_definitions(definitions_path)
@@ -174,6 +191,7 @@ def transactions_from_paths(
         routing_manifest_hash=manifest_file_hash(routing_manifest_path),
         covenant_manifest_hash=manifest_file_hash(covenant_manifest_path),
         facts_manifest_hash=manifest_file_hash(facts_manifest_path),
+        fact_requirement_results=requirement_results,
     )
 
     stage_parent = output_dir.parent

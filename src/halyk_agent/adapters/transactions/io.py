@@ -7,7 +7,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from halyk_agent.domain.fact_extraction.models import FactRecord
+from halyk_agent.domain.evidence import EvidenceSpan
+from halyk_agent.domain.fact_extraction.engine import hash_fact_models
+from halyk_agent.domain.fact_extraction.models import FactRecord, FactRequirementResult
 from halyk_agent.domain.ids import sha256_text
 from halyk_agent.domain.routing.models import TransactionEntityLink
 from halyk_agent.domain.transaction_taxonomy.models import TaxonomyReport
@@ -74,6 +76,96 @@ def load_accepted_facts(path: Path) -> tuple[FactRecord, ...]:
         items.append(FactRecord.model_validate_json(line))
     items.sort(key=lambda item: (item.scenario_id, item.fact_kind.value, item.fact_id))
     return tuple(items)
+
+
+def load_accepted_facts_file_order(path: Path) -> tuple[FactRecord, ...]:
+    """Load accepted facts in on-disk order (required for manifest hash verification)."""
+    if not path.is_file():
+        raise TransactionIOError(f"accepted facts missing: {path}", code="MISSING_FACTS")
+    items: list[FactRecord] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        items.append(FactRecord.model_validate_json(line))
+    return tuple(items)
+
+
+def load_fact_requirement_results(path: Path) -> tuple[FactRequirementResult, ...]:
+    if not path.is_file():
+        raise TransactionIOError(
+            f"fact requirement results missing: {path}", code="MISSING_FACT_RESULTS"
+        )
+    items: list[FactRequirementResult] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        items.append(FactRequirementResult.model_validate_json(line))
+    return tuple(items)
+
+
+def load_fact_evidence_spans(path: Path) -> tuple[EvidenceSpan, ...]:
+    if not path.is_file():
+        raise TransactionIOError(f"fact evidence missing: {path}", code="MISSING_FACT_EVIDENCE")
+    items: list[EvidenceSpan] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        items.append(EvidenceSpan.model_validate_json(line))
+    return tuple(items)
+
+
+def verify_fact_artifact_hashes(
+    *,
+    facts_manifest: dict[str, Any],
+    accepted_facts: tuple[FactRecord, ...],
+    requirement_results: tuple[FactRequirementResult, ...] | None = None,
+    evidence_spans: tuple[EvidenceSpan, ...] | None = None,
+) -> None:
+    """
+    Fail closed when consumed Stage 5E artifact content diverges from manifest hashes.
+
+    Hashes are recomputed with the same Stage 5E algorithm (model dumps / span ids).
+    """
+    expected_facts = facts_manifest.get("accepted_facts_hash")
+    if not expected_facts:
+        raise TransactionIOError(
+            "facts manifest missing accepted_facts_hash",
+            code="FACT_ARTIFACT_HASH_MISSING",
+        )
+    actual_facts = hash_fact_models(accepted_facts)
+    if actual_facts != expected_facts:
+        raise TransactionIOError(
+            "accepted_facts.jsonl content hash does not match fact_extraction_manifest",
+            code="FACT_ARTIFACT_HASH_MISMATCH",
+        )
+
+    expected_results = facts_manifest.get("requirement_results_hash")
+    if expected_results:
+        if requirement_results is None:
+            raise TransactionIOError(
+                "requirement results required for hash verification",
+                code="FACT_ARTIFACT_HASH_MISSING",
+            )
+        actual_results = hash_fact_models(requirement_results)
+        if actual_results != expected_results:
+            raise TransactionIOError(
+                "fact_requirement_results.jsonl content hash does not match manifest",
+                code="FACT_ARTIFACT_HASH_MISMATCH",
+            )
+
+    expected_evidence = facts_manifest.get("evidence_hash")
+    if expected_evidence:
+        if evidence_spans is None:
+            raise TransactionIOError(
+                "fact evidence required for hash verification",
+                code="FACT_ARTIFACT_HASH_MISSING",
+            )
+        actual_evidence = sha256_text("|".join(sorted(span.id for span in evidence_spans)))
+        if actual_evidence != expected_evidence:
+            raise TransactionIOError(
+                "fact_evidence.jsonl content hash does not match manifest",
+                code="FACT_ARTIFACT_HASH_MISMATCH",
+            )
 
 
 def write_taxonomy_outputs(report: TaxonomyReport, output_dir: Path) -> dict[str, Path]:

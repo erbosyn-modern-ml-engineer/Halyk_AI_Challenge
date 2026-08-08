@@ -87,11 +87,16 @@ def _ledger_txn_ids(ledger_rows: Sequence[LedgerRow] | None) -> set[str] | None:
     return {row.txn_id for row in ledger_rows}
 
 
-def _hash_models(models: Sequence[Any]) -> str:
+def hash_fact_models(models: Sequence[Any]) -> str:
+    """Content hash matching Stage 5E manifest artifact hashes (file order)."""
     lines = [
         json.dumps(m.model_dump(mode="json"), ensure_ascii=False, sort_keys=True) for m in models
     ]
     return sha256_text("\n".join(lines))
+
+
+def _hash_models(models: Sequence[Any]) -> str:
+    return hash_fact_models(models)
 
 
 def _candidate_to_record(
