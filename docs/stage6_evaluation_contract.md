@@ -1,154 +1,60 @@
-# Stage 6 — Evaluation Contract (Pre-flight Freeze)
+# Stage 6 — Evaluation Contract
 
-Status: **CONTRACT CLOSED (pre-flight)** — evaluator not implemented.
+Status: **IMPLEMENTED**. The implementation began on `stage-6/covenant-evaluator` and is consumed by `stage-7/solver-integration`.
 
-This document freezes the Stage 6 input / validation contracts after Opus findings
-BLOCKER-1/2 and HIGH-1..4. It does **not** authorize EvaluationPlanner /
-EvaluationExecutor / evaluate CLI implementation.
+Stage 6 is the strict deterministic calculation kernel. It consumes the typed Stage 5D covenant AST and Stage 5F calculation inputs; it does not read training answers, call an LLM, or invent missing financial facts.
 
-## Upstream readiness (source-faithful)
+## Core contract
 
-| Signal | Expectation with current public source data |
-|--------|---------------------------------------------|
-| Stage 5D definitions | 36 |
-| Stage 5F structural READY / UNRESOLVED | 34 / 2 |
-| Structural UNRESOLVED | P5 `GROUP_CAPEX`, P6 related-party identity |
-| Stage 6 numeric evaluability (current sources) | **29** |
-| Currency fail-closed | five otherwise-READY definitions with mixed USD/EUR operands and no trusted conversion |
+- `CovenantDefinition -> EvaluationPlan` is deterministic.
+- `PlanStructureValidator` runs before data binding.
+- `ContextValidator` runs after Stage 5F binding.
+- Every declared dependency/root must exist; duplicate IDs, missing dependencies, cycles, invalid payloads/types/modifiers and orphan nodes fail closed.
+- Stage 5D/5F manifest/content hashes are verified before publication.
+- Stage 5F `amount_contract_version`, selector coverage/readiness, scenario ownership and input IDs are enforced.
+- FLOW / AS_OF period membership is tri-state: undecidable is `UNRESOLVED`, never silently false.
+- `include_flags` / `exclude_flags` are applied explicitly.
+- No implicit FX conversion is permitted.
 
-Recompute the mixed-currency set from regenerated Stage 5F artifacts; do not trust a
-frozen scenario list if upstream inputs change. With the Stage 5F.3 corpus the five are:
+## Materiality
 
-- B1 6.1
-- P1 6.1
-- P2 6.1
-- P3 6.1
-- P7 6.1
+`MATERIALITY_FLOOR` carries a typed MONEY threshold and optional target category. A deterministic filter that removes every relevant row yields a genuine zero for `SUM`; any undecidable relevant predicate yields `UNRESOLVED`.
 
-Diagnostic code for those cases:
+The upstream covenant money parser remains fail-closed: complete monetary tokens only, no OCR digit repair, all matched instructions reconciled, conflicting typed floors rejected.
 
-`MIXED_CURRENCY_NO_TRUSTED_CONVERSION`
+## Decimal policy
 
-Rules:
+Execution uses an explicit local Decimal context:
 
-- Structural READY ≠ numeric READY.
-- The single P3 FX settlement fact (`explicit_rate=None`, `rate_source=NOT_STATED`,
-  `transaction_id=None`) must **not** be applied to unrelated EUR ledger rows.
-- No invented FX, no reciprocal guessing, no settlement/source-derived rates.
+- precision: 60;
+- rounding: `ROUND_HALF_EVEN`;
+- no float;
+- no pre-comparison quantization unless a covenant explicitly requires rounding.
 
-## Typed Stage 6 inputs (closed by pre-flight)
+Zero denominator is `ERROR`. A negative denominator is evaluated faithfully and emits `NEGATIVE_DENOMINATOR`.
 
-1. **MATERIALITY_FLOOR** carries `threshold: TypedQuantity` and optional
-   `applies_to_category: MetricCategory`. Missing/ambiguous floor fails closed at
-   compile time (no parameter-less modifier).
-2. Stage 5F manifest hashes **selector_coverage** and **definition_readiness**
-   (`selector_coverage_hash`, `definition_readiness_hash`). Consumers must verify
-   via `verify_taxonomy_readiness_hashes` before evaluation publication.
-3. Every evaluation-bound `CalculationInput` carries `InputPeriodSemantics`:
-   - ledger flows → `FLOW`
-   - P4 one-time add-backs → `FLOW` (requirement/covenant flow binding)
-   - P8 severance liability → `AS_OF` with source-backed `as_of_date`
-4. Period helpers remain in `domain/transaction_taxonomy/period.py`
-   (tri-state: `None` means undecidable, not false).
+## Springing activation — competition-grounded semantics
 
-## Materiality money safety (closed by materiality-final-closure)
+`CASE.ru.md` resolves the earlier policy ambiguity: even when a springing covenant is inactive, the submission `actual` must remain the **main covenant metric**, not the activation metric and not `null`.
 
-Parsing rules for `MATERIALITY_FLOOR.threshold` (and other typed money thresholds
-that share the covenant money scanner):
+Therefore Stage 6 now:
 
-- **Complete monetary token grammar.** One lexer recognizes plain digits,
-  comma thousands, and space thousands (incl. NBSP / narrow NBSP / thin space),
-  plus an optional `.` decimal part. Grouping must be well-formed
-  (1–3 / 3 / 3…). Hyphen/apostrophe mixtures and OCR letter-as-digit tokens
-  fail closed — never emit a shorter valid prefix.
-- **No OCR auto-correction.** Letter-as-digit corruption is not rewritten into
-  digits.
-- **Instruction region invariant.** A materiality/add-back regex match always
-  contributes a region with `end >= match.end()`, then expands to the sentence
-  containing `match.end() - 1`. Legal abbreviations (`п.`, `ст.`, `cl.`, `Sec.`)
-  are not sentence terminators.
-- **All-instruction reconciliation.** Every matched materiality / add-back-floor
-  instruction is scanned; document-level candidates are reconciled:
-  - any relevant malformed threshold-like money → no confident modifier
-  - 0 distinct typed floors → no modifier
-  - 1 distinct `(currency, Decimal)` → publish
-  - >1 distinct → ambiguous / no modifier
-  - identical typed repeats dedupe (no first/last/highest preference)
-- Unrelated money outside a matched materiality instruction must not create
-  false ambiguity. Ranges like `$300,000-$500,000` discover both endpoints.
+1. evaluates the activation subgraph;
+2. records `activation_state=INACTIVE` when the condition is false;
+3. still evaluates the main metric so that the required `actual` exists;
+4. returns internal `NOT_ACTIVATED` only as an internal state marker;
+5. leaves the final binary competition mapping to the Stage 7 submission adapter, which maps an evaluable inactive covenant to `COMPLIANT`.
 
-## Validation split (HIGH-4)
+Main-metric `ERROR` / `UNRESOLVED` is still surfaced even when activation is inactive; Stage 6 does not hide missing or invalid data.
 
-### A. PlanStructureValidator
+## Strict/public expectations
 
-Runs after planning, **before** data binding.
-
-Owns:
-
-- duplicate node IDs
-- missing dependency
-- missing root
-- cycle
-- unsupported node kind
-- node payload validation
-- AST / type compatibility
-- unsupported modifier shape
-
-### B. ContextValidator
-
-Runs **after** Stage 5F inputs / selector coverage are bound.
-
-Owns:
-
-- `amount_contract_version`
-- selector existence
-- selector scenario ownership
-- coverage state availability
-- input IDs
-- scenario universe
-- currency conflict
-- period consistency
-- source-quality compatibility
-
-Both fail closed. **No output publication** on global validation failure.
-
-## Frozen implementation-time rules (executor not built yet)
-
-### 1. POST-FILTER EMPTY
-
-`SELECT READY` with inputs → deterministic decidable filter → zero surviving inputs
-is a genuine zero for `SUM` (example: materiality floor filters every add-back).
-
-But if the filter predicate is undecidable for any relevant input → `UNRESOLVED`.
-Never silently drop undecidable rows.
-
-### 2. DECIMAL POLICY
-
-Stage 6 must run under an explicit local `Decimal` Context. Do not depend on ambient
-process context. Use deterministic high precision appropriate for financial ratios
-(precision ≥ 50) with an explicit rounding policy. Do not quantize covenant actuals
-before comparison unless the covenant explicitly specifies rounding. Comparison uses
-the fixed context. No float.
-
-### 3. NEGATIVE DENOMINATOR
-
-Do not reinterpret the formula. If the compiled denominator is negative, evaluate
-faithfully and emit deterministic diagnostic `NEGATIVE_DENOMINATOR` in node result /
-evaluation issues. Zero denominator remains `ERROR`.
-
-## Future tests location
-
-Do **not** place covenant evaluator tests in `tests/evaluation/` (retrieval metrics).
-
-Freeze:
-
-`tests/covenant_evaluation/`
-
-(Not created in this pre-flight unless architecture-contract tests require it.)
+On the supplied public corpus, the strict layer currently resolves 29 of 36 cells and leaves 7 unresolved, principally because strict Stage 6 refuses unsupported cross-scenario FX generalization and one structural GROUP_CAPEX source gap remains. These strict results are preserved separately from Stage 8 competitive fallbacks.
 
 ## Non-goals
 
-- No EvaluationPlanner / EvaluationPlan / EvaluationExecutor
-- No covenant actuals / statuses / evaluate CLI
-- No Stage 7
-- No push to 36/36 by inventing FX, OCR identity, or GROUP_CAPEX
+- no Stage 8 FX/PPE fallback inside Stage 6;
+- no invented ownership or GROUP_CAPEX;
+- no ground-truth / answer-key reads;
+- no LLM calls;
+- no heuristic `evidence_txn_id` selection.

@@ -145,6 +145,56 @@ def possible_damaged_identity_match(damaged_name: str, candidate_name: str) -> b
     return damaged_positions >= 1
 
 
+def recover_unique_damaged_related_parties(
+    damaged_entities: tuple[DamagedOwnershipEntity, ...],
+    scenario_counterparties: dict[str, tuple[str, ...]],
+) -> tuple[QualifyingRelatedParty, ...]:
+    """Recover an OCR-damaged qualifying owner only from a unique ledger identity.
+
+    This is deliberately narrower than fuzzy matching. A damaged ownership token may
+    wildcard only the explicitly corrupted token (``possible_damaged_identity_match``),
+    and recovery is allowed only when exactly one normalized counterparty identity in
+    that scenario matches exactly one damaged qualifying ownership row. Repeated ledger
+    rows for the same counterparty do not create ambiguity.
+    """
+
+    proposals: list[tuple[DamagedOwnershipEntity, str, str]] = []
+    for damaged in damaged_entities:
+        by_identity: dict[str, str] = {}
+        for raw_name in scenario_counterparties.get(damaged.scenario_id, ()):
+            if not possible_damaged_identity_match(damaged.entity_name, raw_name):
+                continue
+            keys = normalize_legal_name_keys(raw_name)
+            by_identity.setdefault(keys.identity_key, raw_name)
+        if len(by_identity) != 1:
+            continue
+        identity_key, raw_name = next(iter(by_identity.items()))
+        proposals.append((damaged, identity_key, raw_name))
+
+    # One candidate identity must not be used to repair two different damaged owners.
+    candidate_counts: dict[tuple[str, str], int] = {}
+    for damaged, identity_key, _raw_name in proposals:
+        key = (damaged.scenario_id, identity_key)
+        candidate_counts[key] = candidate_counts.get(key, 0) + 1
+
+    recovered: list[QualifyingRelatedParty] = []
+    for damaged, identity_key, raw_name in proposals:
+        if candidate_counts[(damaged.scenario_id, identity_key)] != 1:
+            continue
+        recovered.append(
+            QualifyingRelatedParty(
+                scenario_id=damaged.scenario_id,
+                entity_name=raw_name,
+                identity_key=identity_key,
+                ownership_percent=damaged.ownership_percent,
+                threshold_percent=damaged.threshold_percent,
+                fact_ids=damaged.fact_ids,
+            )
+        )
+    recovered.sort(key=lambda item: (item.scenario_id, item.identity_key, item.entity_name))
+    return tuple(recovered)
+
+
 def qualifying_related_parties(
     facts: tuple[FactRecord, ...],
 ) -> tuple[QualifyingRelatedParty, ...]:

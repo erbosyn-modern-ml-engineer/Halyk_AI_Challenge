@@ -77,8 +77,17 @@ def require_audited_opener(opener: object) -> FileOpener:
 
 
 def resolve_dataset_path(path: Path | str) -> Path:
-    """Canonical path used for allowlist / quarantine membership."""
-    return Path(path).expanduser().resolve()
+    """Canonical path used for allowlist / quarantine membership.
+
+    Treat both slash styles as separators before host-platform resolution.  This
+    prevents a Windows-style alias of an absolute/quarantined path from becoming
+    a different relative filename when the same solver is reproduced on POSIX.
+    Forward slashes are accepted by Windows ``Path`` as well, so this
+    normalization is intentionally symmetric across supported hosts.
+    """
+
+    normalized = str(path).replace("\\", "/")
+    return Path(normalized).expanduser().resolve()
 
 
 def looks_like_ground_truth_name(path: Path) -> bool:
@@ -94,6 +103,7 @@ def validate_manifest_paths(
         resolve_dataset_path(manifest.submission_template.path),
         resolve_dataset_path(manifest.primary_ledger.path),
         *(resolve_dataset_path(case.path) for case in manifest.case_descriptions),
+        *(resolve_dataset_path(document.path) for document in manifest.document_files),
     }
     overlap = allowed & banned
     if overlap:

@@ -72,6 +72,7 @@ from halyk_agent.domain.transaction_taxonomy.models import (
 from halyk_agent.domain.transaction_taxonomy.related_party import (
     damaged_qualifying_entities,
     qualifying_related_parties,
+    recover_unique_damaged_related_parties,
     resolve_related_party,
 )
 from halyk_agent.domain.transaction_taxonomy.selectors import (
@@ -918,6 +919,26 @@ def run_transaction_taxonomy(
             _mark_fact(fact, "UNUSED", "no Stage 5F consumer registered")
 
     damaged_entities = damaged_qualifying_entities(accepted_facts)
+    scenario_counterparties: dict[str, set[str]] = {}
+    for state in classified_mutable.values():
+        scenario_id = state["scenario_id"]
+        if scenario_id is None:
+            continue
+        scenario_counterparties.setdefault(scenario_id, set()).add(state["counterparty_raw"])
+    recovered_qualifying = recover_unique_damaged_related_parties(
+        damaged_entities,
+        {
+            scenario_id: tuple(sorted(counterparties))
+            for scenario_id, counterparties in scenario_counterparties.items()
+        },
+    )
+    if recovered_qualifying:
+        qualifying = tuple(
+            sorted(
+                (*qualifying, *recovered_qualifying),
+                key=lambda item: (item.scenario_id, item.identity_key, item.entity_name),
+            )
+        )
 
     # --- Related-party + entity / subsidiary scope enrichment ---
     for tid, state in classified_mutable.items():

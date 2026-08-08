@@ -124,6 +124,14 @@ def build_parser() -> argparse.ArgumentParser:
     solve_parser.add_argument("--email", default=None)
     solve_parser.add_argument("--model", default=None)
 
+    reproduce_parser = subparsers.add_parser(
+        "reproduce-compare",
+        help="Compare two independently completed solver runs for deterministic output",
+    )
+    reproduce_parser.add_argument("--run-a", required=True, type=Path)
+    reproduce_parser.add_argument("--run-b", required=True, type=Path)
+    reproduce_parser.add_argument("--output", required=True, type=Path)
+
     train_parser = subparsers.add_parser(
         "train-score",
         help="Training-only scorer (requires HALYK_MODE=training)",
@@ -534,6 +542,22 @@ def main(argv: list[str] | None = None) -> int:
         print("solve complete")
         print(f"run_id={solve_result['run_id']}")
         print(f"submission={solve_result['submission']}")
+        return 0
+
+    if args.command == "reproduce-compare":
+        from halyk_agent.app.reproduction import ReproductionError, verify_reproduction_pair
+
+        try:
+            reproduction_report = verify_reproduction_pair(args.run_a, args.run_b, args.output)
+        except ReproductionError as exc:
+            print(f"reproduction failed: {exc.message}", file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"reproduction failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        print("reproduction complete")
+        print(f"deterministic={reproduction_report.deterministic}")
+        print(f"submission_sha256={reproduction_report.submission_sha256}")
         return 0
 
     if args.command == "train-score":
