@@ -1,0 +1,4 @@
+uniform_public_score=97.22%
+actual_exact=36/36
+status_exact=35/36
+evidence_exact_non_null=9/9
