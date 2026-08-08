@@ -51,6 +51,26 @@ Rules:
 4. Period helpers remain in `domain/transaction_taxonomy/period.py`
    (tri-state: `None` means undecidable, not false).
 
+## Materiality money safety (closed by materiality-safety-fix)
+
+Parsing rules for `MATERIALITY_FLOOR.threshold` (and other typed money thresholds
+that share the covenant money scanner):
+
+- **Full-token validation.** A currency-prefixed candidate is accepted only when
+  the entire monetary numeric token is syntactically valid. A valid numeric
+  prefix followed by letter/junk continuation is malformed.
+- **No OCR auto-correction.** Letter-as-digit corruption must not be rewritten
+  into digits; it fails closed (no published threshold).
+- **Bounded candidate collection.** Materiality extraction scans the relevant
+  instruction/sentence region only (not document-wide).
+- **Distinct-candidate ambiguity.** After typed-value dedupe
+  `(currency, Decimal value)`:
+  - 0 valid → no materiality threshold
+  - 1 valid → publish `MATERIALITY_FLOOR`
+  - >1 distinct → ambiguous / no confident modifier
+- Identical repeats of the same typed amount may dedupe. Unrelated money outside
+  the bounded instruction must not create false ambiguity.
+
 ## Validation split (HIGH-4)
 
 ### A. PlanStructureValidator
