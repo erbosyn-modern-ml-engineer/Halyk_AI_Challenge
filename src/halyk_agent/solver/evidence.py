@@ -18,6 +18,7 @@ from halyk_agent.domain.covenant_evaluation import (
     EvaluationExecutor,
     EvaluationPlan,
     EvaluationStatus,
+    EvaluationValidationError,
 )
 from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.quantity import QuantityType
@@ -267,6 +268,42 @@ def _counterfactual_context(
     return context.model_copy(update={"calculation_inputs": replaced})
 
 
+def _scope_context_to_plan(
+    context: EvaluationContext,
+    plan: EvaluationPlan,
+) -> EvaluationContext:
+    """Bind a shared competition context to one covenant's Stage 6 universe.
+
+    The production solver keeps all scenarios/definitions in one shared context.
+    ``EvaluationExecutor.execute`` intentionally validates a *single-plan* universe,
+    so causal counterfactual replay must narrow readiness/coverage/input ownership
+    before invoking it.  Without this boundary every candidate fails global
+    validation and evidence silently collapses to ``None``.
+    """
+
+    return context.model_copy(
+        update={
+            "calculation_inputs": tuple(
+                item
+                for item in context.calculation_inputs
+                if item.scenario_id == plan.scenario_id
+            ),
+            "selector_coverage": tuple(
+                entry
+                for entry in context.selector_coverage
+                if entry.definition_id == plan.definition_id
+                and entry.scenario_id == plan.scenario_id
+            ),
+            "definition_readiness": tuple(
+                entry
+                for entry in context.definition_readiness
+                if entry.definition_id == plan.definition_id
+                and entry.scenario_id == plan.scenario_id
+            ),
+        }
+    )
+
+
 def select_causal_evidence(
     *,
     plan: EvaluationPlan,
@@ -313,10 +350,11 @@ def select_causal_evidence(
         )
         if counterfactual is None:
             continue
+        scoped_counterfactual = _scope_context_to_plan(counterfactual, plan)
         try:
-            candidate_result = executor.execute(plan, counterfactual)
-        except Exception:
-            # A malformed/underdetermined counterfactual is not publishable evidence.
+            candidate_result = executor.execute(plan, scoped_counterfactual)
+        except EvaluationValidationError:
+            # An underdetermined counterfactual is not publishable evidence.
             continue
         counterfactual_verdict = competition_verdict(candidate_result)
         if counterfactual_verdict is not None and counterfactual_verdict is not current_verdict:
