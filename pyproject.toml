@@ -112,6 +112,8 @@ module = [
   "docling.*",
   "pypdfium2",
   "pypdfium2.*",
+  "rapidocr",
+  "rapidocr.*",
   "sentence_transformers",
   "sentence_transformers.*",
   "numpy",

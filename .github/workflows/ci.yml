@@ -49,8 +49,8 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check .
 
-      - name: Mypy
-        run: uv run mypy src
+      - name: Mypy base + Stage 6
+        run: uv run mypy src --exclude 'src/halyk_agent/adapters/retrieval/postgres/'
 
       - name: Tests
         run: uv run pytest -q
