@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   apply-and-validate:
-    if: startsWith(github.event.head_commit.message, 'chore: stage financial-ratio semantics patch')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -20,7 +19,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install uv
         run: python -m pip install --disable-pip-version-check uv
@@ -36,28 +35,8 @@ jobs:
 
       - name: Format changed Python
         run: |
-          uv run ruff format \
-            src/halyk_agent/domain/covenants/ast.py \
-            src/halyk_agent/domain/transaction_taxonomy/membership.py \
-            src/halyk_agent/domain/transaction_taxonomy/classify.py \
-            src/halyk_agent/domain/transaction_taxonomy/selectors.py \
-            src/halyk_agent/domain/transaction_taxonomy/engine.py \
-            tests/transactions/test_classify.py \
-            tests/transactions/test_engine.py \
-            tests/transactions/test_final_integrity.py \
-            tests/transactions/test_semantic_correctness.py \
-            tests/transactions/test_sign_and_tax.py
-          uv run ruff check --fix \
-            src/halyk_agent/domain/covenants/ast.py \
-            src/halyk_agent/domain/transaction_taxonomy/membership.py \
-            src/halyk_agent/domain/transaction_taxonomy/classify.py \
-            src/halyk_agent/domain/transaction_taxonomy/selectors.py \
-            src/halyk_agent/domain/transaction_taxonomy/engine.py \
-            tests/transactions/test_classify.py \
-            tests/transactions/test_engine.py \
-            tests/transactions/test_final_integrity.py \
-            tests/transactions/test_semantic_correctness.py \
-            tests/transactions/test_sign_and_tax.py
+          uv run ruff format src/halyk_agent/domain/covenants/ast.py src/halyk_agent/domain/transaction_taxonomy/membership.py src/halyk_agent/domain/transaction_taxonomy/classify.py src/halyk_agent/domain/transaction_taxonomy/selectors.py src/halyk_agent/domain/transaction_taxonomy/engine.py tests/transactions/test_classify.py tests/transactions/test_engine.py tests/transactions/test_final_integrity.py tests/transactions/test_semantic_correctness.py tests/transactions/test_sign_and_tax.py
+          uv run ruff check --fix src/halyk_agent/domain/covenants/ast.py src/halyk_agent/domain/transaction_taxonomy/membership.py src/halyk_agent/domain/transaction_taxonomy/classify.py src/halyk_agent/domain/transaction_taxonomy/selectors.py src/halyk_agent/domain/transaction_taxonomy/engine.py tests/transactions/test_classify.py tests/transactions/test_engine.py tests/transactions/test_final_integrity.py tests/transactions/test_semantic_correctness.py tests/transactions/test_sign_and_tax.py
 
       - name: Targeted transaction regressions
         run: uv run pytest -q tests/transactions
@@ -67,19 +46,8 @@ jobs:
 
       - name: Commit validated implementation
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add \
-            src/halyk_agent/domain/covenants/ast.py \
-            src/halyk_agent/domain/transaction_taxonomy/membership.py \
-            src/halyk_agent/domain/transaction_taxonomy/classify.py \
-            src/halyk_agent/domain/transaction_taxonomy/selectors.py \
-            src/halyk_agent/domain/transaction_taxonomy/engine.py \
-            tests/transactions/test_classify.py \
-            tests/transactions/test_engine.py \
-            tests/transactions/test_final_integrity.py \
-            tests/transactions/test_semantic_correctness.py \
-            tests/transactions/test_sign_and_tax.py \
-            docs/stage10_4_financial_ratio_semantics.md
-          git commit -m 'fix(finance): enforce statement-component covenant semantics'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/halyk_agent/domain/covenants/ast.py src/halyk_agent/domain/transaction_taxonomy/membership.py src/halyk_agent/domain/transaction_taxonomy/classify.py src/halyk_agent/domain/transaction_taxonomy/selectors.py src/halyk_agent/domain/transaction_taxonomy/engine.py tests/transactions/test_classify.py tests/transactions/test_engine.py tests/transactions/test_final_integrity.py tests/transactions/test_semantic_correctness.py tests/transactions/test_sign_and_tax.py docs/stage10_4_financial_ratio_semantics.md
+          git commit -m "fix(finance): enforce statement-component covenant semantics"
           git push origin HEAD:stage-10.4/financial-ratio-semantics
