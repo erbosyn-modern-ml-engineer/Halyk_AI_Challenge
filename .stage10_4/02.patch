@@ -1,0 +1,118 @@
+diff --git a/tests/transactions/test_classify.py b/tests/transactions/test_classify.py
+index 12165c2..2c444a8 100644
+--- a/tests/transactions/test_classify.py
++++ b/tests/transactions/test_classify.py
+@@ -12,10 +12,10 @@ def test_strong_category_beats_misleading_keyword() -> None:
+     assert hit.category is MetricCategory.INSURANCE_PREMIUMS
+ 
+ 
+-def test_capitalised_interest_is_capex_not_conflict() -> None:
++def test_capitalised_interest_is_interest_cost_not_capex() -> None:
+     hit = classify_description("Capitalised interest charge — Q4 2025")
+     assert hit.status == "CLASSIFIED"
+-    assert hit.category is MetricCategory.CAPEX
++    assert hit.category is MetricCategory.INTEREST_EXPENSE
+ 
+ 
+ def test_rent_credit_is_not_customer_revenue() -> None:
+@@ -31,22 +31,34 @@ def test_genuine_customer_revenue() -> None:
+     assert hit.category is MetricCategory.REVENUE
+ 
+ 
+-def test_ad_campaign_is_opex_not_revenue() -> None:
++def test_ad_campaign_is_generic_expense_not_statement_opex() -> None:
+     hit = classify_description("Product launch ad campaign — Q1")
+     assert hit.status == "CLASSIFIED"
++    assert hit.category is MetricCategory.OTHER_EXPENSE
++
++
++def test_direct_industrial_servicing_is_statement_opex() -> None:
++    hit = classify_description("Catalyst regeneration servicing contract")
++    assert hit.status == "CLASSIFIED"
+     assert hit.category is MetricCategory.OPEX
+ 
+ 
++def test_generic_consulting_is_other_expense_not_statement_opex() -> None:
++    hit = classify_description("Freight arbitration consulting settlement")
++    assert hit.status == "CLASSIFIED"
++    assert hit.category is MetricCategory.OTHER_EXPENSE
++
++
+ def test_payroll_rebate_is_labor_credit() -> None:
+     hit = classify_description("Payroll agency rebate — hub 2025")
+     assert hit.status == "CLASSIFIED"
+     assert hit.category is MetricCategory.LABOR
+ 
+ 
+-def test_telecom_leased_line_is_lease() -> None:
++def test_telecom_leased_line_is_utility_not_property_lease() -> None:
+     hit = classify_description("Telecom leased line — site office")
+     assert hit.status == "CLASSIFIED"
+-    assert hit.category is MetricCategory.LEASE_PAYMENTS
++    assert hit.category is MetricCategory.UTILITIES
+ 
+ 
+ def test_lease_vs_rent_collision_when_both_expense() -> None:
+diff --git a/tests/transactions/test_engine.py b/tests/transactions/test_engine.py
+index 38ddc98..1ad81de 100644
+--- a/tests/transactions/test_engine.py
++++ b/tests/transactions/test_engine.py
+@@ -175,7 +175,7 @@ def test_accepted_and_rejected_reclassification() -> None:
+         facts_manifest_hash="f" * 64,
+     )
+     by_id = {t.transaction_id: t for t in report.classified}
+-    assert by_id["TXN-P1-0001"].original_category is MetricCategory.OPEX
++    assert by_id["TXN-P1-0001"].original_category is MetricCategory.OTHER_EXPENSE
+     assert by_id["TXN-P1-0001"].effective_category is MetricCategory.INSURANCE_PREMIUMS
+     assert by_id["TXN-P1-0002"].effective_category == by_id["TXN-P1-0002"].original_category
+     assert "f-rej" in by_id["TXN-P1-0002"].rejected_fact_ids
+diff --git a/tests/transactions/test_final_integrity.py b/tests/transactions/test_final_integrity.py
+index 1db86de..cbc859e 100644
+--- a/tests/transactions/test_final_integrity.py
++++ b/tests/transactions/test_final_integrity.py
+@@ -79,7 +79,7 @@ def test_attached_one_time_add_back_preserves_original_expense_membership() -> N
+     report = _run(rows, links, defs, facts)
+     assert len(report.calculation_inputs) == 1
+     inp = report.calculation_inputs[0]
+-    assert inp.category is MetricCategory.OPEX
++    assert inp.category is MetricCategory.OTHER_EXPENSE
+     assert MetricCategory.OPEX in inp.selector_categories
+     assert MetricCategory.ONE_TIME_ADD_BACKS in inp.selector_categories
+     assert MEMBERSHIP_REASON_ONE_TIME_ADD_BACK in inp.membership_reasons
+@@ -147,7 +147,9 @@ def test_public_shaped_p4_add_backs_share_semantics() -> None:
+             ),
+         ),
+     )
+-    # Force unique attach only for A; B/C become fact-derived while ledger twins stay OPEX.
++    # Force unique attach only for A; B/C become fact-derived. The generic
++    # ledger rows stay OTHER_EXPENSE while authoritative facts supply paired
++    # OPEX + add-back inputs.
+     report = _run(
+         rows,
+         links,
+@@ -163,16 +165,22 @@ def test_public_shaped_p4_add_backs_share_semantics() -> None:
+     )
+     by_txn = {i.transaction_id: i for i in report.calculation_inputs if i.transaction_id}
+     attached = by_txn["TXN-P4-A"]
+-    assert attached.category is MetricCategory.OPEX
++    assert attached.category is MetricCategory.OTHER_EXPENSE
+     assert MetricCategory.ONE_TIME_ADD_BACKS in attached.selector_categories
+     assert MetricCategory.OPEX in attached.selector_categories
+ 
+     for tid in ("TXN-P4-B", "TXN-P4-C"):
+         twin = by_txn[tid]
+-        assert twin.category is MetricCategory.OPEX
+-        assert MetricCategory.OPEX in twin.selector_categories
++        assert twin.category is MetricCategory.OTHER_EXPENSE
++        assert MetricCategory.OPEX not in twin.selector_categories
+         assert MetricCategory.ONE_TIME_ADD_BACKS not in twin.selector_categories
+ 
++    derived_opex = [
++        i
++        for i in report.calculation_inputs
++        if i.category is MetricCategory.OPEX and i.transaction_id is None
++    ]
++    assert len(derived_opex) == 2
+     derived = [
+         i
+         for i in report.calculation_inputs
