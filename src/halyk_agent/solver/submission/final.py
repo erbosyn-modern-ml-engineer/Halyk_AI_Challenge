@@ -11,7 +11,6 @@ from typing import Any
 from halyk_agent.domain.covenant_evaluation import (
     CovenantEvaluationResult,
     EvaluationContext,
-    EvaluationPlan,
     EvaluationReport,
 )
 from halyk_agent.domain.covenant_evaluation.constants import DECIMAL_PRECISION
