@@ -38,6 +38,16 @@ def _stable_pipeline_payload(path: Path) -> dict[str, object]:
     return {key: value for key, value in payload.items() if key != "run_id"}
 
 
+def _required_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ReproductionError(f"pipeline manifest field {key!r} is not an integer")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ReproductionError(f"pipeline manifest field {key!r} is not an integer") from exc
+
+
 def verify_reproduction_pair(
     run_a: Path,
     run_b: Path,
@@ -92,8 +102,8 @@ def verify_reproduction_pair(
         submission_sha256=sha256_file(submission_a),
         fallback_diagnostics_sha256=sha256_file(fallback_a),
         evaluation_manifest_sha256=str(stable_a["evaluation_manifest_sha256"]),
-        run_a_source_reads=int(stable_a["source_read_count"]),
-        run_b_source_reads=int(stable_b["source_read_count"]),
+        run_a_source_reads=_required_int(stable_a, "source_read_count"),
+        run_b_source_reads=_required_int(stable_b, "source_read_count"),
         run_a_ground_truth_access=gt_a,
         run_b_ground_truth_access=gt_b,
     )

@@ -252,7 +252,7 @@ def _p5_group_input(
     start = plan.period.start_date or date(2025, 1, 1)
     end = plan.period.end_date or date(2025, 12, 31)
     return CalculationInput(
-        input_id=deterministic_id("stage8-fallback", "P5", "GROUP_CAPEX", amount),
+        input_id=deterministic_id("stage8-fallback", "P5", "GROUP_CAPEX", str(amount)),
         scenario_id="P5",
         source_kind=InputSourceKind.AUTHORITATIVE_FACT,
         derived_input_id="stage8-ppe-roll-forward-residual",
@@ -297,10 +297,10 @@ def _enable_p5_group_selector(
         else:
             updated_coverage.append(entry)
     updated_readiness: list[DefinitionReadinessEntry] = []
-    for entry in readiness:
-        if entry.definition_id == definition_id:
+    for readiness_entry in readiness:
+        if readiness_entry.definition_id == definition_id:
             updated_readiness.append(
-                entry.model_copy(
+                readiness_entry.model_copy(
                     update={
                         "status": SelectorReadinessStatus.READY,
                         "reason_code": "STAGE8_PPE_ROLL_FORWARD_RESIDUAL",
@@ -309,7 +309,7 @@ def _enable_p5_group_selector(
                 )
             )
         else:
-            updated_readiness.append(entry)
+            updated_readiness.append(readiness_entry)
     return tuple(updated_coverage), tuple(updated_readiness)
 
 

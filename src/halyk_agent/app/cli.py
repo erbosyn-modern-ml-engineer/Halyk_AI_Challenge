@@ -548,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
         from halyk_agent.app.reproduction import ReproductionError, verify_reproduction_pair
 
         try:
-            report = verify_reproduction_pair(args.run_a, args.run_b, args.output)
+            reproduction_report = verify_reproduction_pair(args.run_a, args.run_b, args.output)
         except ReproductionError as exc:
             print(f"reproduction failed: {exc.message}", file=sys.stderr)
             return 1
@@ -556,8 +556,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"reproduction failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
             return 1
         print("reproduction complete")
-        print(f"deterministic={report.deterministic}")
-        print(f"submission_sha256={report.submission_sha256}")
+        print(f"deterministic={reproduction_report.deterministic}")
+        print(f"submission_sha256={reproduction_report.submission_sha256}")
         return 0
 
     if args.command == "train-score":

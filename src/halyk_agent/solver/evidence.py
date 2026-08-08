@@ -147,10 +147,12 @@ def _invert_event(
         proposed = event.after.get("proposed_to")
         if not isinstance(proposed, str):
             return None
-        category = map_category_label(proposed)
-        if category is None:
+        proposed_category = map_category_label(proposed)
+        if proposed_category is None:
             return None
-        updated = _recompute_category_fields(inp, category=category, description=description)
+        updated = _recompute_category_fields(
+            inp, category=proposed_category, description=description
+        )
         if updated is None:
             return None
         flags = tuple(flag for flag in updated.flags if flag != "HAS_REJECTED_RECLASSIFICATION")
