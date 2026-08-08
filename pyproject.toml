@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 halyk-agent = "halyk_agent.app.cli:main"
+halyk-evaluate = "halyk_agent.app.evaluation_cli:main"
 
 [project.optional-dependencies]
 full = [
@@ -134,4 +135,3 @@ module = [
   "sqlalchemy.*",
 ]
 ignore_missing_imports = true
-
