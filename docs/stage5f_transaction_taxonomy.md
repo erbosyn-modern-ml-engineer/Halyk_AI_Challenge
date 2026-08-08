@@ -51,6 +51,15 @@ LEASE stays **outside** OPEX (P1 is additive `OPEX + LEASE`).
 
 One transaction → one `CalculationInput` / one amount. Memberships never duplicate amounts.
 
+## One-time add-backs (metric membership)
+
+`ONE_TIME_ADD_BACK` facts are **metric-role augmentations**, not reclassifications.
+
+- Ledger-attached: keep original expense category + memberships; add `ONE_TIME_ADD_BACKS`
+- Fact-derived (no unique ledger twin): emit a separate positive-magnitude ONE_TIME input
+- Exactly one `CalculationInput` per ledger transaction
+- Participating in both OPEX and ONE_TIME_ADD_BACKS is intentional for Stage 5D add-back formulas
+
 ## Metric amount contract (`halyk.metric_amount.v1`)
 
 Stage 6 must aggregate `metric_amount`, never raw ledger signs.
