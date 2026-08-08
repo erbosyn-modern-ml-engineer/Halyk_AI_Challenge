@@ -54,6 +54,18 @@ def test_legal_form_punctuation_variants_match() -> None:
     assert names_match_exact("Alpha Energy JSC", "Alpha Energy J.S.C")
 
 
+def test_legal_form_position_and_boundary_separator_variants_match() -> None:
+    assert names_match_exact("Astana Trade Holding LLP", "LLP Astana Trade Holding")
+    assert names_match_exact("Astana Trade Holding LLP", "Astana Trade Holding, LLP")
+    assert names_match_exact("Astana Trade Holding LLP", "LLP, Astana Trade Holding")
+    assert names_match_exact("Астана Трейд ТОО", "ТОО «Астана Трейд»")
+
+
+def test_position_normalization_never_collapses_distinct_legal_forms_or_qualifiers() -> None:
+    assert not names_match_exact("LLP Astana Trade Holding", "JSC Astana Trade Holding")
+    assert not names_match_exact("Astana Trade Holding LLP", "Astana Trade Holding Branch LLP")
+
+
 def test_legal_form_classes_remain_distinct_under_punctuation() -> None:
     assert not names_match_exact("Alpha Energy JSC", "Alpha Energy LLP")
     assert not names_match_exact("Alpha Energy J.S.C.", "Alpha Energy L.L.P.")
