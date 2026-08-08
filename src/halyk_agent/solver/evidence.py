@@ -284,9 +284,7 @@ def _scope_context_to_plan(
     return context.model_copy(
         update={
             "calculation_inputs": tuple(
-                item
-                for item in context.calculation_inputs
-                if item.scenario_id == plan.scenario_id
+                item for item in context.calculation_inputs if item.scenario_id == plan.scenario_id
             ),
             "selector_coverage": tuple(
                 entry
