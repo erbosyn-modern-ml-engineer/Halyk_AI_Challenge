@@ -28,20 +28,42 @@ Compatibility fail-closed checks:
 - accepted-facts scenarios ⊆ covenant scenarios
 - facts `authority_manifest_hash` == covenants `authority_manifest_hash`
 
-## Category model (5F.1)
+## Category model (5F.2)
 
 Each calculation input has:
 
 1. **primary / effective category** — display and authoritative single label
 2. **selector memberships** — zero or more additional categories for Stage 6 selectors
+3. **amount contract** — `source_amount` (ledger/fact signed) + `metric_amount` (Stage 6 aggregate)
 
 Example: `INSURANCE_PREMIUMS` memberships → `(INSURANCE_PREMIUMS, OPEX)`.
 
-OPEX hierarchy members (also match OPEX selectors): LABOR, UTILITIES, INSURANCE_PREMIUMS, RENT, TAXES.
+OPEX hierarchy members (also match OPEX selectors): LABOR, UTILITIES, INSURANCE_PREMIUMS, RENT, and **operating** TAXES only.
+
+Corporate income / profit tax stays `TAXES` primary with **no** OPEX membership (`INCOME_TAX_EXCLUDED_FROM_OPEX`).
+
+Interest income is `NON_OPERATING_INCOME` (not `FINANCING_INFLOWS`, not `REVENUE`).
+
+Asset transfers use `CAPITAL_ASSET_TRANSFER`; they enter
+`CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS` only with proven `UNRESTRICTED` status.
 
 LEASE stays **outside** OPEX (P1 is additive `OPEX + LEASE`).
 
 One transaction → one `CalculationInput` / one amount. Memberships never duplicate amounts.
+
+## Metric amount contract (`halyk.metric_amount.v1`)
+
+Stage 6 must aggregate `metric_amount`, never raw ledger signs.
+
+| Case | source_amount | metric_amount | sign_rule |
+|------|---------------|---------------|-----------|
+| Normal expense | `-100` | `+100` | `EXPENSE_NEGATE_SOURCE` |
+| Expense credit / refund | `+20` | `-20` | `EXPENSE_NEGATE_SOURCE` |
+| Revenue / financing proceeds | `+100` | `+100` | `INFLOW_AS_IS` |
+| Fact-derived positive magnitude | `+100` | `+100` | `POSITIVE_MAGNITUDE_AS_IS` |
+
+`abs(amount)` is forbidden — credits must reduce expense metrics naturally.
+Sign follows the **effective** category after accepted reclassification.
 
 ## Precedence
 
@@ -66,8 +88,10 @@ Expense credits retain membership in their originating expense family (+ OPEX hi
 
 - Exact `identity_key` match only
 - Legal-form punctuation canonicalized: `LLP` / `LLP.` / `L.L.P.` (form class preserved; JSC ≠ LLP ≠ TOO)
-- Damaged ownership identities → non-matches are **UNKNOWN**, never FALSE
-- No fuzzy base-name matching; no invented aliases
+- Damaged ownership identities: only explicitly corrupted tokens (`?`) may be wildcarded;
+  legal form + undamaged tokens must match exactly → `POSSIBLE_MATCH` / UNKNOWN
+- Unrelated counterparties remain **FALSE** (no whole-scenario UNKNOWN)
+- No edit-distance / fuzzy base-name matching; no invented aliases
 
 ## Subsidiary / group scope
 
@@ -81,6 +105,11 @@ Expense credits retain membership in their originating expense family (+ OPEX hi
 Per selector: `READY` | `TRUE_ZERO` | `UNRESOLVED` (+ reason_code).
 
 Unresolved operands (e.g. missing GROUP_CAPEX source, missing unrestricted status) are **not** converted to zero.
+
+Source-dependent selectors (`ONE_TIME_ADD_BACKS`, `GROUP_CAPEX`, unrestricted transfers) must not assert
+`TRUE_ZERO` from PARTIAL / OCR-corrupted / incomplete source → `UNRESOLVED_SOURCE_QUALITY` (or equivalent).
+
+Trusted empty universes (e.g. P10 RENT after full audit) may remain `TRUE_ZERO`.
 
 Per definition readiness is published for Stage 6 consumption.
 
@@ -105,11 +134,11 @@ Stage 5E extracts thresholds from source wording `X% or more` / `и более` 
 
 ```bash
 uv run halyk-agent transactions prepare \
-  --routing work/smoke5b2/routing \
-  --covenants work/smoke5d/covenants-polarity \
-  --facts work/smoke5e3/facts \
+  --routing work/smoke5f2/routing \
+  --covenants work/smoke5f2/covenants \
+  --facts work/smoke5f2/facts \
   --ledger agentic-bank-public/master_ledger_2025.csv \
-  --output work/smoke5f1/transactions \
+  --output work/smoke5f2/transactions \
   --overwrite
 ```
 
