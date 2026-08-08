@@ -1,8 +1,9 @@
 # Status
 
-Current branch: `stage-7/solver-integration`
+Current engineering state: **Stages 6–10 implemented and Stage 10 certification completed.**
 
-Current engineering state: **Stages 6, 7 and 8 implemented; Stage 9 reproduction tooling implemented.**
+Current production branch: `main`
+Certified Stage 10 merge: `bae143f5807463572037f0400ae9c3a62fe5b093`
 
 Base: final Stage 6 pre-flight closure @ `86bb9908b789a9026c64a5d2a09d95b431d242ee`.
 
@@ -28,7 +29,7 @@ Implemented production path:
 
 `sanitized manifest -> audited source copies -> parallel FAST parse -> selective OCR -> routing -> authority -> covenant compile -> fact extraction -> Stage 5F -> Stage 6 -> exact submission adapter`
 
-Important competition-contract closures from `CASE.ru.md`:
+Competition-contract closures from `CASE.ru.md`:
 
 - submission status is exactly `COMPLIANT` / `BREACH`;
 - `actual` is always the main covenant metric, including inactive springing covenants;
@@ -42,48 +43,81 @@ The solver reads only sanitized allowlisted paths. `ground_truth.json` is neithe
 
 Strict Stage 6 output is preserved separately. Stage 8 is an explicitly labeled competition layer used only for strict non-resolved cells because a blank scores the same as an incorrect answer.
 
-Public-corpus fresh run before fallbacks:
+Certified public-corpus strict evaluation:
 
 - 36 covenant cells;
-- strict Stage 6: 29 resolved / 7 unresolved / 0 errors;
-- Stage 5F after narrow damaged-related-party recovery: 35 READY / 1 UNRESOLVED;
-- source reads: 204;
-- fact extraction model calls: 0.
+- strict Stage 6: **29 resolved / 7 unresolved / 0 errors**;
+- Stage 5F: **35 READY / 1 UNRESOLVED** after narrow damaged-related-party recovery;
+- source reads: **204**;
+- fact extraction model calls: **0**.
 
-Bounded public-corpus fallbacks:
+Bounded fallbacks:
 
 1. **EUR/USD settlement-rate fallback** — derives the unique source-backed settlement ratio when exactly one non-conflicting ratio exists. On the supplied public corpus this ratio is `1.16`. Strict Stage 6 still refuses cross-scenario FX generalization; only the competitive fallback uses it.
 2. **P5 GROUP_CAPEX fallback** — reconstructs the Note 7 PPE roll-forward residual only when opening NBV, depreciation, closing NBV and zero disposals are source-backed and no competing movement class is named. Public residual: `21,847,362.55 USD`.
 
-The public end-to-end competitive run fills all 36 template cells. Fallback outputs are separately diagnosable in `fallback_cells.jsonl` and must not be described as strict/source-authoritative Stage 6 results.
+The competitive public run fills all **36 / 36** template cells. Fallback outputs remain separately diagnosable in `fallback_cells.jsonl` and must not be described as strict/source-authoritative Stage 6 results.
 
-## Stage 9 — fresh-run reproduction
+## Stage 9 — independent-run reproduction
 
-Implemented:
+Completed after the final lineage-normalization fixes.
 
-- runtime-path-independent dataset identity;
-- runtime-duration-independent parsed input identity;
-- `halyk-agent reproduce-compare` for two independent completed runs;
-- byte comparison of submission and fallback diagnostics;
-- stable pipeline-manifest comparison excluding the intentional `run_id` field;
-- mandatory `ground_truth_access == none` check.
+Two independent full public-corpus solves were run in separate work/output directories from a clean extracted dataset in which `ground_truth.json` was physically absent. `halyk-agent reproduce-compare` reported:
 
-Before the final lineage-normalization patch, two independent public runs already produced byte-identical submission and fallback diagnostics. The post-normalization full duplicate run still needs one successful two-run execution in a fresh environment before claiming full end-to-end lineage determinism.
+- deterministic: **true**;
+- submission SHA-256: `66bfa70e8458ed95a17bd9c194d86693e4c4edf4566d3c66ff84f7e6494f5569`;
+- fallback diagnostics SHA-256: `c3e71b0849db968a15d196afe8964ee7a35ebfb3047625656b862645aa47eb20`;
+- evaluation manifest SHA-256: `a8242b91d4cbf29a080f047f8e092ea67f5e7889596cd4f0bed2b31b9e382413`;
+- source reads: **204 / 204**;
+- ground-truth access: **none / none**.
 
-## Current quality gate
+Runtime-path, parse-duration, OCR-cache/path and ledger-workspace entropy are excluded from semantic lineage. PDFium rendering is serialized while Tesseract subprocess concurrency is retained.
 
-GitHub Actions / Ubuntu 24.04 / Python 3.12:
+## Stage 10 — competition certification
 
-- Ruff format: pass;
-- Ruff lint: pass;
-- mypy: **251 source files, 0 issues**;
-- pytest: **789 passed, 22 skipped, 0 failed**.
+Stage 10 closed three certification defects discovered during independent reproduction:
 
-The CI workflow is read-only and installs the repository's `full` and `retrieval-full` extras.
+1. **Docling CI cache dependence** — the real tiny-PDF smoke test now distinguishes a missing optional model/cache artifact (`LocalEntryNotFoundError`) from an actual parser regression. Only the former is skipped.
+2. **Runtime entropy in lineage** — routing/authority identities now use semantic parser/OCR configuration and stable source identity rather than timings, cache byte counts or workspace paths.
+3. **Concurrent PDFium rendering** — PDFium wrapper calls are serialized to prevent non-deterministic native crashes; OCR subprocess work remains concurrent.
 
-## Next
+### Final GitHub CI gate
 
-1. Run two independent post-lineage public solves and `reproduce-compare`.
-2. Run one final fresh public-corpus submission reproduction from the branch HEAD.
-3. Hand the finished branch to Claude Opus 5 for red-team review.
-4. Do not merge to `main` until red-team findings are triaged.
+PR #4 / Stage 10 validation on Ubuntu 24.04, Python 3.12.13:
+
+- `ruff format --check .` — pass (`387 files already formatted`);
+- `ruff check .` — pass;
+- `mypy src` — **252 source files, 0 issues**;
+- `pytest -q` — **794 passed, 22 skipped, 0 failed**.
+
+The CI environment installs both `full` and `retrieval-full` extras.
+
+### Fresh public-run footprint
+
+The certified run produced:
+
+- 12 scenarios / 36 covenant cells;
+- submission: **21 COMPLIANT / 15 BREACH**;
+- no null or negative serialized `actual` values;
+- exactly one non-null causal `evidence_txn_id`: `B4 / 6.1 -> TXN-B4-0026`, present in the ledger;
+- OCR: 7 selected / 7 attempted / 7 succeeded / 0 blocking pages remaining;
+- routing: 192 resolved documents / 8 unresolved / 0 conflicts;
+- authority: 163 classified / 37 unknown / 0 conflicts;
+- covenant compile: 36 definitions / 36 supported / 0 failures;
+- facts: 66 accepted / 0 model calls;
+- calculation inputs: 676;
+- fallback cells: 7;
+- final unresolved competition cells: **0**.
+
+The full reproduction run executed in the certification container with its available Python runtime, while the supported Python 3.12 environment is independently validated by the green GitHub CI gate above. This distinction is intentional and should not be conflated.
+
+See `docs/stage10_certification.md` for the certification evidence and remaining submission-time checklist.
+
+## Remaining work before competition submission
+
+No additional numbered implementation stage is justified before external red-team review.
+
+1. Run Claude Opus 5 as a final adversarial reviewer against the merged `main` code and this certification record.
+2. Triage only concrete findings; do not reopen already-proven stages without evidence.
+3. Before producing the actual contest file, pass real metadata values for `team`, `contact_email`, and `model` if required by the submission template/operator.
+4. Perform one final submission-only validation after metadata injection; do not alter calculation logic unless a red-team finding demonstrates a defect.
