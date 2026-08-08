@@ -201,11 +201,26 @@ def _role_for_window(window: str) -> ThresholdRole:
     return ThresholdRole.ACTIVATION
 
 
+# Prose delimiters that may immediately follow a complete monetary token.
+# Letters/digits glued to the token are never allowed (OCR corruption / junk).
+_MONEY_TRAILING_OK = frozenset(" \t\r\n.,;:!?)]}'\"“”‘’—–-/")
+
+
+def _has_invalid_money_continuation(rest_after_body: str) -> bool:
+    """True when a monetary body is glued to non-prose junk (letter/OCR corruption)."""
+    if not rest_after_body:
+        return False
+    ch = rest_after_body[0]
+    return not (ch.isspace() or ch in _MONEY_TRAILING_OK)
+
+
 def _iter_money_tokens(text: str) -> list[tuple[str, str, str, bool]]:
     """
     Yield (prefix, num_body, matched_text, is_valid) for each currency-prefixed amount attempt.
 
-    Invalid bodies (e.g. $1,00,0.0.0) are reported as malformed rather than truncated.
+    A candidate is valid only when the *entire* monetary token is syntactically valid.
+    A valid numeric prefix followed by letter/junk continuation (OCR letter-as-digit
+    corruption, or glued alphabetic junk) is malformed — never silently truncated.
     """
     out: list[tuple[str, str, str, bool]] = []
     for prefix_m in _MONEY_PREFIX_RE.finditer(text):
@@ -214,7 +229,8 @@ def _iter_money_tokens(text: str) -> list[tuple[str, str, str, bool]]:
         if body_m is None:
             out.append((prefix_m.group("prefix"), "", prefix_m.group(0).rstrip(), False))
             continue
-        body = body_m.group(0)
+        raw_body = body_m.group(0)
+        body = raw_body
         # Trim trailing separators that are clause punctuation, not part of the number.
         while body and body[-1] in {",", "."}:
             candidate = body[:-1]
@@ -222,27 +238,62 @@ def _iter_money_tokens(text: str) -> list[tuple[str, str, str, bool]]:
                 body = candidate
                 break
             body = candidate
-        matched = text[prefix_m.start() : prefix_m.end() + len(body_m.group(0))]
+        after = rest[len(raw_body) :]
+        cont_invalid = _has_invalid_money_continuation(after)
+        format_ok = bool(body) and bool(_VALID_MONEY_NUM_RE.fullmatch(body))
+        valid = format_ok and not cont_invalid
+
+        matched_end = prefix_m.end() + len(raw_body)
+        if cont_invalid:
+            # Include glued alphanumeric/separator junk in matched_text for diagnostics.
+            junk = 0
+            while junk < len(after) and (after[junk].isalnum() or after[junk] in ",."):
+                junk += 1
+            matched_end = prefix_m.end() + len(raw_body) + junk
+            matched = text[prefix_m.start() : matched_end]
+            out.append((prefix_m.group("prefix"), raw_body, matched, False))
+            continue
+
+        matched = text[prefix_m.start() : matched_end]
         # Prefer trimmed body length for matched_text when trailing punctuation was clipped.
-        if body != body_m.group(0):
+        if body != raw_body:
             matched = text[prefix_m.start() : prefix_m.end() + len(body)]
-        valid = bool(_VALID_MONEY_NUM_RE.fullmatch(body))
         out.append((prefix_m.group("prefix"), body, matched, valid))
     return out
 
 
-def iter_unique_money_quantities(text: str) -> tuple[TypedQuantity, ...]:
-    """Parse unique valid MONEY quantities from currency-prefixed tokens in ``text``."""
-    seen: set[tuple[str, str]] = set()
+@dataclass(frozen=True, slots=True)
+class MoneyScanResult:
+    """Valid unique MONEY quantities plus whether any malformed money token was seen."""
+
+    quantities: tuple[TypedQuantity, ...]
+    has_malformed: bool
+
+
+def scan_money_quantities(text: str) -> MoneyScanResult:
+    """
+    Scan currency-prefixed money tokens in ``text``.
+
+    Malformed monetary-looking tokens are reported via ``has_malformed`` and never
+    contribute a truncated TypedQuantity. Distinctness uses Decimal equality so
+    equivalent integer / trailing-zero forms collapse to one typed candidate.
+    """
+    seen: set[tuple[str, object]] = set()
     out: list[TypedQuantity] = []
+    has_malformed = False
     for prefix, body, _matched, is_valid in _iter_money_tokens(text):
-        if not is_valid or not body:
+        if not is_valid:
+            has_malformed = True
+            continue
+        if not body:
+            has_malformed = True
             continue
         currency = _currency_from_prefix(prefix)
         if currency is None:
+            has_malformed = True
             continue
         value = coerce_decimal_amount(body.replace(",", ""))
-        key = (str(value), currency)
+        key = (currency, value)
         if key in seen:
             continue
         seen.add(key)
@@ -253,7 +304,12 @@ def iter_unique_money_quantities(text: str) -> tuple[TypedQuantity, ...]:
                 currency=currency,
             )
         )
-    return tuple(out)
+    return MoneyScanResult(quantities=tuple(out), has_malformed=has_malformed)
+
+
+def iter_unique_money_quantities(text: str) -> tuple[TypedQuantity, ...]:
+    """Parse unique valid MONEY quantities from currency-prefixed tokens in ``text``."""
+    return scan_money_quantities(text).quantities
 
 
 def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, ...]:
@@ -304,6 +360,32 @@ def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, 
             )
         )
     return tuple(out)
+
+
+def extend_span_through_money_tokens(text: str, start: int, end: int) -> int:
+    """
+    Extend ``end`` so no currency-prefixed money token that begins in
+    ``[start, end)`` is truncated mid-token (including glued OCR junk).
+    """
+    if start < 0:
+        start = 0
+    if end < start:
+        end = start
+    extended = end
+    for prefix_m in _MONEY_PREFIX_RE.finditer(text, start, end):
+        rest = text[prefix_m.end() :]
+        body_m = _MONEY_BODY_RE.match(rest)
+        if body_m is None:
+            continue
+        token_end = prefix_m.end() + len(body_m.group(0))
+        after = rest[len(body_m.group(0)) :]
+        junk = 0
+        while junk < len(after) and (after[junk].isalnum() or after[junk] in ",."):
+            junk += 1
+        token_end += junk
+        if token_end > extended:
+            extended = token_end
+    return extended
 
 
 def has_malformed_threshold_token(clause_text: str) -> bool:

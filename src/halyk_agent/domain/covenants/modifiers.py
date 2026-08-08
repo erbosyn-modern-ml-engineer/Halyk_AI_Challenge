@@ -11,7 +11,10 @@ from enum import StrEnum
 from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.locate import build_ws_map
 from halyk_agent.domain.covenants.models import CovenantModifier, CovenantModifierKind
-from halyk_agent.domain.covenants.parse import iter_unique_money_quantities
+from halyk_agent.domain.covenants.parse import (
+    extend_span_through_money_tokens,
+    scan_money_quantities,
+)
 from halyk_agent.domain.covenants.quantity import TypedQuantity
 
 
@@ -118,15 +121,35 @@ def _search(norm: str, pattern: str) -> re.Match[str] | None:
     return re.search(pattern, norm, flags=re.IGNORECASE | re.DOTALL)
 
 
+def _is_decimal_dot(norm: str, index: int) -> bool:
+    """True when ``norm[index]`` is a decimal point inside a numeric money/ratio token."""
+    if index < 0 or index >= len(norm) or norm[index] != ".":
+        return False
+    return (
+        index > 0
+        and index + 1 < len(norm)
+        and norm[index - 1].isdigit()
+        and norm[index + 1].isdigit()
+    )
+
+
+def _is_sentence_break(norm: str, index: int) -> bool:
+    if index < 0 or index >= len(norm):
+        return False
+    ch = norm[index]
+    if ch in {"!", "?", ";", "\n"}:
+        return True
+    return ch == "." and not _is_decimal_dot(norm, index)
+
+
 def _sentence_window(norm: str, pos: int) -> tuple[int, int]:
     """Return [start, end) of the sentence containing ``pos``, else a radius window."""
-    break_chars = {".", "!", "?", ";", "\n"}
     start = pos
-    while start > 0 and norm[start - 1] not in break_chars:
+    while start > 0 and not _is_sentence_break(norm, start - 1):
         start -= 1
     end = pos
     n = len(norm)
-    while end < n and norm[end] not in break_chars:
+    while end < n and not _is_sentence_break(norm, end):
         end += 1
     if end < n:
         end += 1
@@ -272,28 +295,24 @@ def _financial_context(window: str) -> bool:
     )
 
 
-def _money_in_window(window: str) -> list[TypedQuantity]:
-    """Return unique valid MONEY quantities found in ``window`` (order preserved)."""
-    return list(iter_unique_money_quantities(window))
-
-
 _MATERIALITY_CUE_RE = re.compile(
     r"порог\w*\s+существенност\w*|materialit(?:y|ies)\b",
     re.IGNORECASE,
 )
+# Locate add-back / one-time floor *instructions* (not a single captured money token).
+# Money candidates are collected from the bounded instruction region afterwards.
 _ADD_BACK_FLOOR_RE = re.compile(
     r"(?:"
-    r"разов\w*.{0,120}?не\s+менее\s+(?P<m1>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
-    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
+    r"разов\w*.{0,160}?не\s+менее\s+"
+    r"(?:\$|USD\s*|€|EUR\s*|₸|KZT\s*)"
     r"|"
-    r"не\s+менее\s+(?P<m2>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
-    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
-    r".{0,80}?(?:к\s+EBITDA\s+не\s+прибавля|не\s+прибавля\w*\s+к\s+EBITDA|"
+    r"не\s+менее\s+"
+    r"(?:\$|USD\s*|€|EUR\s*|₸|KZT\s*)"
+    r".{0,100}?(?:к\s+EBITDA\s+не\s+прибавля|не\s+прибавля\w*\s+к\s+EBITDA|"
     r"add[- ]?backs?\s+below|below\s+materiality)"
     r"|"
-    r"(?:one[- ]?time|add[- ]?back)\w*.{0,100}?not\s+less\s+than\s+"
-    r"(?P<m3>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
-    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
+    r"(?:one[- ]?time|add[- ]?back)\w*.{0,120}?not\s+less\s+than\s+"
+    r"(?:\$|USD\s*|€|EUR\s*|₸|KZT\s*)"
     r")",
     re.IGNORECASE | re.DOTALL,
 )
@@ -303,6 +322,60 @@ _ADD_BACK_CATEGORY_CUE_RE = re.compile(
 )
 
 
+def _instruction_region(
+    norm: str,
+    match: re.Match[str],
+    *,
+    anchor_at_match_start: bool,
+) -> tuple[int, int, str]:
+    """
+    Bounded instruction region for materiality money collection.
+
+    Forward sentence bound keeps neighboring prose out. For add-back instructions,
+    ``anchor_at_match_start=True`` prevents walking backward through OCR tables /
+    line-item amounts that share one whitespace-normalized paragraph.
+    """
+    _sent0, sent1 = _sentence_window(norm, match.start())
+    start = match.start() if anchor_at_match_start else min(_sent0, match.start())
+    end = max(sent1, match.end())
+    end = extend_span_through_money_tokens(norm, start, end)
+    return start, end, norm[start:end]
+
+
+def _materiality_from_region(
+    raw: str,
+    idx_map: list[int],
+    *,
+    region_start: int,
+    region_end: int,
+    window: str,
+    applies_to_category: MetricCategory | None,
+) -> ModifierMatch | None:
+    """
+    Publish MATERIALITY_FLOOR only for exactly one distinct typed money floor.
+
+    0 valid / malformed present / >1 distinct typed values → fail closed (no emit).
+    Identical typed repeats dedupe to one candidate.
+    """
+    scan = scan_money_quantities(window)
+    if scan.has_malformed:
+        return None
+    if len(scan.quantities) != 1:
+        return None
+    if region_end > region_start:
+        quote = raw[idx_map[region_start] : idx_map[region_end - 1] + 1]
+    else:
+        return None
+    return ModifierMatch(
+        kind=CovenantModifierKind.MATERIALITY_FLOOR,
+        detail="materiality floor for add-backs / adjustments",
+        reason_code="MATERIALITY_FLOOR",
+        quotes=(quote,),
+        threshold=scan.quantities[0],
+        applies_to_category=applies_to_category,
+    )
+
+
 def _materiality_match(
     raw: str,
     idx_map: list[int],
@@ -310,48 +383,36 @@ def _materiality_match(
 ) -> ModifierMatch | None:
     """
     Emit MATERIALITY_FLOOR only when an unambiguous typed monetary threshold
-    is present in the same clause text that generates the modifier.
+    is present in the same clause/instruction region that generated the modifier.
 
-    Bare materiality language without a parseable floor fails closed (no emit).
+    Bare materiality language, malformed money, or competing distinct floors fail closed.
     """
     # Prefer explicit add-back floor wording (auditor notes / adjustment tables).
     floor = _ADD_BACK_FLOOR_RE.search(norm)
     if floor is not None:
-        money_raw = floor.group("m1") or floor.group("m2") or floor.group("m3")
-        quantities = _money_in_window(money_raw or "")
-        if len(quantities) == 1:
-            quote = _quote_from_match(raw, idx_map, floor)
-            return ModifierMatch(
-                kind=CovenantModifierKind.MATERIALITY_FLOOR,
-                detail="materiality floor for add-backs / adjustments",
-                reason_code="MATERIALITY_FLOOR",
-                quotes=(quote,),
-                threshold=quantities[0],
-                applies_to_category=MetricCategory.ONE_TIME_ADD_BACKS,
-            )
-        return None
+        w0, w1, window = _instruction_region(norm, floor, anchor_at_match_start=True)
+        return _materiality_from_region(
+            raw,
+            idx_map,
+            region_start=w0,
+            region_end=w1,
+            window=window,
+            applies_to_category=MetricCategory.ONE_TIME_ADD_BACKS,
+        )
 
     cue = _MATERIALITY_CUE_RE.search(norm)
     if cue is None:
         return None
-    w0, w1, window = _local_window(norm, cue)
-    quantities = _money_in_window(window)
-    if len(quantities) != 1:
-        # Fail closed: cue without unambiguous typed threshold must not emit.
-        return None
-    # Quote both the cue and the money token window slice for evidence coupling.
-    quote = (
-        raw[idx_map[w0] : idx_map[w1 - 1] + 1] if w1 > w0 else _quote_from_match(raw, idx_map, cue)
-    )
+    w0, w1, window = _instruction_region(norm, cue, anchor_at_match_start=False)
     category = (
         MetricCategory.ONE_TIME_ADD_BACKS if _ADD_BACK_CATEGORY_CUE_RE.search(window) else None
     )
-    return ModifierMatch(
-        kind=CovenantModifierKind.MATERIALITY_FLOOR,
-        detail="materiality floor for add-backs / adjustments",
-        reason_code="MATERIALITY_FLOOR",
-        quotes=(quote,),
-        threshold=quantities[0],
+    return _materiality_from_region(
+        raw,
+        idx_map,
+        region_start=w0,
+        region_end=w1,
+        window=window,
         applies_to_category=category,
     )
 
