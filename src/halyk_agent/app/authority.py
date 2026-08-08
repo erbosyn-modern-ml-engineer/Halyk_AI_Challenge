@@ -18,9 +18,9 @@ from halyk_agent.adapters.authority.io import (
     write_authority_outputs,
 )
 from halyk_agent.app.ocr import load_parsed_documents
+from halyk_agent.app.parsed_identity import semantic_parsed_input_identity
 from halyk_agent.domain.authority.engine import run_authority
 from halyk_agent.domain.authority.models import AuthorityReport, AuthorityStatus
-from halyk_agent.domain.ids import sha256_text
 
 
 class AuthorityServiceError(Exception):
@@ -68,24 +68,9 @@ def _replace_published_outputs(stage_dir: Path, output_dir: Path) -> None:
 
 
 def _parsed_input_identity(parsed_dir: Path, document_count: int) -> dict[str, Any]:
-    report_path = parsed_dir / "parse_report.json"
-    evidence_path = parsed_dir / "evidence_catalog.jsonl"
-    ocr_report = parsed_dir / "ocr_report.json"
-    identity: dict[str, Any] = {
-        "parse_report_sha256": (
-            sha256_text(report_path.read_text(encoding="utf-8")) if report_path.is_file() else ""
-        ),
-        "evidence_catalogue_sha256": (
-            sha256_text(evidence_path.read_text(encoding="utf-8"))
-            if evidence_path.is_file()
-            else ""
-        ),
-        "document_count": document_count,
-        "ocr_enriched": ocr_report.is_file(),
-    }
-    if ocr_report.is_file():
-        identity["ocr_report_sha256"] = sha256_text(ocr_report.read_text(encoding="utf-8"))
-    return identity
+    """Compatibility wrapper for path/timing-independent parsed lineage."""
+
+    return semantic_parsed_input_identity(parsed_dir, document_count=document_count)
 
 
 def authority_from_paths(

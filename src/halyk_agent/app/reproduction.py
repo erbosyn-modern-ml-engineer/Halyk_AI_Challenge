@@ -89,13 +89,16 @@ def verify_reproduction_pair(
         raise ReproductionError("fallback diagnostics differ across independent runs")
     stable_a = _stable_pipeline_payload(pipeline_a)
     stable_b = _stable_pipeline_payload(pipeline_b)
-    if stable_a != stable_b:
-        raise ReproductionError("stable pipeline manifest fields differ across independent runs")
 
+    # Security invariants take precedence over generic determinism mismatches so
+    # a run that reports answer-key access is rejected with an explicit cause.
     gt_a = str(stable_a.get("ground_truth_access"))
     gt_b = str(stable_b.get("ground_truth_access"))
     if gt_a != "none" or gt_b != "none":
         raise ReproductionError("ground-truth access was not zero in a reproduction run")
+
+    if stable_a != stable_b:
+        raise ReproductionError("stable pipeline manifest fields differ across independent runs")
 
     report = ReproductionReport(
         deterministic=True,

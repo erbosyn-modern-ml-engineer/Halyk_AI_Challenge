@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -30,6 +31,10 @@ from halyk_agent.domain.ocr import (
     ocr_configuration_hash,
     validate_ocr_page_text,
 )
+
+# PDFium is explicitly not thread-safe.  Serialize all wrapper calls while
+# retaining concurrency for the external Tesseract subprocesses.
+_PDFIUM_RENDER_LOCK = threading.Lock()
 
 
 class TesseractCliOcrBackend:
@@ -126,11 +131,12 @@ class TesseractCliOcrBackend:
         cleanup_ok = True
         tmp_path: Path | None = None
         try:
-            png_bytes = _render_page_png(
-                Path(request.source_path),
-                request.page_number,
-                scale=self.render_scale,
-            )
+            with _PDFIUM_RENDER_LOCK:
+                png_bytes = _render_page_png(
+                    Path(request.source_path),
+                    request.page_number,
+                    scale=self.render_scale,
+                )
             tmp_bytes = len(png_bytes)
             fd, name = tempfile.mkstemp(prefix="halyk-ocr-", suffix=".png")
             os.close(fd)

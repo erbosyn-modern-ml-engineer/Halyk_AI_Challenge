@@ -19,6 +19,7 @@ from halyk_agent.adapters.routing.io import (
     write_routing_outputs,
 )
 from halyk_agent.app.ocr import load_parsed_documents
+from halyk_agent.app.parsed_identity import semantic_parsed_input_identity
 from halyk_agent.dataset_access import (
     FileOpener,
     LeakageAttemptError,
@@ -109,40 +110,9 @@ def route_entities(
 
 
 def _parsed_input_identity(parsed_dir: Path, documents: list[CanonicalDocument]) -> dict[str, Any]:
-    """Deterministic parser identity without timing/cache-path entropy.
+    """Compatibility wrapper for the shared semantic parser identity."""
 
-    Canonical document identities are already hashed separately by the routing
-    engine. This field records only stable execution-mode facts; raw parse/OCR
-    report hashes are intentionally excluded because they contain durations and
-    host-specific probe paths that do not affect semantic document content.
-    """
-
-    ocr_report = parsed_dir / "ocr_report.json"
-    identity: dict[str, Any] = {
-        "document_count": len(documents),
-        "ocr_enriched": ocr_report.is_file(),
-    }
-    if ocr_report.is_file():
-        try:
-            payload = json.loads(ocr_report.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            payload = {}
-        backend = payload.get("backend") if isinstance(payload, dict) else None
-        if isinstance(backend, dict):
-            identity["ocr_backend"] = {
-                key: backend[key]
-                for key in (
-                    "kind",
-                    "backend_version",
-                    "language_data_identity",
-                    "languages",
-                    "render_scale",
-                    "page_segmentation_mode",
-                    "configuration_hash",
-                )
-                if key in backend
-            }
-    return identity
+    return semantic_parsed_input_identity(parsed_dir, document_count=len(documents))
 
 
 def _publish_staged(stage_dir: Path, output_dir: Path) -> None:
@@ -244,7 +214,7 @@ def route_from_paths(
         template_answers = load_template_answers_bytes(template_bytes)
         ledger_rows = load_ledger_csv_bytes(
             ledger_bytes,
-            source_file=ledger_path.as_posix(),
+            source_file=ledger_path.name,
         )
         ledger_source_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
         _, documents = load_parsed_documents(parsed_dir)
