@@ -231,6 +231,31 @@ def _iter_money_tokens(text: str) -> list[tuple[str, str, str, bool]]:
     return out
 
 
+def iter_unique_money_quantities(text: str) -> tuple[TypedQuantity, ...]:
+    """Parse unique valid MONEY quantities from currency-prefixed tokens in ``text``."""
+    seen: set[tuple[str, str]] = set()
+    out: list[TypedQuantity] = []
+    for prefix, body, _matched, is_valid in _iter_money_tokens(text):
+        if not is_valid or not body:
+            continue
+        currency = _currency_from_prefix(prefix)
+        if currency is None:
+            continue
+        value = coerce_decimal_amount(body.replace(",", ""))
+        key = (str(value), currency)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            TypedQuantity(
+                quantity_type=QuantityType.MONEY,
+                value=value,
+                currency=currency,
+            )
+        )
+    return tuple(out)
+
+
 def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, ...]:
     text = _norm(clause_text)
     if has_malformed_threshold_token(text):

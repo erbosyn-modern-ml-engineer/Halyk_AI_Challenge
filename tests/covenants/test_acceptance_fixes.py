@@ -221,13 +221,17 @@ def test_currency_from_source(text: str, currency: str) -> None:
 
 def test_modifiers_not_silently_dropped() -> None:
     text = (
-        "Пункт 6.1 Adjusted. С учётом порога существенности аудитора, включая суммы, "
-        "переквалифицированные в не операционные, отношение скорректированной EBITDA "
+        "Пункт 6.1 Adjusted. С учётом порога существенности аудитора $250,000.00, включая "
+        "суммы, переквалифицированные в не операционные, отношение скорректированной EBITDA "
         "к выручке за период с 2025-01-01 по 2025-12-31 должно составлять не менее 0.18x."
     )
     mods = extract_modifiers(text)
     kinds = {m.kind for m in mods}
     assert CovenantModifierKind.MATERIALITY_FLOOR in kinds
+    floor = next(m for m in mods if m.kind is CovenantModifierKind.MATERIALITY_FLOOR)
+    assert floor.threshold is not None
+    assert floor.threshold.value == Decimal("250000.00")
+    assert floor.threshold.currency == "USD"
     doc = make_document(raw_text=text, sha="i" * 64)
     definition, failure, _ = compile_covenant_cell(scenario_id="SX", clause_id="6.1", document=doc)
     assert failure is None, failure

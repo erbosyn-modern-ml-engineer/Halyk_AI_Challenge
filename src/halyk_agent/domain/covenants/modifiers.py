@@ -8,8 +8,11 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
+from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.locate import build_ws_map
 from halyk_agent.domain.covenants.models import CovenantModifier, CovenantModifierKind
+from halyk_agent.domain.covenants.parse import iter_unique_money_quantities
+from halyk_agent.domain.covenants.quantity import TypedQuantity
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +23,8 @@ class ModifierMatch:
     detail: str
     reason_code: str
     quotes: tuple[str, ...]
+    threshold: TypedQuantity | None = None
+    applies_to_category: MetricCategory | None = None
 
 
 class ReclassificationPolarity(StrEnum):
@@ -267,6 +272,90 @@ def _financial_context(window: str) -> bool:
     )
 
 
+def _money_in_window(window: str) -> list[TypedQuantity]:
+    """Return unique valid MONEY quantities found in ``window`` (order preserved)."""
+    return list(iter_unique_money_quantities(window))
+
+
+_MATERIALITY_CUE_RE = re.compile(
+    r"порог\w*\s+существенност\w*|materialit(?:y|ies)\b",
+    re.IGNORECASE,
+)
+_ADD_BACK_FLOOR_RE = re.compile(
+    r"(?:"
+    r"разов\w*.{0,120}?не\s+менее\s+(?P<m1>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
+    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
+    r"|"
+    r"не\s+менее\s+(?P<m2>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
+    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
+    r".{0,80}?(?:к\s+EBITDA\s+не\s+прибавля|не\s+прибавля\w*\s+к\s+EBITDA|"
+    r"add[- ]?backs?\s+below|below\s+materiality)"
+    r"|"
+    r"(?:one[- ]?time|add[- ]?back)\w*.{0,100}?not\s+less\s+than\s+"
+    r"(?P<m3>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
+    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_ADD_BACK_CATEGORY_CUE_RE = re.compile(
+    r"разов\w*|one[- ]?time|add[- ]?back|EBITDA\s+не\s+прибавля|прибавля\w*\s+к\s+EBITDA",
+    re.IGNORECASE,
+)
+
+
+def _materiality_match(
+    raw: str,
+    idx_map: list[int],
+    norm: str,
+) -> ModifierMatch | None:
+    """
+    Emit MATERIALITY_FLOOR only when an unambiguous typed monetary threshold
+    is present in the same clause text that generates the modifier.
+
+    Bare materiality language without a parseable floor fails closed (no emit).
+    """
+    # Prefer explicit add-back floor wording (auditor notes / adjustment tables).
+    floor = _ADD_BACK_FLOOR_RE.search(norm)
+    if floor is not None:
+        money_raw = floor.group("m1") or floor.group("m2") or floor.group("m3")
+        quantities = _money_in_window(money_raw or "")
+        if len(quantities) == 1:
+            quote = _quote_from_match(raw, idx_map, floor)
+            return ModifierMatch(
+                kind=CovenantModifierKind.MATERIALITY_FLOOR,
+                detail="materiality floor for add-backs / adjustments",
+                reason_code="MATERIALITY_FLOOR",
+                quotes=(quote,),
+                threshold=quantities[0],
+                applies_to_category=MetricCategory.ONE_TIME_ADD_BACKS,
+            )
+        return None
+
+    cue = _MATERIALITY_CUE_RE.search(norm)
+    if cue is None:
+        return None
+    w0, w1, window = _local_window(norm, cue)
+    quantities = _money_in_window(window)
+    if len(quantities) != 1:
+        # Fail closed: cue without unambiguous typed threshold must not emit.
+        return None
+    # Quote both the cue and the money token window slice for evidence coupling.
+    quote = (
+        raw[idx_map[w0] : idx_map[w1 - 1] + 1] if w1 > w0 else _quote_from_match(raw, idx_map, cue)
+    )
+    category = (
+        MetricCategory.ONE_TIME_ADD_BACKS if _ADD_BACK_CATEGORY_CUE_RE.search(window) else None
+    )
+    return ModifierMatch(
+        kind=CovenantModifierKind.MATERIALITY_FLOOR,
+        detail="materiality floor for add-backs / adjustments",
+        reason_code="MATERIALITY_FLOOR",
+        quotes=(quote,),
+        threshold=quantities[0],
+        applies_to_category=category,
+    )
+
+
 def _collect_matches(clause_text: str) -> list[ModifierMatch]:
     raw, idx_map, norm = _norm_map(clause_text)
     found: list[ModifierMatch] = []
@@ -276,6 +365,8 @@ def _collect_matches(clause_text: str) -> list[ModifierMatch]:
         detail: str,
         reason_code: str,
         *matches: re.Match[str],
+        threshold: TypedQuantity | None = None,
+        applies_to_category: MetricCategory | None = None,
     ) -> None:
         quotes = tuple(_quote_from_match(raw, idx_map, m) for m in matches if m is not None)
         if not quotes:
@@ -286,18 +377,14 @@ def _collect_matches(clause_text: str) -> list[ModifierMatch]:
                 detail=detail,
                 reason_code=reason_code,
                 quotes=quotes,
+                threshold=threshold,
+                applies_to_category=applies_to_category,
             )
         )
 
-    # Materiality floor.
-    m = _search(norm, r"порог\w*\s+существенност\w*|materialit(?:y|ies)\b")
-    if m:
-        add(
-            CovenantModifierKind.MATERIALITY_FLOOR,
-            "materiality floor for add-backs / adjustments",
-            "MATERIALITY_FLOOR",
-            m,
-        )
+    materiality = _materiality_match(raw, idx_map, norm)
+    if materiality is not None:
+        found.append(materiality)
 
     # Numerator + denominator reclass treatment.
     m = _search(
@@ -544,6 +631,12 @@ def extract_modifier_matches(clause_text: str) -> tuple[ModifierMatch, ...]:
 def extract_modifiers(clause_text: str) -> tuple[CovenantModifier, ...]:
     """Back-compat wrapper without evidence ids (compiler attaches spans)."""
     return tuple(
-        CovenantModifier(kind=item.kind, detail=item.detail, evidence_span_ids=())
+        CovenantModifier(
+            kind=item.kind,
+            detail=item.detail,
+            evidence_span_ids=(),
+            threshold=item.threshold,
+            applies_to_category=item.applies_to_category,
+        )
         for item in extract_modifier_matches(clause_text)
     )

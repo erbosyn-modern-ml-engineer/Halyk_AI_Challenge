@@ -9,7 +9,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from halyk_agent.domain.common import NonEmptyStr
-from halyk_agent.domain.covenants.ast import EXPR_ADAPTER, Expr, TransactionSelector
+from halyk_agent.domain.covenants.ast import (
+    EXPR_ADAPTER,
+    Expr,
+    MetricCategory,
+    TransactionSelector,
+)
 from halyk_agent.domain.covenants.constants import (
     COVENANT_COMPILER_VERSION,
     COVENANT_RULE_VERSION,
@@ -124,6 +129,17 @@ class CovenantModifier(BaseModel):
     kind: CovenantModifierKind
     detail: NonEmptyStr
     evidence_span_ids: tuple[NonEmptyStr, ...] = ()
+    # Quantitative modifiers (e.g. MATERIALITY_FLOOR) carry a typed threshold.
+    # Non-quantitative modifiers leave threshold / applies_to_category as None.
+    threshold: TypedQuantity | None = None
+    applies_to_category: MetricCategory | None = None
+
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def _threshold_no_float(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "value" in value:
+            reject_float_amount(value["value"])
+        return value
 
 
 class CovenantEvidenceRefs(BaseModel):

@@ -11,6 +11,7 @@ from halyk_agent.domain.authority.models import (
     AuthorityDomain,
     AuthorityStatus,
 )
+from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.compiler import compile_covenant_cell
 from halyk_agent.domain.covenants.constants import (
     COVENANT_ALGORITHM_VERSION,
@@ -18,13 +19,18 @@ from halyk_agent.domain.covenants.constants import (
     COVENANT_RULE_VERSION,
     COVENANT_SCHEMA_VERSION,
 )
+from halyk_agent.domain.covenants.locate import find_quote_in_document, join_document_text
 from halyk_agent.domain.covenants.models import (
     CompileStatus,
     CovenantCompileFailure,
     CovenantDefinition,
     CovenantManifest,
+    CovenantModifier,
+    CovenantModifierKind,
     CovenantReport,
 )
+from halyk_agent.domain.covenants.modifiers import extract_modifier_matches
+from halyk_agent.domain.covenants.render import render_covenant_definition
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.ids import deterministic_id, sha256_text
 from halyk_agent.domain.parsing import CanonicalDocument
@@ -52,6 +58,103 @@ def _covenant_winners(
     return winners
 
 
+def _financial_adjustment_winners(
+    decisions: tuple[AuthorityDecision, ...] | list[AuthorityDecision],
+) -> dict[str, str]:
+    winners: dict[str, str] = {}
+    for decision in decisions:
+        if (
+            decision.domain is AuthorityDomain.FINANCIAL_ADJUSTMENTS
+            and decision.status is AuthorityStatus.AUTHORITATIVE
+            and decision.winning_document_ids
+        ):
+            winners[decision.scenario_id] = decision.winning_document_ids[0]
+    return winners
+
+
+def _typed_materiality_from_document(
+    document: CanonicalDocument,
+) -> tuple[CovenantModifier | None, tuple[EvidenceSpan, ...]]:
+    """
+    Extract a typed MATERIALITY_FLOOR from an authoritative adjustments document.
+
+    The modifier is generated only from clause text that itself carries an
+    unambiguous monetary threshold (fail closed otherwise).
+    """
+    joined, _cursors = join_document_text(document)
+    matches = [
+        m
+        for m in extract_modifier_matches(joined)
+        if m.kind is CovenantModifierKind.MATERIALITY_FLOOR and m.threshold is not None
+    ]
+    if len(matches) != 1:
+        return None, ()
+    match = matches[0]
+    spans: list[EvidenceSpan] = []
+    span_ids: list[str] = []
+    for quote in match.quotes:
+        span = find_quote_in_document(document, needle=quote)
+        if span is not None:
+            spans.append(span)
+            span_ids.append(span.id)
+    if not span_ids:
+        return None, ()
+    modifier = CovenantModifier(
+        kind=match.kind,
+        detail=match.detail,
+        evidence_span_ids=tuple(dict.fromkeys(span_ids)),
+        threshold=match.threshold,
+        applies_to_category=match.applies_to_category,
+    )
+    return modifier, tuple(spans)
+
+
+def _definition_needs_add_back_materiality(definition: CovenantDefinition) -> bool:
+    return any(s.category is MetricCategory.ONE_TIME_ADD_BACKS for s in definition.selectors)
+
+
+def _definition_has_typed_materiality(definition: CovenantDefinition) -> bool:
+    return any(
+        m.kind is CovenantModifierKind.MATERIALITY_FLOOR and m.threshold is not None
+        for m in definition.modifiers
+    )
+
+
+def _attach_financial_materiality(
+    definition: CovenantDefinition,
+    *,
+    fa_document: CanonicalDocument,
+) -> tuple[CovenantDefinition, tuple[EvidenceSpan, ...]]:
+    """Attach FA-sourced typed materiality when the covenant cell needs add-back floors."""
+    if not _definition_needs_add_back_materiality(definition):
+        return definition, ()
+    if _definition_has_typed_materiality(definition):
+        return definition, ()
+    modifier, spans = _typed_materiality_from_document(fa_document)
+    if modifier is None:
+        return definition, ()
+    # Drop any incomplete same-kind residue (should already be absent after fail-closed parse).
+    kept = tuple(
+        m for m in definition.modifiers if m.kind is not CovenantModifierKind.MATERIALITY_FLOOR
+    )
+    evidence = definition.evidence.model_copy(
+        update={
+            "modifier_span_ids": tuple(
+                dict.fromkeys((*definition.evidence.modifier_span_ids, *modifier.evidence_span_ids))
+            )
+        }
+    )
+    updated = definition.model_copy(
+        update={
+            "modifiers": (*kept, modifier),
+            "evidence": evidence,
+            "rendered": "pending",
+        }
+    )
+    updated = updated.model_copy(update={"rendered": render_covenant_definition(updated)})
+    return updated, spans
+
+
 def run_covenant_compile(
     *,
     template_answers: Mapping[str, Any],
@@ -68,6 +171,7 @@ def run_covenant_compile(
     scenarios = discover_scenarios(template_answers)
     docs_by_id = {doc.document_id: doc for doc in documents}
     winners = _covenant_winners(decisions)
+    fa_winners = _financial_adjustment_winners(decisions)
 
     definitions: list[CovenantDefinition] = []
     failures: list[CovenantCompileFailure] = []
@@ -111,6 +215,8 @@ def run_covenant_compile(
                     )
                 )
             continue
+        fa_doc_id = fa_winners.get(scenario.scenario_id)
+        fa_document = docs_by_id.get(fa_doc_id) if fa_doc_id else None
         for clause_id in scenario.required_covenant_ids:
             definition, failure, cell_spans = compile_covenant_cell(
                 scenario_id=scenario.scenario_id,
@@ -118,6 +224,11 @@ def run_covenant_compile(
                 document=document,
             )
             spans.extend(cell_spans)
+            if definition is not None and fa_document is not None:
+                definition, fa_spans = _attach_financial_materiality(
+                    definition, fa_document=fa_document
+                )
+                spans.extend(fa_spans)
             if definition is not None:
                 definitions.append(definition)
             if failure is not None:
