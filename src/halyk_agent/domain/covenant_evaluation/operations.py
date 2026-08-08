@@ -346,7 +346,7 @@ def execute_node(
                 contributing_input_ids=parent.contributing_input_ids,
                 issues=(issue,),
             )
-        currency = next(iter(currencies))
+        sum_currency = next(iter(currencies))
         total = sum(
             (inputs_by_id[input_id].amount for input_id in selected),
             Decimal("0"),
@@ -357,7 +357,7 @@ def execute_node(
             number=EvaluationNumber(
                 quantity_type=QuantityType.MONEY,
                 value=total,
-                currency=currency,
+                currency=sum_currency,
             ),
             contributing_input_ids=parent.contributing_input_ids,
         )

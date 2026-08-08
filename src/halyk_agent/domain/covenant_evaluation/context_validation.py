@@ -156,13 +156,13 @@ class ContextValidator:
                 if node.kind is not EvaluationNodeKind.SELECT:
                     continue
                 key = _selector_key(plan, node.node_id)
-                entry = coverage_map.get(key)
-                if entry is None:
+                coverage_entry = coverage_map.get(key)
+                if coverage_entry is None:
                     raise EvaluationValidationError(
                         f"selector coverage missing for node {node.node_id}",
                         code="SELECTOR_COVERAGE_MISSING",
                     )
-                if entry.scenario_id != plan.scenario_id:
+                if coverage_entry.scenario_id != plan.scenario_id:
                     raise EvaluationValidationError(
                         f"selector coverage owner mismatch for node {node.node_id}",
                         code="SELECTOR_SCENARIO_OWNER_MISMATCH",
