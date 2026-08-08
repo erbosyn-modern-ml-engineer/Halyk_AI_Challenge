@@ -7,9 +7,16 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from tests.covenant_evaluation._helpers import _definition, _selector
 
+from halyk_agent.domain.covenant_evaluation import plan_definition
+from halyk_agent.domain.covenants.ast import MetricCategory, Sum, TransactionSet
 from halyk_agent.domain.transaction_taxonomy.models import AdjustmentEvent, AdjustmentEventType
-from halyk_agent.solver.fallbacks import _derive_p5_group_capex, _settlement_eur_usd_rate
+from halyk_agent.solver.fallbacks import (
+    _derive_group_capex,
+    _settlement_eur_usd_rate,
+    _unique_group_capex_plan,
+)
 
 
 def _fx(event_id: str, source: str, settlement: str) -> AdjustmentEvent:
@@ -42,7 +49,7 @@ def test_settlement_rate_requires_one_unique_source_backed_ratio() -> None:
     assert evidence == ()
 
 
-def _write_p5_bundle(root: Path, note: str) -> tuple[Path, Path]:
+def _write_p5_bundle(root: Path, note: str, *, scenario_id: str = "P5") -> tuple[Path, Path]:
     parsed = root / "parsed"
     routing = root / "routing"
     (parsed / "documents").mkdir(parents=True)
@@ -57,7 +64,7 @@ def _write_p5_bundle(root: Path, note: str) -> tuple[Path, Path]:
         json.dumps(
             {
                 "document_id": "group-doc",
-                "scenario_ids": ["P5"],
+                "scenario_ids": [scenario_id],
                 "group_document": True,
             }
         )
@@ -75,7 +82,9 @@ Depreciation charge for the year $15,826,229.43
 Net book value at the end of the year $154,050,122.81
 """
     parsed, routing = _write_p5_bundle(tmp_path, note)
-    value, diagnostic = _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing)
+    value, diagnostic = _derive_group_capex(
+        parsed_dir=parsed, routing_dir=routing, scenario_id="P5"
+    )
     assert value == Decimal("21847362.55")
     assert diagnostic is not None
     assert diagnostic["strategy"] == "PPE_ROLL_FORWARD_RESIDUAL_BRIDGE"
@@ -90,7 +99,9 @@ Depreciation charge for the year $15,826,229.43
 Net book value at the end of the year $154,050,122.81
 """
     parsed, routing = _write_p5_bundle(tmp_path, note)
-    value, diagnostic = _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing)
+    value, diagnostic = _derive_group_capex(
+        parsed_dir=parsed, routing_dir=routing, scenario_id="P5"
+    )
     assert value is None
     assert diagnostic is None
 
@@ -124,7 +135,10 @@ Net book value at the end of the year $5,600,000
 {movement}
 """
     parsed, routing = _write_p5_bundle(tmp_path, note)
-    assert _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing) == (None, None)
+    assert _derive_group_capex(parsed_dir=parsed, routing_dir=routing, scenario_id="P5") == (
+        None,
+        None,
+    )
 
 
 def test_p5_bridge_scans_complete_note_not_fixed_character_window(tmp_path: Path) -> None:
@@ -139,7 +153,10 @@ Net book value at the end of the year $5,600,000
         + "\nRevaluations were recorded.\nNote 8 — Other\n"
     )
     parsed, routing = _write_p5_bundle(tmp_path, note)
-    assert _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing) == (None, None)
+    assert _derive_group_capex(parsed_dir=parsed, routing_dir=routing, scenario_id="P5") == (
+        None,
+        None,
+    )
 
 
 def test_p5_bridge_accepts_complete_unseparated_money_without_truncation(tmp_path: Path) -> None:
@@ -150,7 +167,9 @@ Depreciation charge for the year $400000
 Net book value at the end of the year $5600000
 """
     parsed, routing = _write_p5_bundle(tmp_path, note)
-    value, diagnostic = _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing)
+    value, diagnostic = _derive_group_capex(
+        parsed_dir=parsed, routing_dir=routing, scenario_id="P5"
+    )
     assert value == Decimal("1000000")
     assert diagnostic is not None
 
@@ -163,4 +182,90 @@ Depreciation charge for the year $400,000
 Net book value at the end of the year $5,600,000
 """
     parsed, routing = _write_p5_bundle(tmp_path, note)
-    assert _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing) == (None, None)
+    assert _derive_group_capex(parsed_dir=parsed, routing_dir=routing, scenario_id="P5") == (
+        None,
+        None,
+    )
+
+
+def test_group_capex_bridge_is_scenario_and_note_number_agnostic(tmp_path: Path) -> None:
+    note = """Note 42 — Property, Plant and Equipment
+There were no disposals of property, plant and equipment during the year.
+Net book value at the beginning of the year $5,000,000
+Depreciation charge for the year $400,000
+Net book value at the end of the year $5,600,000
+"""
+    parsed, routing = _write_p5_bundle(tmp_path, note, scenario_id="PRIVATE-X")
+    value, diagnostic = _derive_group_capex(
+        parsed_dir=parsed,
+        routing_dir=routing,
+        scenario_id="PRIVATE-X",
+    )
+    assert value == Decimal("1000000")
+    assert diagnostic is not None
+    assert diagnostic["scenario_id"] == "PRIVATE-X"
+    assert diagnostic["note_heading"].startswith("Note 42")
+
+
+def test_group_capex_bridge_never_uses_another_scenarios_group_document(tmp_path: Path) -> None:
+    note = """Note 9 — Property, Plant and Equipment
+There were no disposals of property, plant and equipment during the year.
+Net book value at the beginning of the year $5,000,000
+Depreciation charge for the year $400,000
+Net book value at the end of the year $5,600,000
+"""
+    parsed, routing = _write_p5_bundle(tmp_path, note, scenario_id="SCENARIO-A")
+    assert _derive_group_capex(
+        parsed_dir=parsed,
+        routing_dir=routing,
+        scenario_id="SCENARIO-B",
+    ) == (None, None)
+
+
+def _group_plan(definition_id: str, scenario_id: str):
+    selector = _selector(MetricCategory.GROUP_CAPEX).model_copy(update={"group_level": True})
+    definition = _definition(
+        Sum(of=TransactionSet(selector=selector)),
+        definition_id=definition_id,
+        selectors=(selector,),
+    ).model_copy(update={"scenario_id": scenario_id})
+    return plan_definition(definition)
+
+
+def test_group_capex_plan_selection_requires_one_semantic_unresolved_candidate() -> None:
+    first = _group_plan("def-a", "SCENARIO-A")
+    second = _group_plan("def-b", "SCENARIO-B")
+    assert (
+        _unique_group_capex_plan(
+            (first, second),
+            {(first.scenario_id, first.clause_id)},
+        )
+        == first
+    )
+    assert (
+        _unique_group_capex_plan(
+            (first, second),
+            {
+                (first.scenario_id, first.clause_id),
+                (second.scenario_id, second.clause_id),
+            },
+        )
+        is None
+    )
+
+
+def test_group_capex_plan_selection_requires_group_level_selector() -> None:
+    selector = _selector(MetricCategory.GROUP_CAPEX).model_copy(update={"group_level": False})
+    definition = _definition(
+        Sum(of=TransactionSet(selector=selector)),
+        definition_id="borrower-capex",
+        selectors=(selector,),
+    ).model_copy(update={"scenario_id": "PRIVATE-BORROWER"})
+    plan = plan_definition(definition)
+    assert (
+        _unique_group_capex_plan(
+            (plan,),
+            {(plan.scenario_id, plan.clause_id)},
+        )
+        is None
+    )

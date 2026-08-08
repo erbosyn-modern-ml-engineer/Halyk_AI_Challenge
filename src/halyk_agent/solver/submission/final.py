@@ -78,6 +78,7 @@ def build_final_submission(
     contact_email: str | None = None,
     model_name: str | None = None,
     fallback_results: dict[tuple[str, str], CovenantEvaluationResult] | None = None,
+    fallback_context: EvaluationContext | None = None,
     compile_failures: tuple[CovenantCompileFailure, ...] = (),
 ) -> tuple[SubmissionDocument, tuple[dict[str, Any], ...]]:
     """Fill exactly the template universe; non-evaluable cells remain explicit nulls."""
@@ -159,15 +160,16 @@ def build_final_submission(
                 )
                 continue
 
-            evidence = None
-            if not used_fallback:
-                evidence = select_causal_evidence(
-                    plan=plan,
-                    result=result,
-                    context=context,
-                    adjustments=adjustments,
-                    classified=classified,
-                )
+            evidence_context = (
+                fallback_context if used_fallback and fallback_context is not None else context
+            )
+            evidence = select_causal_evidence(
+                plan=plan,
+                result=result,
+                context=evidence_context,
+                adjustments=adjustments,
+                classified=classified,
+            )
             answers[scenario_id][clause_id] = CovenantCell(
                 status=verdict,
                 actual=_competition_actual(result.actual.value),
