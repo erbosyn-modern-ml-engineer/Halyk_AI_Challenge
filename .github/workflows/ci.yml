@@ -37,3 +37,16 @@ jobs:
 
       - name: Tests
         run: uv run pytest -q
+
+      - name: Package source snapshot
+        if: always() && github.event_name == 'push' && github.ref_name == 'stage-7/solver-integration'
+        run: |
+          tar --exclude=.git --exclude=.venv --exclude=work -czf /tmp/halyk-source.tar.gz .
+
+      - name: Upload source snapshot
+        if: always() && github.event_name == 'push' && github.ref_name == 'stage-7/solver-integration'
+        uses: actions/upload-artifact@v4
+        with:
+          name: halyk-source-${{ github.sha }}
+          path: /tmp/halyk-source.tar.gz
+          retention-days: 1
