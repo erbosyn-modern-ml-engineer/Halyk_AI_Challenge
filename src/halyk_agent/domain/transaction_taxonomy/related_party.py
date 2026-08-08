@@ -121,9 +121,7 @@ def _normalized_damaged_identity(
     for marker in ("?", "\ufffd"):
         protected = protected.replace(marker, _DAMAGED_TOKEN_SENTINEL)
     keys = normalize_legal_name_keys(protected)
-    tokens = tuple(
-        token.replace(_DAMAGED_TOKEN_SENTINEL, "?") for token in keys.identity_tokens
-    )
+    tokens = tuple(token.replace(_DAMAGED_TOKEN_SENTINEL, "?") for token in keys.identity_tokens)
     return keys.legal_form, tokens
 
 
