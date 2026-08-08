@@ -283,6 +283,7 @@ def solve_competition_from_manifest(
             contact_email=contact_email,
             model_name=model_name,
             fallback_results=fallback.results,
+            fallback_context=fallback.context,
             compile_failures=pipeline.covenants.failures,
         )
         written = write_final_submission(

@@ -63,14 +63,15 @@ _OTHER_MOVEMENT_RE = re.compile(
 )
 
 
-def _extract_note_section(full_text: str, number: int) -> str | None:
+def _note_sections(full_text: str) -> tuple[str, ...]:
+    """Split source text into numbered note sections without assuming a note number."""
+
     headings = list(_NOTE_HEADING_RE.finditer(full_text))
+    sections: list[str] = []
     for index, heading in enumerate(headings):
-        if int(heading.group("number")) != number:
-            continue
         end = headings[index + 1].start() if index + 1 < len(headings) else len(full_text)
-        return full_text[heading.start() : end]
-    return None
+        sections.append(full_text[heading.start() : end])
+    return tuple(sections)
 
 
 def _money_after_label(note: str, match: re.Match[str]) -> tuple[Decimal, str] | None:
@@ -153,7 +154,7 @@ def _parsed_documents(parsed_dir: Path) -> dict[str, tuple[str, str]]:
     return documents
 
 
-def _p5_group_documents(routing_dir: Path) -> tuple[str, ...]:
+def _group_documents_for_scenario(routing_dir: Path, scenario_id: str) -> tuple[str, ...]:
     path = routing_dir / "document_links.jsonl"
     if not path.is_file():
         return ()
@@ -165,7 +166,7 @@ def _p5_group_documents(routing_dir: Path) -> tuple[str, ...]:
         scenarios = item.get("scenario_ids")
         if (
             isinstance(scenarios, list)
-            and "P5" in scenarios
+            and scenario_id in scenarios
             and item.get("group_document") is True
             and isinstance(item.get("document_id"), str)
         ):
@@ -173,74 +174,76 @@ def _p5_group_documents(routing_dir: Path) -> tuple[str, ...]:
     return tuple(sorted(set(ids)))
 
 
-def _derive_p5_group_capex(
+def _derive_group_capex(
     *,
     parsed_dir: Path,
     routing_dir: Path,
+    scenario_id: str,
 ) -> tuple[Decimal | None, dict[str, Any] | None]:
-    """Conservative competition-only PPE residual bridge for the P5 group source.
+    """Conservative PPE residual bridge selected by covenant and routing semantics.
 
-    Unlike strict Stage 5E, this bridge still assumes *unmentioned* movement
-    families are zero.  It must therefore close whenever the actual Note 7 names
-    another movement family, contains malformed money, or is structurally ambiguous.
+    The bridge does not assume a public scenario ID or a fixed note number. It
+    scans group documents linked to the selected scenario and requires exactly one
+    note section with a complete opening/depreciation/closing roll-forward and no
+    named competing movement family.
     """
 
     docs = _parsed_documents(parsed_dir)
-    group_ids = _p5_group_documents(routing_dir)
+    group_ids = _group_documents_for_scenario(routing_dir, scenario_id)
     candidates: list[tuple[Decimal, dict[str, Any]]] = []
     for document_id in group_ids:
         item = docs.get(document_id)
         if item is None:
             continue
         source_file, full_text = item
-        note = _extract_note_section(full_text, 7)
-        if note is None:
-            continue
-        opening_matches = list(_OPENING_RE.finditer(note))
-        dep_matches = list(_DEPRECIATION_RE.finditer(note))
-        closing_matches = list(_CLOSING_RE.finditer(note))
-        if not (
-            len(opening_matches) == len(dep_matches) == len(closing_matches) == 1
-            and _NO_DISPOSALS_RE.search(note)
-        ):
-            continue
+        for note in _note_sections(full_text):
+            opening_matches = list(_OPENING_RE.finditer(note))
+            dep_matches = list(_DEPRECIATION_RE.finditer(note))
+            closing_matches = list(_CLOSING_RE.finditer(note))
+            if not (
+                len(opening_matches) == len(dep_matches) == len(closing_matches) == 1
+                and _NO_DISPOSALS_RE.search(note)
+            ):
+                continue
 
-        scrubbed = _NO_DISPOSALS_RE.sub("", note)
-        scrubbed = _NO_OTHER_MOVEMENTS_RE.sub("", scrubbed)
-        if _OTHER_MOVEMENT_RE.search(scrubbed):
-            continue
+            scrubbed = _NO_DISPOSALS_RE.sub("", note)
+            scrubbed = _NO_OTHER_MOVEMENTS_RE.sub("", scrubbed)
+            if _OTHER_MOVEMENT_RE.search(scrubbed):
+                continue
 
-        opening = _money_after_label(note, opening_matches[0])
-        depreciation = _money_after_label(note, dep_matches[0])
-        closing = _money_after_label(note, closing_matches[0])
-        if opening is None or depreciation is None or closing is None:
-            continue
-        currencies = {opening[1], depreciation[1], closing[1]}
-        if currencies != {"USD"}:
-            continue
-        residual = closing[0] - opening[0] + depreciation[0]
-        if residual <= 0:
-            continue
-        candidates.append(
-            (
-                residual,
-                {
-                    "strategy": "PPE_ROLL_FORWARD_RESIDUAL_BRIDGE",
-                    "scenario_id": "P5",
-                    "source_file": source_file,
-                    "document_id": document_id,
-                    "opening_nbv": str(opening[0]),
-                    "depreciation": str(depreciation[0]),
-                    "closing_nbv": str(closing[0]),
-                    "derived_group_capex": str(residual),
-                    "assumption": (
-                        "competition-only residual: movement families not named in the "
-                        "complete Note 7 section are treated as zero; strict Stage 5E "
-                        "remains unresolved"
-                    ),
-                },
+            opening = _money_after_label(note, opening_matches[0])
+            depreciation = _money_after_label(note, dep_matches[0])
+            closing = _money_after_label(note, closing_matches[0])
+            if opening is None or depreciation is None or closing is None:
+                continue
+            currencies = {opening[1], depreciation[1], closing[1]}
+            if currencies != {"USD"}:
+                continue
+            residual = closing[0] - opening[0] + depreciation[0]
+            if residual <= 0:
+                continue
+            heading = note.splitlines()[0].strip() if note.splitlines() else ""
+            candidates.append(
+                (
+                    residual,
+                    {
+                        "strategy": "PPE_ROLL_FORWARD_RESIDUAL_BRIDGE",
+                        "scenario_id": scenario_id,
+                        "source_file": source_file,
+                        "document_id": document_id,
+                        "note_heading": heading,
+                        "opening_nbv": str(opening[0]),
+                        "depreciation": str(depreciation[0]),
+                        "closing_nbv": str(closing[0]),
+                        "derived_group_capex": str(residual),
+                        "assumption": (
+                            "competition-only residual: movement families not named in the "
+                            "complete PPE roll-forward note section are treated as zero; "
+                            "strict Stage 5E remains unresolved"
+                        ),
+                    },
+                )
             )
-        )
     unique = {value for value, _diagnostic in candidates}
     if len(unique) != 1 or len(candidates) != 1:
         return None, None
@@ -272,7 +275,7 @@ def _convert_eur_inputs(
     return tuple(converted)
 
 
-def _p5_group_input(
+def _group_capex_input(
     amount: Decimal,
     *,
     plan: EvaluationPlan,
@@ -282,8 +285,8 @@ def _p5_group_input(
     start = plan.period.start_date or date(2025, 1, 1)
     end = plan.period.end_date or date(2025, 12, 31)
     return CalculationInput(
-        input_id=deterministic_id("stage8-fallback", "P5", "GROUP_CAPEX", str(amount)),
-        scenario_id="P5",
+        input_id=deterministic_id("stage8-fallback", plan.scenario_id, "GROUP_CAPEX", str(amount)),
+        scenario_id=plan.scenario_id,
         source_kind=InputSourceKind.AUTHORITATIVE_FACT,
         derived_input_id="stage8-ppe-roll-forward-residual",
         category=MetricCategory.GROUP_CAPEX,
@@ -306,7 +309,7 @@ def _p5_group_input(
     )
 
 
-def _enable_p5_group_selector(
+def _enable_group_capex_selector(
     coverage: tuple[SelectorCoverageEntry, ...],
     readiness: tuple[DefinitionReadinessEntry, ...],
     *,
@@ -341,6 +344,27 @@ def _enable_p5_group_selector(
         else:
             updated_readiness.append(readiness_entry)
     return tuple(updated_coverage), tuple(updated_readiness)
+
+
+def _unique_group_capex_plan(
+    plans: tuple[EvaluationPlan, ...],
+    target_keys: set[tuple[str, str]],
+) -> EvaluationPlan | None:
+    """Return the sole unresolved plan that semantically requests GROUP_CAPEX."""
+
+    candidates: list[EvaluationPlan] = []
+    for plan in plans:
+        key = (plan.scenario_id, plan.clause_id)
+        if key not in target_keys:
+            continue
+        if any(
+            node.selector is not None and node.selector.category is MetricCategory.GROUP_CAPEX
+            for node in plan.nodes
+        ):
+            candidates.append(plan)
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
 
 
 def build_competitive_fallbacks(
@@ -384,27 +408,30 @@ def build_competitive_fallbacks(
 
     coverage = context.selector_coverage
     readiness = context.definition_readiness
-    p5_plan = next(
-        (plan for plan in evaluation.plans if (plan.scenario_id, plan.clause_id) == ("P5", "6.1")),
-        None,
-    )
-    p5_amount, p5_diagnostic = _derive_p5_group_capex(
-        parsed_dir=parsed_dir,
-        routing_dir=routing_dir,
-    )
-    if p5_plan is not None and p5_amount is not None and p5_diagnostic is not None:
-        working_inputs = tuple(
-            (
-                *working_inputs,
-                _p5_group_input(p5_amount, plan=p5_plan, source_file=p5_diagnostic["source_file"]),
+    group_capex_plan = _unique_group_capex_plan(evaluation.plans, target_keys)
+    if group_capex_plan is not None:
+        group_capex_amount, group_capex_diagnostic = _derive_group_capex(
+            parsed_dir=parsed_dir,
+            routing_dir=routing_dir,
+            scenario_id=group_capex_plan.scenario_id,
+        )
+        if group_capex_amount is not None and group_capex_diagnostic is not None:
+            working_inputs = tuple(
+                (
+                    *working_inputs,
+                    _group_capex_input(
+                        group_capex_amount,
+                        plan=group_capex_plan,
+                        source_file=group_capex_diagnostic["source_file"],
+                    ),
+                )
             )
-        )
-        coverage, readiness = _enable_p5_group_selector(
-            coverage,
-            readiness,
-            definition_id=p5_plan.definition_id,
-        )
-        diagnostics.append(p5_diagnostic)
+            coverage, readiness = _enable_group_capex_selector(
+                coverage,
+                readiness,
+                definition_id=group_capex_plan.definition_id,
+            )
+            diagnostics.append(group_capex_diagnostic)
 
     fallback_context = context.model_copy(
         update={
