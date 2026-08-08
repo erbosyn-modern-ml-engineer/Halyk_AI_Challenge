@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from halyk_agent.domain.ocr import OcrBackendIdentity, OcrPageResult, ocr_cache_identity
 
-OCR_CACHE_SCHEMA = "halyk.ocr_page_cache.v1"
+OCR_CACHE_SCHEMA = "halyk.ocr_page_cache.v2"
 
 
 class OcrCacheEnvelope(BaseModel):

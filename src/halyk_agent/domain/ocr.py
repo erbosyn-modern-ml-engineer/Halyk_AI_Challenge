@@ -299,7 +299,8 @@ def ocr_cache_identity(
 ) -> str:
     """Content-addressed OCR page cache key."""
     return deterministic_id(
-        "halyk.ocr_cache.v1",
+        # v2: UTF-8-strict decode contract; do not reuse v1 mojibake cache entries.
+        "halyk.ocr_cache.v2",
         source_sha256,
         page_number,
         backend.kind.value,

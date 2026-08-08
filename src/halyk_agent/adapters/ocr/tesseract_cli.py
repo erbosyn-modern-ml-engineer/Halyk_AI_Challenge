@@ -59,7 +59,8 @@ class TesseractCliOcrBackend:
             languages=self.languages,
             render_scale=self.render_scale,
             page_segmentation_mode=self.page_segmentation_mode,
-            extra="tesseract_cli",
+            # Bump invalidates any cache written under locale/cp1251 decode.
+            extra="tesseract_cli_utf8_strict_v2",
         )
         lang_id = sha256_text(
             "|".join(sorted(avail.installed_languages)) + "|" + (avail.language_data_path or "")
@@ -247,23 +248,27 @@ def _run_tesseract(
     if tessdata is not None:
         cmd[1:1] = ["--tessdata-dir", str(tessdata)]
     try:
-        # UTF-8 with replacement: Windows defaults (e.g. cp1251) break Cyrillic OCR text.
+        # Tesseract CLI emits UTF-8 bytes. Decode explicitly — never locale/cp1251.
         proc = subprocess.run(
             cmd,
             check=False,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            text=False,
             timeout=timeout,
             env=_subprocess_env_without_broken_tessdata_prefix(),
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(str(exc)) from exc
-    stdout = (proc.stdout or "")[:MAX_SUBPROCESS_CHARS]
-    stderr = (proc.stderr or "")[:2000]
+    stderr = (proc.stderr or b"")[:2000].decode("utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(f"tesseract exit {proc.returncode}: {stderr[:200]}")
+    try:
+        stdout = (proc.stdout or b"").decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"OCR_UTF8_DECODE_FAILED: tesseract stdout is not valid UTF-8: {exc}"
+        ) from exc
+    stdout = stdout[:MAX_SUBPROCESS_CHARS]
     return stdout, None
 
 
