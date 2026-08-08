@@ -15,6 +15,7 @@ from halyk_agent.domain.fact_extraction.models import (
     FactKind,
     FactRecord,
     FxRatePayload,
+    GroupCapexPayload,
     OffLedgerAmountPayload,
     OneTimeAddBackPayload,
     PeriodDisposition,
@@ -27,6 +28,10 @@ from halyk_agent.domain.fact_extraction.models import (
 from halyk_agent.domain.ids import deterministic_id, sha256_text
 from halyk_agent.domain.routing.models import LedgerRow, TransactionEntityLink
 from halyk_agent.domain.routing.normalize import normalize_legal_name_keys
+from halyk_agent.domain.transaction_taxonomy.amounts import (
+    metric_amount_from_source,
+    sign_contract_for_category,
+)
 from halyk_agent.domain.transaction_taxonomy.category_labels import map_category_label
 from halyk_agent.domain.transaction_taxonomy.classify import classify_description
 from halyk_agent.domain.transaction_taxonomy.constants import (
@@ -39,6 +44,7 @@ from halyk_agent.domain.transaction_taxonomy.membership import (
     selector_memberships,
 )
 from halyk_agent.domain.transaction_taxonomy.models import (
+    AMOUNT_CONTRACT_VERSION,
     AdjustmentEvent,
     AdjustmentEventType,
     CalculationInput,
@@ -61,9 +67,9 @@ from halyk_agent.domain.transaction_taxonomy.models import (
     UnresolvedTransaction,
 )
 from halyk_agent.domain.transaction_taxonomy.related_party import (
+    damaged_qualifying_entities,
     qualifying_related_parties,
     resolve_related_party,
-    scenario_has_damaged_ownership,
 )
 from halyk_agent.domain.transaction_taxonomy.selectors import (
     build_definition_readiness,
@@ -743,6 +749,31 @@ def run_transaction_taxonomy(
     for fact in _facts_by_kind(accepted_facts, FactKind.ONE_TIME_ADD_BACK):
         payload = fact.payload
         assert isinstance(payload, OneTimeAddBackPayload)
+        # Prefer unique ledger attachment by amount+counterparty; else fact-derived.
+        ledger_matches: list[str] = []
+        if payload.counterparty:
+            cp_key = normalize_legal_name_keys(payload.counterparty).identity_key
+            target_abs = abs(payload.amount.value)
+            for tid, state in classified_mutable.items():
+                if state["scenario_id"] != fact.scenario_id:
+                    continue
+                if state["counterparty_identity_key"] != cp_key:
+                    continue
+                amt = state["effective_amount"]
+                if amt is None:
+                    continue
+                if abs(amt) == target_abs:
+                    ledger_matches.append(tid)
+        if len(ledger_matches) == 1:
+            tid = ledger_matches[0]
+            state = classified_mutable[tid]
+            state["effective_category"] = MetricCategory.ONE_TIME_ADD_BACKS
+            state["classification_method"] = ClassificationMethod.AUTHORITATIVE_RECLASSIFICATION
+            state["applied_fact_ids"].append(fact.fact_id)
+            state["evidence_refs"].extend(list(fact.evidence_span_ids))
+            state["flags"].append("ONE_TIME_ADD_BACK_ATTACHED")
+            _mark_fact(fact, "CONSUMED", "one-time add-back attached to unique ledger row")
+            continue
         input_id = deterministic_id("derived", fact.fact_id, payload.label)
         derived_inputs.append(
             DerivedCalculationInput(
@@ -758,6 +789,26 @@ def run_transaction_taxonomy(
             )
         )
         _mark_fact(fact, "CONSUMED", "one-time add-back emitted as derived input")
+
+    for fact in _facts_by_kind(accepted_facts, FactKind.GROUP_CAPEX):
+        payload = fact.payload
+        assert isinstance(payload, GroupCapexPayload)
+        input_id = deterministic_id("derived", fact.fact_id, "group_capex")
+        derived_inputs.append(
+            DerivedCalculationInput(
+                input_id=input_id,
+                scenario_id=fact.scenario_id,
+                fact_id=fact.fact_id,
+                fact_kind=fact.fact_kind.value,
+                category=MetricCategory.GROUP_CAPEX,
+                amount=payload.amount.value,
+                currency=payload.amount.currency,
+                label=payload.formula or "group_capex",
+                entity_scope=EntityScopeKind.GROUP,
+                evidence_span_ids=fact.evidence_span_ids,
+            )
+        )
+        _mark_fact(fact, "CONSUMED", "group CAPEX fact emitted as group-level derived input")
 
     # --- Ownership / threshold consumption accounting ---
     for fact in accepted_facts:
@@ -778,9 +829,7 @@ def run_transaction_taxonomy(
         else:
             _mark_fact(fact, "UNUSED", "no Stage 5F consumer registered")
 
-    damaged_scenarios = {
-        sid for sid in ownership_scenarios if scenario_has_damaged_ownership(accepted_facts, sid)
-    }
+    damaged_entities = damaged_qualifying_entities(accepted_facts)
 
     # --- Related-party + entity / subsidiary scope enrichment ---
     for tid, state in classified_mutable.items():
@@ -794,7 +843,7 @@ def run_transaction_taxonomy(
             qualifying=qualifying,
             has_threshold=scenario_id in threshold_scenarios,
             has_ownership=scenario_id in ownership_scenarios,
-            has_damaged_ownership=scenario_id in damaged_scenarios,
+            damaged_entities=damaged_entities,
         )
         state["related_party_status"] = decision.status
         state["related_party_basis"] = decision.basis
@@ -855,8 +904,8 @@ def run_transaction_taxonomy(
             is MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS
             and sub_status is not SubsidiaryStatusKind.UNRESTRICTED
         ):
-            # Fail closed: do not keep unrestricted category without evidence.
-            state["effective_category"] = MetricCategory.CAPEX
+            # Fail closed: keep transfer semantics, never invent borrower CAPEX.
+            state["effective_category"] = MetricCategory.CAPITAL_ASSET_TRANSFER
             state["flags"].append("UNRESTRICTED_STATUS_REQUIRED")
 
         # GROUP_CAPEX primary from description only; never stamp borrower CAPEX as group.
@@ -872,10 +921,15 @@ def run_transaction_taxonomy(
         state["entity_scope"] = scope
         state["subsidiary_status"] = sub_status
 
-        # Attach semantic memberships (primary + hierarchy).
+        # Attach semantic memberships (primary + hierarchy; tax is row-level).
         if state["effective_category"] is not None:
-            state["selector_categories"] = list(selector_memberships(state["effective_category"]))
-            state["membership_reasons"] = list(membership_reasons(state["effective_category"]))
+            desc = state["description"] or ""
+            state["selector_categories"] = list(
+                selector_memberships(state["effective_category"], description=desc)
+            )
+            state["membership_reasons"] = list(
+                membership_reasons(state["effective_category"], description=desc)
+            )
         else:
             state["selector_categories"] = []
             state["membership_reasons"] = []
@@ -931,12 +985,18 @@ def run_transaction_taxonomy(
         if state["rejected_fact_ids"]:
             flags.append("HAS_REJECTED_RECLASSIFICATION")
 
+        desc = state["description"] or ""
         selector_cats = tuple(state.get("selector_categories") or [])
         if not selector_cats:
-            selector_cats = selector_memberships(state["effective_category"])
+            selector_cats = selector_memberships(state["effective_category"], description=desc)
         mem_reasons = tuple(state.get("membership_reasons") or [])
         if not mem_reasons:
-            mem_reasons = membership_reasons(state["effective_category"])
+            mem_reasons = membership_reasons(state["effective_category"], description=desc)
+
+        source_amt = state["effective_amount"]
+        assert source_amt is not None
+        semantics, sign_rule = sign_contract_for_category(state["effective_category"])
+        metric_amt = metric_amount_from_source(source_amt, category=state["effective_category"])
 
         calc_inputs.append(
             CalculationInput(
@@ -947,7 +1007,11 @@ def run_transaction_taxonomy(
                 category=state["effective_category"],
                 selector_categories=selector_cats,
                 membership_reasons=mem_reasons,
-                amount=state["effective_amount"],
+                amount=metric_amt,
+                source_amount=source_amt,
+                metric_amount=metric_amt,
+                amount_semantics=semantics,
+                sign_rule=sign_rule,
                 currency=state["effective_currency"],
                 transaction_date=state["original_date"],
                 period_start=state["effective_period_start"],
@@ -971,6 +1035,18 @@ def run_transaction_taxonomy(
         if derived.input_id in seen_derived:
             continue
         seen_derived.add(derived.input_id)
+        positive_magnitude = True
+        semantics, sign_rule = sign_contract_for_category(
+            derived.category, positive_magnitude=positive_magnitude
+        )
+        metric_amt = metric_amount_from_source(
+            derived.amount,
+            category=derived.category,
+            positive_magnitude=positive_magnitude,
+        )
+        derived_flags: list[str] = ["OFF_LEDGER"]
+        if derived.category is MetricCategory.GROUP_CAPEX:
+            derived_flags.append("GROUP_LEVEL_SOURCE")
         calc_inputs.append(
             CalculationInput(
                 input_id=deterministic_id("calc-derived", derived.input_id),
@@ -980,7 +1056,11 @@ def run_transaction_taxonomy(
                 category=derived.category,
                 selector_categories=selector_memberships(derived.category),
                 membership_reasons=membership_reasons(derived.category),
-                amount=derived.amount,
+                amount=metric_amt,
+                source_amount=derived.amount,
+                metric_amount=metric_amt,
+                amount_semantics=semantics,
+                sign_rule=sign_rule,
                 currency=derived.currency,
                 transaction_date=derived.as_of_date,
                 period_start=derived.as_of_date,
@@ -988,7 +1068,7 @@ def run_transaction_taxonomy(
                 related_party=derived.related_party_status,
                 entity_scope=derived.entity_scope,
                 subsidiary_status=SubsidiaryStatusKind.UNKNOWN,
-                flags=("OFF_LEDGER",),
+                flags=tuple(sorted(set(derived_flags))),
                 applied_fact_ids=(derived.fact_id,),
                 provenance_refs=derived.evidence_span_ids,
                 classification_rule="AUTHORITATIVE_FACT",
@@ -1189,6 +1269,7 @@ def run_transaction_taxonomy(
         definition_unresolved_count=sum(
             1 for d in definition_readiness if d.status is SelectorReadinessStatus.UNRESOLVED
         ),
+        amount_contract_version=AMOUNT_CONTRACT_VERSION,
         accepted_facts_count=len(accepted_facts),
         facts_consumed_count=sum(1 for f in fact_consumption_tuple if f.disposition == "CONSUMED"),
         related_party_true_count=rp_true,

@@ -110,6 +110,20 @@ class InputSourceKind(StrEnum):
     AUTHORITATIVE_FACT = "AUTHORITATIVE_FACT"
 
 
+class AmountSemantics(StrEnum):
+    SOURCE_SIGNED_FLOW = "SOURCE_SIGNED_FLOW"
+    POSITIVE_MAGNITUDE = "POSITIVE_MAGNITUDE"
+
+
+class SignRule(StrEnum):
+    INFLOW_AS_IS = "INFLOW_AS_IS"
+    EXPENSE_NEGATE_SOURCE = "EXPENSE_NEGATE_SOURCE"
+    POSITIVE_MAGNITUDE_AS_IS = "POSITIVE_MAGNITUDE_AS_IS"
+
+
+AMOUNT_CONTRACT_VERSION = "halyk.metric_amount.v1"
+
+
 class PeriodMembershipHint(StrEnum):
     """Hints for Stage 6 period predicates — not covenant evaluation."""
 
@@ -239,7 +253,12 @@ class CalculationInput(BaseModel):
     category: MetricCategory
     selector_categories: tuple[MetricCategory, ...] = ()
     membership_reasons: tuple[NonEmptyStr, ...] = ()
+    # Stage 6 aggregates ``amount`` (== metric_amount). ``source_amount`` is audit-only.
     amount: ExactDecimal
+    source_amount: ExactDecimal | None = None
+    metric_amount: ExactDecimal | None = None
+    amount_semantics: AmountSemantics = AmountSemantics.SOURCE_SIGNED_FLOW
+    sign_rule: SignRule = SignRule.EXPENSE_NEGATE_SOURCE
     currency: NonEmptyStr
     transaction_date: date | None = None
     period_start: date | None = None
@@ -255,9 +274,11 @@ class CalculationInput(BaseModel):
     provenance_refs: tuple[NonEmptyStr, ...] = ()
     classification_rule: NonEmptyStr | None = None
 
-    @field_validator("amount", mode="before")
+    @field_validator("amount", "source_amount", "metric_amount", mode="before")
     @classmethod
     def _no_float(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
         return reject_float_amount(value)
 
 
@@ -349,6 +370,7 @@ class TaxonomyManifest(BaseModel):
     selector_unsupported_count: int = Field(ge=0)
     definition_ready_count: int = Field(ge=0)
     definition_unresolved_count: int = Field(ge=0)
+    amount_contract_version: NonEmptyStr = AMOUNT_CONTRACT_VERSION
     accepted_facts_count: int = Field(ge=0)
     facts_consumed_count: int = Field(ge=0)
     related_party_true_count: int = Field(ge=0)

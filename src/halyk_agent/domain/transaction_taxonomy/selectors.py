@@ -101,6 +101,15 @@ def _selector_readiness(
             return SelectorReadinessStatus.TRUE_ZERO, "NO_UNRESTRICTED_TRANSFER_INPUTS"
         return SelectorReadinessStatus.READY, "OK"
 
+    if selector.category is MetricCategory.ONE_TIME_ADD_BACKS:
+        # Source-dependent selector: never assert TRUE_ZERO from empty OCR/partial source.
+        if match_count == 0:
+            return (
+                SelectorReadinessStatus.UNRESOLVED,
+                "UNRESOLVED_SOURCE_QUALITY",
+            )
+        return SelectorReadinessStatus.READY, "OK"
+
     if selector.related_party_only:
         unknowns = sum(1 for i in scenario_inputs if i.related_party is RelatedPartyStatus.UNKNOWN)
         if unknowns and match_count == 0:
