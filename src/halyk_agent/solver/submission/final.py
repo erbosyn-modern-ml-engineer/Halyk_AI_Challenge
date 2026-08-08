@@ -21,6 +21,11 @@ from halyk_agent.solver.audit import RunFileAudit
 from halyk_agent.solver.errors import SubmissionSchemaError
 from halyk_agent.solver.evidence import competition_verdict, select_causal_evidence
 from halyk_agent.solver.submission.models import CovenantCell, SubmissionDocument
+from halyk_agent.solver.submission.status_policy import (
+    configured_submission_status_policy,
+    resolve_submission_status,
+    status_policy_manifest,
+)
 
 _TWO_PLACES = Decimal("0.01")
 
@@ -88,6 +93,11 @@ def build_final_submission(
     except Exception as exc:
         raise SubmissionSchemaError(f"invalid submission template: {exc}") from exc
 
+    try:
+        status_policy = configured_submission_status_policy()
+    except ValueError as exc:
+        raise SubmissionSchemaError(str(exc)) from exc
+
     result_map = {(item.scenario_id, item.clause_id): item for item in evaluation.results}
     fallback_map = fallback_results or {}
     plan_map: dict[tuple[str, str], EvaluationPlan] = {
@@ -141,13 +151,13 @@ def build_final_submission(
             strict_result = result_map[key]
             plan = plan_map[key]
             result = strict_result
+            strict_verdict = competition_verdict(result)
             used_fallback = False
-            verdict = competition_verdict(result)
-            if (verdict is None or result.actual is None) and key in fallback_map:
+            if (strict_verdict is None or result.actual is None) and key in fallback_map:
                 result = fallback_map[key]
-                verdict = competition_verdict(result)
-                used_fallback = verdict is not None and result.actual is not None
-            if verdict is None or result.actual is None:
+                strict_verdict = competition_verdict(result)
+                used_fallback = strict_verdict is not None and result.actual is not None
+            if strict_verdict is None or result.actual is None:
                 answers[scenario_id][clause_id] = CovenantCell()
                 unresolved.append(
                     {
@@ -159,6 +169,18 @@ def build_final_submission(
                     }
                 )
                 continue
+
+            verdict = resolve_submission_status(
+                strict_verdict=strict_verdict,
+                comparator=plan.comparator,
+                actual=result.actual,
+                threshold=plan.threshold,
+                policy=status_policy,
+            )
+            if verdict is None:
+                raise SubmissionSchemaError(
+                    f"submission status policy removed resolved verdict for {key}"
+                )
 
             evidence_context = (
                 fallback_context if used_fallback and fallback_context is not None else context
@@ -228,4 +250,24 @@ def write_final_submission(
     if unresolved_text:
         unresolved_text += "\n"
     _atomic_write(unresolved_path, unresolved_text)
-    return {"submission": submission_path, "unresolved": unresolved_path}
+
+    try:
+        policy = configured_submission_status_policy()
+    except ValueError as exc:
+        raise SubmissionSchemaError(str(exc)) from exc
+    policy_path = output_dir / "submission_policy.json"
+    policy_text = (
+        json.dumps(
+            status_policy_manifest(policy),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    _atomic_write(policy_path, policy_text)
+    return {
+        "submission": submission_path,
+        "unresolved": unresolved_path,
+        "policy": policy_path,
+    }
