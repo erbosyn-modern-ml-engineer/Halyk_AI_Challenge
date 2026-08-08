@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from halyk_agent.domain.authority.models import AuthorityDecision, AuthorityDomain, AuthorityStatus
+from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.models import CovenantDefinition
 from halyk_agent.domain.errors import EvidenceAlignmentError
 from halyk_agent.domain.evidence import EvidenceSpan
@@ -28,6 +29,7 @@ from halyk_agent.domain.fact_extraction.constants import (
     FACT_VALIDATOR_VERSION,
 )
 from halyk_agent.domain.fact_extraction.extractors import (
+    SEVERANCE_AS_OF_RE,
     extract_candidates,
     has_incomplete_ppe_roll_forward,
 )
@@ -44,10 +46,13 @@ from halyk_agent.domain.fact_extraction.models import (
     FactRequirementResult,
     FactValidatorStatus,
     ModelProvenance,
+    OffLedgerAmountPayload,
+    OneTimeAddBackPayload,
     RateSource,
     RequirementTerminalState,
 )
 from halyk_agent.domain.fact_extraction.requirements import derive_fact_requirements
+from halyk_agent.domain.fact_extraction.text_locate import page_text_slices
 from halyk_agent.domain.fact_extraction.text_normalize import cue_corpus
 from halyk_agent.domain.fact_extraction.validators import validate_candidate
 from halyk_agent.domain.fact_extraction.windows import select_windows
@@ -97,6 +102,144 @@ def hash_fact_models(models: Sequence[Any]) -> str:
 
 def _hash_models(models: Sequence[Any]) -> str:
     return hash_fact_models(models)
+
+
+def _unique_flow_period(
+    definitions: tuple[CovenantDefinition, ...],
+    *,
+    scenario_id: str,
+    category: MetricCategory,
+) -> tuple[Any, Any]:
+    periods: set[tuple[Any, Any]] = set()
+    for definition in definitions:
+        if definition.scenario_id != scenario_id:
+            continue
+        if not any(selector.category is category for selector in definition.selectors):
+            continue
+        start = definition.period.flow_start_date or definition.period.start_date
+        end = definition.period.flow_end_date or definition.period.end_date
+        if start is not None and end is not None:
+            periods.add((start, end))
+    if len(periods) == 1:
+        return next(iter(periods))
+    return None, None
+
+
+def _unique_as_of(
+    definitions: tuple[CovenantDefinition, ...],
+    *,
+    scenario_id: str,
+    category: MetricCategory,
+) -> Any:
+    dates: set[Any] = set()
+    for definition in definitions:
+        if definition.scenario_id != scenario_id:
+            continue
+        if not any(selector.category is category for selector in definition.selectors):
+            continue
+        if definition.period.as_of_date is not None:
+            dates.add(definition.period.as_of_date)
+    if len(dates) == 1:
+        return next(iter(dates))
+    return None
+
+
+def _locate_as_of_span(
+    *,
+    scenario_id: str,
+    as_of: Any,
+    docs: Mapping[str, CanonicalDocument],
+    auth_map: Mapping[tuple[str, str], set[str]],
+) -> EvidenceSpan | None:
+    """Create evidence for a covenant-terms AS_OF date near severance language."""
+    winning = auth_map.get((scenario_id, AuthorityDomain.COVENANT_TERMS.value), set())
+    target = as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of)
+    for doc_id in sorted(winning):
+        document = docs.get(doc_id)
+        if document is None:
+            continue
+        for page_number, text in page_text_slices(document):
+            for match in SEVERANCE_AS_OF_RE.finditer(text):
+                if match.group("as_of") != target:
+                    continue
+                # Require nearby severance / program language so unrelated dates are ignored.
+                window = text[max(0, match.start() - 180) : min(len(text), match.end() + 40)]
+                if not re.search(r"выходн|severance|пособи", window, re.IGNORECASE):
+                    continue
+                try:
+                    return create_exact_page_span(document, page_number, match.start(), match.end())
+                except EvidenceAlignmentError:
+                    return None
+    return None
+
+
+def _enrich_accepted_temporal_semantics(
+    facts: tuple[FactRecord, ...],
+    *,
+    definitions: tuple[CovenantDefinition, ...],
+    docs: Mapping[str, CanonicalDocument],
+    auth_map: Mapping[tuple[str, str], set[str]],
+    spans: dict[str, EvidenceSpan],
+) -> tuple[FactRecord, ...]:
+    """
+    Bind source-backed FLOW / AS_OF temporal fields onto accepted facts.
+
+    Uses unique compiled covenant period semantics for the scenario/category and,
+    for severance AS_OF, prefers an exact covenant-terms evidence span when present.
+    """
+    out: list[FactRecord] = []
+    for fact in facts:
+        payload = fact.payload
+        if (
+            fact.fact_kind is FactKind.OFF_LEDGER_AMOUNT
+            and isinstance(payload, OffLedgerAmountPayload)
+            and "severance" in (payload.label or "").casefold()
+            and payload.as_of_date is None
+        ):
+            as_of = _unique_as_of(
+                definitions,
+                scenario_id=fact.scenario_id,
+                category=MetricCategory.SEVERANCE_LIABILITY,
+            )
+            if as_of is not None:
+                extra_ids = list(fact.evidence_span_ids)
+                span = _locate_as_of_span(
+                    scenario_id=fact.scenario_id,
+                    as_of=as_of,
+                    docs=docs,
+                    auth_map=auth_map,
+                )
+                if span is not None:
+                    spans[span.id] = span
+                    extra_ids.append(span.id)
+                payload = payload.model_copy(update={"as_of_date": as_of})
+                fact = fact.model_copy(
+                    update={
+                        "payload": payload,
+                        "evidence_span_ids": tuple(dict.fromkeys(extra_ids)),
+                    }
+                )
+                fact = fact.model_copy(update={"fact_id": content_fact_id(fact)})
+        elif fact.fact_kind is FactKind.ONE_TIME_ADD_BACK and isinstance(
+            payload, OneTimeAddBackPayload
+        ):
+            if payload.period_start is None or payload.period_end is None:
+                start, end = _unique_flow_period(
+                    definitions,
+                    scenario_id=fact.scenario_id,
+                    category=MetricCategory.ONE_TIME_ADD_BACKS,
+                )
+                if start is not None and end is not None:
+                    payload = payload.model_copy(
+                        update={
+                            "period_start": payload.period_start or start,
+                            "period_end": payload.period_end or end,
+                        }
+                    )
+                    fact = fact.model_copy(update={"payload": payload})
+                    fact = fact.model_copy(update={"fact_id": content_fact_id(fact)})
+        out.append(fact)
+    return tuple(out)
 
 
 def _candidate_to_record(
@@ -677,6 +820,13 @@ def run_fact_extraction(
     accepted_t = apply_conflicts(accepted_t, conflicts)
     final_accepted = tuple(
         f for f in accepted_t if f.validator_status is FactValidatorStatus.ACCEPTED
+    )
+    final_accepted = _enrich_accepted_temporal_semantics(
+        final_accepted,
+        definitions=definitions,
+        docs=docs,
+        auth_map=auth_map,
+        spans=spans,
     )
     conflict_records = tuple(
         f for f in accepted_t if f.validator_status is FactValidatorStatus.CONFLICT

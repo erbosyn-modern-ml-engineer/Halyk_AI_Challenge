@@ -274,6 +274,9 @@ class OneTimeAddBackPayload(BaseModel):
     counterparty: NonEmptyStr | None = None
     period_label: NonEmptyStr | None = None
     materiality_note: NonEmptyStr | None = None
+    # Optional covenant-flow binding when source/requirement lineage supplies it.
+    period_start: date | None = None
+    period_end: date | None = None
 
 
 class GroupCapexPayload(BaseModel):

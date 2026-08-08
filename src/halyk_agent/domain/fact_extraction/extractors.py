@@ -710,6 +710,28 @@ _SEVERANCE = re.compile(
     r"(?P<money>\$[\d,]+(?:\.\d{2})?|€[\d,]+(?:\.\d{2})?))",
     re.IGNORECASE | re.DOTALL,
 )
+SEVERANCE_AS_OF_RE = re.compile(
+    r"(?:действующ\w*\s+на|по\s+состоянию\s+на|as\s+of|as-at)\s*"
+    r"(?P<as_of>20\d{2}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _severance_as_of_in_text(text: str, *, around_start: int, around_end: int) -> date | None:
+    """Parse source-backed AS_OF near a severance mention; None means undecidable."""
+    window = text[max(0, around_start - 220) : min(len(text), around_end + 220)]
+    local = SEVERANCE_AS_OF_RE.search(window)
+    if local is not None:
+        return _parse_iso_date(local.group("as_of"))
+    # Document-level fallback only when a single unambiguous as-of accompanies severance language.
+    if not re.search(r"выходн\w*\s+пособи|severance", text, re.IGNORECASE):
+        return None
+    hits = list(SEVERANCE_AS_OF_RE.finditer(text))
+    dates = {_parse_iso_date(m.group("as_of")) for m in hits}
+    dates.discard(None)
+    if len(dates) == 1:
+        return next(iter(dates))
+    return None
 
 
 def extract_off_ledger(
@@ -724,9 +746,26 @@ def extract_off_ledger(
             if money is None:
                 continue
             body = match.group("body").strip()
+            as_of = _severance_as_of_in_text(
+                text, around_start=match.start(), around_end=match.end()
+            )
+            quote = body
+            q0, q1 = match.start(), match.end()
+            if as_of is not None:
+                # Expand evidence so the AS_OF date token is covered when present nearby.
+                as_of_m = SEVERANCE_AS_OF_RE.search(
+                    text[max(0, match.start() - 220) : min(len(text), match.end() + 220)]
+                )
+                if as_of_m is not None:
+                    abs0 = max(0, match.start() - 220) + as_of_m.start()
+                    abs1 = max(0, match.start() - 220) + as_of_m.end()
+                    q0 = min(match.start(), abs0)
+                    q1 = max(match.end(), abs1)
+                    quote = text[q0:q1]
             payload = OffLedgerAmountPayload(
                 label="severance_liability",
                 amount=MoneyAmount(value=money[0], currency=money[1]),
+                as_of_date=as_of,
             )
             out.append(
                 _candidate(
@@ -735,10 +774,10 @@ def extract_off_ledger(
                     authority_domain=authority_domain,
                     kind=FactKind.OFF_LEDGER_AMOUNT,
                     payload=payload,
-                    quote=body[:400],
+                    quote=quote[:400],
                     page_number=page_number,
-                    char_start=match.start(),
-                    char_end=match.end(),
+                    char_start=q0,
+                    char_end=q1,
                     reason_code="DET_OFF_LEDGER",
                 )
             )
