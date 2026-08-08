@@ -1,0 +1,99 @@
+name: opus-targeted-fixes
+
+on:
+  push:
+    branches:
+      - stage-10.1/opus-targeted-fixes
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[opus-fixes-applied]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: stage-10.1/opus-targeted-fixes
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv
+
+      - name: Sync locked environment
+        run: uv sync --frozen --extra full --extra retrieval-full
+
+      - name: Apply confirmed red-team fixes
+        run: python tools/apply_opus_targeted_fixes.py
+
+      - name: Normalize changed Python
+        run: |
+          uv run ruff format \
+            src/halyk_agent/domain/covenants/parse.py \
+            src/halyk_agent/domain/fact_extraction/text_locate.py \
+            src/halyk_agent/preflight/quarantine.py \
+            src/halyk_agent/preflight/discover.py \
+            src/halyk_agent/app/transactions.py \
+            src/halyk_agent/app/evaluation.py \
+            src/halyk_agent/solver/pipeline.py \
+            src/halyk_agent/solver/submission/final.py \
+            src/halyk_agent/solver/solve.py \
+            src/halyk_agent/solver/fallbacks.py \
+            src/halyk_agent/solver/evidence.py \
+            tests/facts/test_parse_money_contract.py \
+            tests/covenants/test_opus_redteam_regressions.py \
+            tests/ingestion/test_template_ambiguity.py \
+            tests/solver/test_partial_publication.py \
+            tests/solver/test_causal_evidence.py \
+            tests/solver/test_competitive_fallbacks.py
+          uv run ruff check --fix \
+            src/halyk_agent/domain/covenants/parse.py \
+            src/halyk_agent/domain/fact_extraction/text_locate.py \
+            src/halyk_agent/preflight/quarantine.py \
+            src/halyk_agent/preflight/discover.py \
+            src/halyk_agent/app/transactions.py \
+            src/halyk_agent/app/evaluation.py \
+            src/halyk_agent/solver/pipeline.py \
+            src/halyk_agent/solver/submission/final.py \
+            src/halyk_agent/solver/solve.py \
+            src/halyk_agent/solver/fallbacks.py \
+            src/halyk_agent/solver/evidence.py \
+            tests/facts/test_parse_money_contract.py \
+            tests/covenants/test_opus_redteam_regressions.py \
+            tests/ingestion/test_template_ambiguity.py \
+            tests/solver/test_partial_publication.py \
+            tests/solver/test_causal_evidence.py \
+            tests/solver/test_competitive_fallbacks.py
+
+      - name: Targeted destructive-audit regressions
+        run: |
+          uv run pytest -q \
+            tests/facts/test_parse_money_contract.py \
+            tests/covenants/test_opus_redteam_regressions.py \
+            tests/ingestion/test_template_ambiguity.py \
+            tests/solver/test_partial_publication.py \
+            tests/solver/test_causal_evidence.py \
+            tests/solver/test_competitive_fallbacks.py
+
+      - name: Strict typecheck
+        run: uv run mypy src
+
+      - name: Commit verified fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 1
+          fi
+          git commit -m "fix: close confirmed Opus red-team blockers and highs [opus-fixes-applied]"
+          git push origin HEAD:stage-10.1/opus-targeted-fixes
