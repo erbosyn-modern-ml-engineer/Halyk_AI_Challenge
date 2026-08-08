@@ -1,21 +1,59 @@
 # Status
 
-Current stage: **6 PRE-FLIGHT — Final Materiality Root-Closure**
-Stage status: **IN PROGRESS on branch** `stage-6-preflight/materiality-final-closure`
-Source: materiality-safety-fix @ `f8bac002a8d9f42c1abfce8231794cd04030df21`
+Current stage: **6 — Deterministic Covenant Evaluator**
+Stage status: **IMPLEMENTED on branch** `stage-6/covenant-evaluator`
+Source: final materiality root-closure @ `86bb9908b789a9026c64a5d2a09d95b431d242ee`
 
-## Why this patch exists
+## Stage 6 implementation
 
-Opus 5 MAX review of materiality-safety-fix returned `BLOCKERS = 0` but `HIGH = 3`.
-Stage 6 evaluator must not start until these final fail-open roots are closed:
+The pre-flight contract is now executable code. Stage 6 provides:
 
-| Finding | Closure |
-|---------|---------|
-| HIGH-1 | Instruction region covers full regex match + end-sentence (legal abbrev safe) |
-| HIGH-2 | Reconcile **all** materiality/add-back instructions (no first-match-wins) |
-| HIGH-3 | Complete monetary numeric token grammar (space groups; no prefix truncation) |
+- deterministic `CovenantDefinition -> EvaluationPlan` planning;
+- explicit dependency DAGs with strict missing-dependency / cycle / orphan rejection;
+- `PlanStructureValidator` before binding;
+- `ContextValidator` after Stage 5F binding;
+- strict Stage 5D / Stage 5F artifact and content-hash verification before publication;
+- FLOW / AS_OF period semantics with undecidable membership propagated as `UNRESOLVED`;
+- materiality-floor filtering as an explicit evaluation node;
+- local high-precision `Decimal` execution (`prec=60`, `ROUND_HALF_EVEN`), no float;
+- no implicit FX conversion;
+- zero denominator = `ERROR`;
+- negative denominator = faithful calculation + `NEGATIVE_DENOMINATOR` diagnostic;
+- lazy springing activation subgraph execution;
+- deterministic result / calculation trace artifacts;
+- standalone replay command `halyk-evaluate`.
 
-Design freeze: `docs/stage6_evaluation_contract.md`
+Implementation map and donor provenance:
+`docs/stage6_evaluator_implementation.md`.
+
+## Validation
+
+GitHub Actions on Ubuntu 24.04 / Python 3.12 after the Stage 6 implementation:
+
+- `ruff format --check .` — pass;
+- `ruff check .` — pass;
+- `mypy src` — **245 source files, 0 issues**;
+- `pytest -q` — **779 passed, 22 skipped, 0 failed**.
+
+The same validation run installs both repository-supported optional stacks used by
+the full suite: `full` (Docling) and `retrieval-full`.
+
+The Linux CI run also exposed and closed an older cross-platform leakage-boundary
+bug: Windows-style aliases of quarantined paths are now normalized before
+allowlist/quarantine membership checks.
+
+## Source-faithful expectations still to reproduce on the public corpus
+
+The pre-flight freeze recorded the following expectations from the last known
+Stage 5F.3 public artifacts. These are **not re-claimed as a fresh Stage 6 public
+run until the gitignored artifacts/dataset are supplied and regenerated**:
+
+- Stage 5D definitions: 36;
+- Stage 5F structural READY / UNRESOLVED: 34 / 2;
+- expected numerically evaluable definitions with current source data: 29;
+- mixed currency must fail closed rather than invent FX.
+
+No `ground_truth.json`, answer key or training target is required for Stage 6.
 
 ## Pipeline map
 
@@ -26,17 +64,14 @@ Design freeze: `docs/stage6_evaluation_contract.md`
 | **5D** | What covenant definition/selectors/modifiers apply? |
 | **5E** | What trusted structured facts exist in authoritative sources? |
 | **5F** | What calculation-ready transaction/adjustment inputs feed Stage 6? |
-| **6 PRE-FLIGHT** | Close evaluation + materiality safety contracts |
-| **6** (next) | Covenant actuals / compliance (**not started**) |
-
-## Non-goals (hard stop)
-
-- No EvaluationPlanner / EvaluationExecutor / evaluate CLI
-- No Stage 7
-- No OCR glyph auto-correction
-- No push/merge until final Opus Stage 6 preflight signoff
+| **6** | What is the deterministic covenant actual / activation / compliance result? |
+| **7** (next) | How are Stages 3–6 wired into the real competition solver and submission contract? |
+| **8** | How does the end-to-end solver behave under adversarial/private-like mutations? |
+| **9** | Can a fresh environment reproduce the final submission deterministically? |
 
 ## Next
 
-Claude Opus 5 final targeted re-review of ONLY:
-HIGH-1, HIGH-2, HIGH-3.
+Implement Stage 7 real solver integration. Do not map `NOT_ACTIVATED` into the
+competition's binary submission status until that mapping is grounded in the
+case specification. Do not infer `evidence_txn_id` from largest / latest / closest
+transactions; it must be source- and decision-causal.
