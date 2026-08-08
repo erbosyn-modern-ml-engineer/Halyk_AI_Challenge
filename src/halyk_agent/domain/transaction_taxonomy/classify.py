@@ -16,10 +16,16 @@ _CREDIT_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
-# Interest income / credited interest is financing cash inflow, never covenant REVENUE.
+# Interest income — non-operating, never FINANCING_INFLOWS / REVENUE.
 _INTEREST_INCOME = re.compile(
-    r"\binterest\s+(?:income|credited|recovery|earned)\b|"
+    r"\binterest\s+(?:income|credited|earned)\b|"
     r"\b(?:treasury|deposit|current\s+account)\s+interest\b",
+    re.IGNORECASE,
+)
+
+# Interest expense reversal / rebate of prior interest expense.
+_INTEREST_EXPENSE_REVERSAL = re.compile(
+    r"\binterest\s+(?:rebate|recovery|true-up\s+credit|refund)\b",
     re.IGNORECASE,
 )
 
@@ -50,9 +56,9 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
         ),
     ),
     (
-        # Plain capital transfer to a subsidiary (status UNKNOWN until facts prove otherwise).
+        # Plain capital/asset transfer to a subsidiary — not borrower CAPEX spend.
         "CAPITAL_TRANSFER_SUBSIDIARY",
-        MetricCategory.CAPEX,
+        MetricCategory.CAPITAL_ASSET_TRANSFER,
         re.compile(
             r"(?:\btransfer(?:s|red)?\b|\btransfer\s+of\b).{0,80}\bsubsidiar",
             re.IGNORECASE,
@@ -225,11 +231,17 @@ class ClassificationHit:
 
 def _classify_credit_family(text: str) -> ClassificationHit | None:
     """Map refund/rebate/credit rows to originating expense family — never REVENUE."""
+    if _INTEREST_EXPENSE_REVERSAL.search(text):
+        return ClassificationHit(
+            status="CLASSIFIED",
+            category=MetricCategory.INTEREST_EXPENSE,
+            rule="INTEREST_EXPENSE_REVERSAL",
+        )
     if _INTEREST_INCOME.search(text):
         return ClassificationHit(
             status="CLASSIFIED",
-            category=MetricCategory.FINANCING_INFLOWS,
-            rule="INTEREST_INCOME_NOT_REVENUE",
+            category=MetricCategory.NON_OPERATING_INCOME,
+            rule="INTEREST_INCOME_NON_OPERATING",
         )
     if not _CREDIT_MARKERS.search(text):
         return None
@@ -274,7 +286,10 @@ def classify_description(description: str) -> ClassificationHit:
     # Interest income / credits/refunds/rebates are never covenant REVENUE.
     credit_hit = _classify_credit_family(text)
     if credit_hit is not None:
-        if credit_hit.rule == "INTEREST_INCOME_NOT_REVENUE":
+        if credit_hit.rule in {
+            "INTEREST_INCOME_NON_OPERATING",
+            "INTEREST_EXPENSE_REVERSAL",
+        }:
             return credit_hit
         if _CREDIT_MARKERS.search(text):
             if credit_hit.status == "UNRESOLVED" and _REVENUE_PRIMITIVES.search(text):
@@ -313,7 +328,7 @@ def classify_description(description: str) -> ClassificationHit:
                 )
             ]
         elif rule_ids >= {"CAPITAL_TRANSFER_SUBSIDIARY", "CAPEX"}:
-            strong_hits = [("CAPITAL_TRANSFER_SUBSIDIARY", MetricCategory.CAPEX)]
+            strong_hits = [("CAPITAL_TRANSFER_SUBSIDIARY", MetricCategory.CAPITAL_ASSET_TRANSFER)]
         # "leased line" is a lease product; prefer LEASE over UTILITIES(telecom).
         elif rule_ids >= {"LEASE", "UTILITIES"} and re.search(
             r"\bleased\s+line\b", text, re.IGNORECASE
