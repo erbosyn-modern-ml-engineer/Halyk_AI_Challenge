@@ -51,3 +51,17 @@ def test_reproduction_fails_on_submission_drift(tmp_path: Path) -> None:
     _run(right, run_id="b", submission_actual=1.1)
     with pytest.raises(ReproductionError):
         verify_reproduction_pair(left, right, tmp_path / "report")
+
+
+def test_reproduction_rejects_any_claimed_ground_truth_access(tmp_path: Path) -> None:
+    left = tmp_path / "a"
+    right = tmp_path / "b"
+    _run(left, run_id="a")
+    _run(right, run_id="b")
+    payload = json.loads((right / "pipeline_manifest.json").read_text(encoding="utf-8"))
+    payload["ground_truth_access"] = "read"
+    (right / "pipeline_manifest.json").write_text(
+        json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ReproductionError, match="ground-truth access"):
+        verify_reproduction_pair(left, right, tmp_path / "report")
