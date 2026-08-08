@@ -154,6 +154,7 @@ def _run(
     links: tuple[TransactionEntityLink, ...],
     definitions: tuple[CovenantDefinition, ...],
     facts: tuple[FactRecord, ...] = (),
+    fact_requirement_results=None,
 ):
     return run_transaction_taxonomy(
         ledger_rows=rows,
@@ -164,6 +165,7 @@ def _run(
         routing_manifest_hash="r" * 64,
         covenant_manifest_hash="k" * 64,
         facts_manifest_hash="f" * 64,
+        fact_requirement_results=fact_requirement_results,
     )
 
 

@@ -55,11 +55,19 @@ def test_interest_rebate_is_interest_expense_reversal() -> None:
 
 
 def test_corporate_income_tax_not_opex() -> None:
+    from halyk_agent.domain.transaction_taxonomy.membership import (
+        MEMBERSHIP_REASON_INCOME_TAX_EXCLUDED,
+        membership_reasons,
+    )
+
     members = selector_memberships(
         MetricCategory.TAXES, description="Corporate income tax instalment"
     )
     assert MetricCategory.TAXES in members
     assert MetricCategory.OPEX not in members
+    assert MEMBERSHIP_REASON_INCOME_TAX_EXCLUDED in membership_reasons(
+        MetricCategory.TAXES, description="Corporate income tax instalment"
+    )
 
 
 def test_advance_profit_tax_not_opex() -> None:

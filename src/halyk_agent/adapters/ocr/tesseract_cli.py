@@ -185,6 +185,27 @@ class TesseractCliOcrBackend:
                 temporary_bytes_written=tmp_bytes,
                 temporary_cleanup_ok=cleanup_ok,
             )
+        except RuntimeError as exc:
+            message = str(exc)
+            if message.startswith("OCR_UTF8_DECODE_FAILED"):
+                return OcrPageResult(
+                    request=request,
+                    status=OcrPageStatus.OCR_FAILED,
+                    failure_reason=OcrFailureReason.UTF8_DECODE_FAILED,
+                    message=message[:300],
+                    duration_ms=int((time.perf_counter() - started) * 1000),
+                    temporary_bytes_written=tmp_bytes,
+                    temporary_cleanup_ok=cleanup_ok,
+                )
+            return OcrPageResult(
+                request=request,
+                status=OcrPageStatus.OCR_FAILED,
+                failure_reason=OcrFailureReason.SUBPROCESS_FAILED,
+                message=f"{exc.__class__.__name__}: {message[:200]}",
+                duration_ms=int((time.perf_counter() - started) * 1000),
+                temporary_bytes_written=tmp_bytes,
+                temporary_cleanup_ok=cleanup_ok,
+            )
         except Exception as exc:
             return OcrPageResult(
                 request=request,
