@@ -998,7 +998,8 @@ _ONE_TIME_SECTION = re.compile(
 )
 
 _ONE_TIME_ROW = re.compile(
-    r"(?P<label>[^\n$]{5,160}?)"
+    # Allow a single soft line-break inside the label (source tables wrap).
+    r"(?P<label>[^\n$]{3,120}?(?:\n[^\n«\"“'$]{1,80})?)"
     r"(?:«|\"|“|'|)?"
     r"(?P<counterparty>[A-Za-zА-Яа-яЁёІі][\w .,&'!\-]{1,80}?"
     r"(?:LLP|JSC|TOO|Inc|АО|ТОО|Bureau|Associates))"
@@ -1097,11 +1098,73 @@ _PPE_ADDITIONS = re.compile(
     r"(?P<money>\$[\d,]+(?:\.\d{2})?)",
     re.IGNORECASE,
 )
-_PPE_NO_OTHER = re.compile(
-    r"(?:no\s+other\s+movements|there\s+were\s+no\s+(?:disposals|transfers|impairments|"
-    r"revaluations|foreign\s+exchange\s+movements))",
+
+# Movement families that must be independently known (value or zero-proven) before
+# solving additions from opening/closing/depreciation alone.
+_PPE_REQUIRED_ZERO_FAMILIES: tuple[str, ...] = (
+    "disposals",
+    "acquisitions",
+    "transfers",
+    "fx",
+    "impairment",
+    "revaluation",
+)
+
+_PPE_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
+    "disposals": ("disposal",),
+    "acquisitions": ("acquisition", "business combination"),
+    "transfers": ("transfer",),
+    "fx": ("foreign exchange", "fx", "translation"),
+    "impairment": ("impairment",),
+    "revaluation": ("revaluation",),
+    "other": ("other movement",),
+}
+
+_PPE_NO_OTHER_MOVEMENTS = re.compile(r"\bno\s+other\s+movements\b", re.IGNORECASE)
+_PPE_THERE_WERE_NO = re.compile(
+    r"there\s+were\s+no\s+([^.!\n]+)",
     re.IGNORECASE,
 )
+
+
+def _ppe_zero_proven_families(text: str) -> set[str]:
+    """Return movement families explicitly proven zero in source text."""
+    proven: set[str] = set()
+    if _PPE_NO_OTHER_MOVEMENTS.search(text):
+        # Explicit catch-all may close remaining non-addition movements.
+        proven.update(_PPE_REQUIRED_ZERO_FAMILIES)
+        proven.add("other")
+        return proven
+
+    lowered = text.casefold()
+    for family, aliases in _PPE_FAMILY_ALIASES.items():
+        if family == "other":
+            continue
+        # Standalone "no <family>" (not via unsafe OR wildcard).
+        for alias in aliases:
+            if re.search(rf"\bno\s+{re.escape(alias)}s?\b", lowered):
+                proven.add(family)
+                break
+
+    for match in _PPE_THERE_WERE_NO.finditer(text):
+        chunk = match.group(1).casefold()
+        for family, aliases in _PPE_FAMILY_ALIASES.items():
+            if family == "other":
+                continue
+            if any(alias in chunk for alias in aliases):
+                proven.add(family)
+    return proven
+
+
+def ppe_roll_forward_is_closed(text: str) -> bool:
+    """
+    True only when every non-addition movement family is proven zero/known.
+
+    'There were no disposals' proves disposals only — never all movements.
+    'There were no other movements' may close the remaining families.
+    """
+    proven = _ppe_zero_proven_families(text)
+    return set(_PPE_REQUIRED_ZERO_FAMILIES).issubset(proven)
 
 
 def has_incomplete_ppe_roll_forward(document: CanonicalDocument) -> bool:
@@ -1111,7 +1174,7 @@ def has_incomplete_ppe_roll_forward(document: CanonicalDocument) -> bool:
             continue
         if _PPE_ADDITIONS.search(text):
             continue
-        if _PPE_NO_OTHER.search(text):
+        if ppe_roll_forward_is_closed(text):
             continue
         return True
     return False
@@ -1172,8 +1235,8 @@ def extract_group_capex(
         if additions_m is not None:
             # Explicit additions already emitted above when present.
             continue
-        # Derive only when source proves other movements are zero.
-        if not _PPE_NO_OTHER.search(text):
+        # Derive only when every non-addition movement is independently proven.
+        if not ppe_roll_forward_is_closed(text):
             continue
         additions_val = closing[0] - opening[0] + depr[0]
         if additions_val <= 0:

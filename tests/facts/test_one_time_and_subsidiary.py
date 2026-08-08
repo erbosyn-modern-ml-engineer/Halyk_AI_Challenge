@@ -92,7 +92,13 @@ def test_group_capex_closed_roll_forward() -> None:
         "Net book value at the beginning of the year $100.00\n"
         "Depreciation charge for the year $20.00\n"
         "Net book value at the end of the year $130.00\n"
-        "There were no disposals, transfers, impairments or revaluations.\n"
+        "There were no disposals.\n"
+        "There were no acquisitions.\n"
+        "There were no transfers.\n"
+        "There were no foreign exchange movements.\n"
+        "There were no impairments.\n"
+        "There were no revaluations.\n"
+        "There were no other movements.\n"
     )
     doc = make_document(raw_text=text)
     hits = extract_group_capex(
@@ -104,3 +110,20 @@ def test_group_capex_closed_roll_forward() -> None:
     payload = hits[0].payload
     assert payload.derivation_type is GroupCapexDerivationType.PPE_ROLL_FORWARD  # type: ignore[union-attr]
     assert payload.amount.value == Decimal("50.00")  # type: ignore[union-attr]
+
+
+def test_group_capex_partial_no_disposals_not_closed() -> None:
+    text = (
+        "Property, plant and equipment\n"
+        "Net book value at the beginning of the year $100.00\n"
+        "Depreciation charge for the year $20.00\n"
+        "Net book value at the end of the year $130.00\n"
+        "There were no disposals, transfers, impairments or revaluations.\n"
+    )
+    doc = make_document(raw_text=text)
+    hits = extract_group_capex(
+        make_requirement(FactKind.GROUP_CAPEX, "ppe", domain=AuthorityDomain.GROUP_STRUCTURE),
+        doc,
+        AuthorityDomain.GROUP_STRUCTURE,
+    )
+    assert hits == []
