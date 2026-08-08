@@ -22,9 +22,7 @@ def _damaged(name: str = "Astana Tr?de Holding LLP") -> DamagedOwnershipEntity:
 
 
 def test_mid_token_damage_remains_one_wildcard_token() -> None:
-    assert possible_damaged_identity_match(
-        "Astana Tr?de Holding LLP", "Astana Trade Holding LLP"
-    )
+    assert possible_damaged_identity_match("Astana Tr?de Holding LLP", "Astana Trade Holding LLP")
     assert not possible_damaged_identity_match(
         "Astana Tr?de Holding LLP", "Astana Trade Holding JSC"
     )
