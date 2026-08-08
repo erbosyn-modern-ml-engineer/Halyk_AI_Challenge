@@ -150,3 +150,54 @@ This file records upstream sources reviewed for the Halyk Decision Agent.
   - `opencontractserver/utils/extraction_grounding.py`
   - `opencontractserver/constants/annotations.py`
 - Modifications: none in Stage 1 (Django application rejected; citation/span shapes are conceptual reference)
+
+## Stage 6 deterministic evaluator donor references
+
+Stage 6 does not add these projects as dependencies and does not vendor their
+framework code. The Halyk implementation is domain-specific clean-room code
+informed by the following pinned implementations.
+
+### Apache Hamilton
+
+- Repository: https://github.com/apache/hamilton
+- Upstream commit: `b0a2abd46ae30e6f05bafaecbb513ba19aae17a7`
+- License: Apache-2.0
+- Files inspected:
+  - `hamilton/graph.py`
+  - `hamilton/execution/graph_functions.py`
+- Halyk adaptation: dependency-DAG traversal, dependency-subgraph execution and
+  trace concepts. Halyk deliberately fails if any declared dependency is absent;
+  it does not reinterpret a missing dependency as an external input.
+
+### MetricFlow
+
+- Repository: https://github.com/dbt-labs/metricflow
+- Upstream commit: `65b9d4244fb79c6ff431fa8ed49fac3f435ab7f3`
+- License: Apache-2.0
+- Files inspected:
+  - `metricflow/dataflow/dataflow_plan.py`
+  - `metricflow/dataflow/builder/dataflow_plan_builder.py`
+- Halyk adaptation: separation of typed semantic covenant representation from an
+  immutable validated execution plan. No SQL/data-warehouse implementation was copied.
+
+### Capitec DSP Decision Engine
+
+- Repository: https://github.com/capitec/dsp-decision-engine
+- Upstream commit: `96889ca5f6b60711a692c93b9c38f02702afb5bf`
+- License: MIT
+- Files inspected:
+  - `decider/modules/expression.py`
+  - `decider/graphutil.py`
+  - `decider/executor.py`
+- Halyk adaptation: typed node/static/external-input concepts, deterministic
+  topological execution and compile/execute separation. Halyk uses typed Decimal
+  financial values rather than copying dataframe/expression runtime code.
+
+### OpenFisca Core — behavioral reference only
+
+- Repository: https://github.com/openfisca/openfisca-core
+- Upstream commit: `4f7f09833afe7e8b6856e8d7a3016c04a931009b`
+- License: AGPL-3.0
+- File inspected: `openfisca_core/periods/period_.py`
+- Use: behavioral reference for strict period/calculation semantics only.
+- **No OpenFisca source is copied, vendored or imported into Halyk.**
