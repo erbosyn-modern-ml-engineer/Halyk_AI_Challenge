@@ -5,7 +5,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate:
@@ -26,7 +26,23 @@ jobs:
       - name: Sync locked environment
         run: uv sync --frozen
 
-      - name: Ruff format
+      - name: Ruff format Stage 6 branch
+        if: github.event_name == 'push' && github.ref_name == 'stage-6/covenant-evaluator'
+        run: |
+          uv run ruff format .
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/halyk_agent/adapters/evaluation \
+                    src/halyk_agent/app/evaluation.py \
+                    src/halyk_agent/app/evaluation_cli.py \
+                    src/halyk_agent/domain/covenant_evaluation \
+                    tests/covenant_evaluation
+            git commit -m "style(evaluation): apply ruff formatting"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Ruff format check
         run: uv run ruff format --check .
 
       - name: Ruff lint
