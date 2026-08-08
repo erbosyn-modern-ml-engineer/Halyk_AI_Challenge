@@ -1,9 +1,10 @@
 """Causal transaction evidence selection for competition submissions.
 
-Evidence is intentionally conservative.  A ledger transaction is publishable only
-when it carries an authoritative Stage 5F treatment and removing that treatment
-changes the final binary verdict.  Merely being a large contributor or crossing a
-running aggregate threshold is never enough.
+Evidence is intentionally conservative. A ledger transaction is publishable only
+when an executable counterfactual intervention changes the final binary verdict.
+Authoritative Stage 5F treatments are replayed first; otherwise the engine performs
+a fixed-context leave-one-contributing-transaction-out replay. Mere size, recency
+or threshold-crossing order is never evidence.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from halyk_agent.domain.covenant_evaluation import (
     EvaluationValidationError,
 )
 from halyk_agent.domain.covenants.ast import MetricCategory
-from halyk_agent.domain.covenants.quantity import QuantityType
 from halyk_agent.domain.transaction_taxonomy.amounts import (
     metric_amount_from_source,
     sign_contract_for_category,
@@ -144,7 +144,6 @@ def _invert_event(
         )
 
     if event.event_type is AdjustmentEventType.CATEGORY_RECLASSIFICATION_REJECTED:
-        # Counterfactual to a source-backed rejection is the proposed reclassification.
         proposed = event.after.get("proposed_to")
         if not isinstance(proposed, str):
             return None
@@ -227,7 +226,6 @@ def _counterfactual_context(
         item for item in context.calculation_inputs if item.transaction_id == transaction_id
     ]
     if len(transaction_inputs) != 1:
-        # Never guess across duplicate/multi-input representations.
         return None
     current = transaction_inputs[0]
     classified_row = classified.get(transaction_id)
@@ -256,8 +254,6 @@ def _counterfactual_context(
             }
         )
 
-    # Restoration is deterministic and conservative.  Category is restored before
-    # amount/period fields because metric sign semantics depend on category.
     priority = {
         AdjustmentEventType.CATEGORY_RECLASSIFICATION_ACCEPTED: 0,
         AdjustmentEventType.CATEGORY_RECLASSIFICATION_REJECTED: 0,
@@ -287,14 +283,7 @@ def _scope_context_to_plan(
     context: EvaluationContext,
     plan: EvaluationPlan,
 ) -> EvaluationContext:
-    """Bind a shared competition context to one covenant's Stage 6 universe.
-
-    The production solver keeps all scenarios/definitions in one shared context.
-    ``EvaluationExecutor.execute`` intentionally validates a *single-plan* universe,
-    so causal counterfactual replay must narrow readiness/coverage/input ownership
-    before invoking it.  Without this boundary every candidate fails global
-    validation and evidence silently collapses to ``None``.
-    """
+    """Bind a shared competition context to one covenant's Stage 6 universe."""
 
     return context.model_copy(
         update={
@@ -317,6 +306,29 @@ def _scope_context_to_plan(
     )
 
 
+def _remove_transaction_context(
+    context: EvaluationContext,
+    *,
+    transaction_id: str,
+) -> EvaluationContext | None:
+    """Apply the exact fixed-context intervention ``transaction absent``.
+
+    This is used only after authoritative treatment replay finds no unique causal
+    treatment. Every Stage 6 input backed by the transaction is removed together;
+    all unrelated inputs and facts remain frozen.
+    """
+
+    if not any(item.transaction_id == transaction_id for item in context.calculation_inputs):
+        return None
+    return context.model_copy(
+        update={
+            "calculation_inputs": tuple(
+                item for item in context.calculation_inputs if item.transaction_id != transaction_id
+            )
+        }
+    )
+
+
 def select_causal_evidence(
     *,
     plan: EvaluationPlan,
@@ -325,21 +337,29 @@ def select_causal_evidence(
     adjustments: tuple[AdjustmentEvent, ...],
     classified: tuple[ClassifiedTransaction, ...],
 ) -> str | None:
-    """Return the unique treatment-causal transaction ID, otherwise ``None``.
+    """Return the unique transaction that causally determines the verdict.
 
-    Ratio/percent outputs intentionally publish no evidence because the competition
-    instructions explicitly say those keys are null/ignored.  For money/count
-    metrics, a candidate must have a source-backed Stage 5F adjustment and changing
-    that treatment must flip the binary verdict.
+    Evidence is resolved in two deterministic layers:
+
+    1. Authoritative-treatment replay. Undo source-backed Stage 5F
+       reclassification/inclusion/exclusion/correction events. If exactly one
+       transaction flips the verdict, that treatment-causal transaction wins.
+    2. Fixed-context leave-one-transaction-out replay. If no authoritative
+       treatment is uniquely causal, remove each currently contributing ledger
+       transaction and replay the same plan. Exactly one verdict-flipping
+       transaction is publishable; zero or multiple flips remain ``None``.
+
+    No largest/latest/threshold-crossing heuristic is used.
     """
 
-    if plan.metric_quantity_type in {QuantityType.RATIO, QuantityType.PERCENT}:
-        return None
     current_verdict = competition_verdict(result)
     if current_verdict is None:
         return None
 
-    candidate_ids = sorted(
+    executor = EvaluationExecutor()
+    classified_map = {row.transaction_id: row for row in classified}
+
+    treatment_ids = sorted(
         {
             event.transaction_id
             for event in adjustments
@@ -348,13 +368,8 @@ def select_causal_evidence(
             and event.event_type in _CAUSAL_EVENT_TYPES
         }
     )
-    if not candidate_ids:
-        return None
-
-    classified_map = {row.transaction_id: row for row in classified}
-    flips: list[str] = []
-    executor = EvaluationExecutor()
-    for transaction_id in candidate_ids:
+    treatment_flips: list[str] = []
+    for transaction_id in treatment_ids:
         counterfactual = _counterfactual_context(
             context,
             transaction_id=transaction_id,
@@ -363,14 +378,31 @@ def select_causal_evidence(
         )
         if counterfactual is None:
             continue
-        scoped_counterfactual = _scope_context_to_plan(counterfactual, plan)
         try:
-            candidate_result = executor.execute(plan, scoped_counterfactual)
+            candidate_result = executor.execute(plan, _scope_context_to_plan(counterfactual, plan))
         except EvaluationValidationError:
-            # An underdetermined counterfactual is not publishable evidence.
             continue
         counterfactual_verdict = competition_verdict(candidate_result)
         if counterfactual_verdict is not None and counterfactual_verdict is not current_verdict:
-            flips.append(transaction_id)
+            treatment_flips.append(transaction_id)
 
-    return flips[0] if len(flips) == 1 else None
+    if len(treatment_flips) == 1:
+        return treatment_flips[0]
+    if len(treatment_flips) > 1:
+        return None
+
+    candidate_ids = sorted(set(result.contributing_transaction_ids))
+    absence_flips: list[str] = []
+    for transaction_id in candidate_ids:
+        counterfactual = _remove_transaction_context(context, transaction_id=transaction_id)
+        if counterfactual is None:
+            continue
+        try:
+            candidate_result = executor.execute(plan, _scope_context_to_plan(counterfactual, plan))
+        except EvaluationValidationError:
+            continue
+        counterfactual_verdict = competition_verdict(candidate_result)
+        if counterfactual_verdict is not None and counterfactual_verdict is not current_verdict:
+            absence_flips.append(transaction_id)
+
+    return absence_flips[0] if len(absence_flips) == 1 else None
