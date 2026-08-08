@@ -35,11 +35,14 @@ def load_ledger_csv(path: Path) -> tuple[LedgerRow, ...]:
     """Load primary transaction ledger into typed rows."""
     if not path.is_file():
         raise RoutingIOError(f"ledger not found: {path}", code="MISSING_LEDGER")
-    return load_ledger_csv_bytes(path.read_bytes(), source_file=path.as_posix())
+    return load_ledger_csv_bytes(path.read_bytes(), source_file=path.name)
 
 
 def load_ledger_csv_bytes(data: bytes, *, source_file: str) -> tuple[LedgerRow, ...]:
-    """Parse ledger CSV bytes into typed rows."""
+    """Parse ledger CSV bytes into typed rows with path-independent provenance."""
+    stable_source_file = source_file.replace("\\", "/").rsplit("/", 1)[-1]
+    if not stable_source_file:
+        raise RoutingIOError("ledger source_file has no basename", code="LEDGER_SOURCE")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -71,7 +74,7 @@ def load_ledger_csv_bytes(data: bytes, *, source_file: str) -> tuple[LedgerRow, 
                 description=str(raw.get("description") or ""),
                 amount=str(raw["amount"]),
                 currency=str(raw["currency"]),
-                ledger_source_file=source_file,
+                ledger_source_file=stable_source_file,
             )
         )
     return tuple(rows)
