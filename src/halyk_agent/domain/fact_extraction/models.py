@@ -31,7 +31,18 @@ class FactKind(StrEnum):
     SUBSIDIARY_STATUS = "SUBSIDIARY_STATUS"
     FX_RATE = "FX_RATE"
     ONE_TIME_ADD_BACK = "ONE_TIME_ADD_BACK"
+    GROUP_CAPEX = "GROUP_CAPEX"
     TRANSACTION_TREATMENT = "TRANSACTION_TREATMENT"
+
+
+class SubsidiaryDerivationType(StrEnum):
+    DIRECT_QUOTE = "DIRECT_QUOTE"
+    SECURITY_PERIMETER_THRESHOLD = "SECURITY_PERIMETER_THRESHOLD"
+
+
+class GroupCapexDerivationType(StrEnum):
+    EXPLICIT = "EXPLICIT"
+    PPE_ROLL_FORWARD = "PPE_ROLL_FORWARD"
 
 
 class DerivationKind(StrEnum):
@@ -207,6 +218,17 @@ class SubsidiaryStatusPayload(BaseModel):
     kind: Literal[FactKind.SUBSIDIARY_STATUS] = FactKind.SUBSIDIARY_STATUS
     entity_name: NonEmptyStr
     status: SubsidiaryKind
+    derivation_type: SubsidiaryDerivationType = SubsidiaryDerivationType.DIRECT_QUOTE
+    observed_percentage: ExactDecimal | None = None
+    threshold_percentage: ExactDecimal | None = None
+    comparator: NonEmptyStr | None = None
+
+    @field_validator("observed_percentage", "threshold_percentage", mode="before")
+    @classmethod
+    def _no_float_pct(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        return reject_float_amount(value)
 
 
 class FxRatePayload(BaseModel):
@@ -249,7 +271,27 @@ class OneTimeAddBackPayload(BaseModel):
     kind: Literal[FactKind.ONE_TIME_ADD_BACK] = FactKind.ONE_TIME_ADD_BACK
     label: NonEmptyStr
     amount: MoneyAmount
+    counterparty: NonEmptyStr | None = None
+    period_label: NonEmptyStr | None = None
     materiality_note: NonEmptyStr | None = None
+
+
+class GroupCapexPayload(BaseModel):
+    """Group-level CAPEX / PPE additions — never a borrower-ledger substitute."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal[FactKind.GROUP_CAPEX] = FactKind.GROUP_CAPEX
+    amount: MoneyAmount
+    scope: Literal["GROUP"] = "GROUP"
+    derivation_type: GroupCapexDerivationType
+    period_label: NonEmptyStr | None = None
+    opening_amount: MoneyAmount | None = None
+    depreciation_amount: MoneyAmount | None = None
+    closing_amount: MoneyAmount | None = None
+    additions_amount: MoneyAmount | None = None
+    formula: NonEmptyStr | None = None
+    other_movements_proven_zero: bool = False
 
 
 class TransactionTreatmentPayload(BaseModel):
@@ -271,6 +313,7 @@ FactPayload = Annotated[
     | SubsidiaryStatusPayload
     | FxRatePayload
     | OneTimeAddBackPayload
+    | GroupCapexPayload
     | TransactionTreatmentPayload,
     Field(discriminator="kind"),
 ]

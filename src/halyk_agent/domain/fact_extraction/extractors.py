@@ -18,6 +18,8 @@ from halyk_agent.domain.fact_extraction.models import (
     FactKind,
     FactRequirement,
     FxRatePayload,
+    GroupCapexDerivationType,
+    GroupCapexPayload,
     MoneyAmount,
     OffLedgerAmountPayload,
     OneTimeAddBackPayload,
@@ -26,6 +28,7 @@ from halyk_agent.domain.fact_extraction.models import (
     RateSource,
     ReclassificationDisposition,
     RelatedPartyThresholdPayload,
+    SubsidiaryDerivationType,
     SubsidiaryKind,
     SubsidiaryStatusPayload,
     TransactionPeriodPayload,
@@ -765,6 +768,21 @@ _SUBSIDIARY = re.compile(
 )
 
 
+_SECURITY_PERIMETER_RULE = re.compile(
+    r"(?:доля\s+активов\s+в\s+залоге|pledged\s+assets?[^\n%]{0,40})"
+    r"[^\n.]{0,120}?(?:ниже|below|less\s+than)\s+"
+    r"(?P<thr>\d+(?:[.,]\d+)?)\s*%"
+    r"[^.]{0,220}?(?:неограниченн\w*|unrestricted)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_PLEDGED_ASSET_ROW = re.compile(
+    r"(?P<entity>[A-Za-z][\w .,&'\-]{2,80}?(?:LLP|JSC|TOO|Inc|АО|ТОО))"
+    r"\s+(?P<pct>\d+(?:[.,]\d+)?)\s*%",
+    re.IGNORECASE,
+)
+
+
 def extract_subsidiary_status(
     requirement: FactRequirement,
     document: CanonicalDocument,
@@ -789,7 +807,11 @@ def extract_subsidiary_status(
             if not entity:
                 continue
             body = text[match.start() : match.end()]
-            payload = SubsidiaryStatusPayload(entity_name=entity, status=status)
+            payload = SubsidiaryStatusPayload(
+                entity_name=entity,
+                status=status,
+                derivation_type=SubsidiaryDerivationType.DIRECT_QUOTE,
+            )
             out.append(
                 _candidate(
                     requirement=requirement,
@@ -802,6 +824,53 @@ def extract_subsidiary_status(
                     char_start=match.start(),
                     char_end=match.end(),
                     reason_code="DET_SUBSIDIARY",
+                )
+            )
+
+        # Security-perimeter threshold: pledged-assets % vs rule → RESTRICTED/UNRESTRICTED.
+        rule = _SECURITY_PERIMETER_RULE.search(text)
+        if rule is None:
+            continue
+        try:
+            thr = Decimal(rule.group("thr").replace(",", "."))
+        except Exception:
+            continue
+        if thr <= 0 or thr > Decimal("100"):
+            continue
+        rule_span = (rule.start(), rule.end())
+        for row in _PLEDGED_ASSET_ROW.finditer(text):
+            entity = re.sub(r"\s+", " ", row.group("entity")).strip(" ,.;")
+            if not is_meaningful_entity_name(entity):
+                continue
+            try:
+                pct = Decimal(row.group("pct").replace(",", "."))
+            except Exception:
+                continue
+            status = SubsidiaryKind.UNRESTRICTED if pct < thr else SubsidiaryKind.RESTRICTED
+            # Evidence quote covers row + rule (source-faithful derivation components).
+            start = min(row.start(), rule_span[0])
+            end = max(row.end(), rule_span[1])
+            quote = text[start:end][:800]
+            payload = SubsidiaryStatusPayload(
+                entity_name=entity,
+                status=status,
+                derivation_type=SubsidiaryDerivationType.SECURITY_PERIMETER_THRESHOLD,
+                observed_percentage=pct,
+                threshold_percentage=thr,
+                comparator="LT",
+            )
+            out.append(
+                _candidate(
+                    requirement=requirement,
+                    document=document,
+                    authority_domain=authority_domain,
+                    kind=FactKind.SUBSIDIARY_STATUS,
+                    payload=payload,
+                    quote=quote,
+                    page_number=page_number,
+                    char_start=start,
+                    char_end=end,
+                    reason_code="DET_SUBSIDIARY_SECURITY_PERIMETER",
                 )
             )
     return out
@@ -922,6 +991,23 @@ _ONE_TIME = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_ONE_TIME_SECTION = re.compile(
+    r"(?:разовые\s+статьи|разовыми\s+для\s+целей|единовременн\w*|"
+    r"one[-\s]?time|add[-\s]?back|корректировк\w*\s+EBITDA)",
+    re.IGNORECASE,
+)
+
+_ONE_TIME_ROW = re.compile(
+    r"(?P<label>[^\n$]{5,160}?)"
+    r"(?:«|\"|“|'|)?"
+    r"(?P<counterparty>[A-Za-zА-Яа-яЁёІі][\w .,&'!\-]{1,80}?"
+    r"(?:LLP|JSC|TOO|Inc|АО|ТОО|Bureau|Associates))"
+    r"(?:»|\"|”|'|)?"
+    r"[^\n$]{0,40}?"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+
 
 def extract_one_time_add_back(
     requirement: FactRequirement,
@@ -953,6 +1039,171 @@ def extract_one_time_add_back(
                     reason_code="DET_ONE_TIME",
                 )
             )
+
+        # Table-style one-time items (do NOT apply materiality floor here).
+        if not _ONE_TIME_SECTION.search(text):
+            continue
+        for match in _ONE_TIME_ROW.finditer(text):
+            money = parse_money(match.group("money"))
+            if money is None:
+                continue
+            # Skip the materiality threshold sentence itself.
+            label = re.sub(r"\s+", " ", match.group("label")).strip(" =;:-")
+            if re.search(r"не\s+менее|not\s+less|materiality|порог", label, re.IGNORECASE):
+                continue
+            if len(label) < 5:
+                continue
+            counterparty = re.sub(r"\s+", " ", match.group("counterparty")).strip(" ,.;")
+            body = text[match.start() : match.end()].strip()
+            payload = OneTimeAddBackPayload(
+                label=label[:200],
+                amount=MoneyAmount(value=money[0], currency=money[1]),
+                counterparty=counterparty or None,
+            )
+            out.append(
+                _candidate(
+                    requirement=requirement,
+                    document=document,
+                    authority_domain=authority_domain,
+                    kind=FactKind.ONE_TIME_ADD_BACK,
+                    payload=payload,
+                    quote=body[:400],
+                    page_number=page_number,
+                    char_start=match.start(),
+                    char_end=match.end(),
+                    reason_code="DET_ONE_TIME_TABLE_ROW",
+                )
+            )
+    return out
+
+
+_PPE_OPENING = re.compile(
+    r"net\s+book\s+value\s+at\s+the\s+beginning\s+of\s+the\s+year\s*"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+_PPE_DEPR = re.compile(
+    r"depreciation\s+charge\s+for\s+the\s+year\s*"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+_PPE_CLOSING = re.compile(
+    r"net\s+book\s+value\s+at\s+the\s+end\s+of\s+the\s+year\s*"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+_PPE_ADDITIONS = re.compile(
+    r"(?:additions|capital\s+expenditure|capex)\s*"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+_PPE_NO_OTHER = re.compile(
+    r"(?:no\s+other\s+movements|there\s+were\s+no\s+(?:disposals|transfers|impairments|"
+    r"revaluations|foreign\s+exchange\s+movements))",
+    re.IGNORECASE,
+)
+
+
+def has_incomplete_ppe_roll_forward(document: CanonicalDocument) -> bool:
+    """True when a PPE bridge shows opening/depr/closing but is not closed for CAPEX."""
+    for _page_number, text in page_text_slices(document):
+        if not (_PPE_OPENING.search(text) and _PPE_DEPR.search(text) and _PPE_CLOSING.search(text)):
+            continue
+        if _PPE_ADDITIONS.search(text):
+            continue
+        if _PPE_NO_OTHER.search(text):
+            continue
+        return True
+    return False
+
+
+def extract_group_capex(
+    requirement: FactRequirement,
+    document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
+) -> list[FactCandidate]:
+    """
+    Derive GROUP_CAPEX only from an explicit amount or a closed PPE roll-forward.
+
+    Incomplete bridges (missing additions / unproven other movements) yield nothing.
+    """
+    out: list[FactCandidate] = []
+    for page_number, text in page_text_slices(document):
+        # Explicit additions line preferred.
+        for match in _PPE_ADDITIONS.finditer(text):
+            money = parse_money(match.group("money"))
+            if money is None or money[0] <= 0:
+                continue
+            # Require PPE / NBV context on the page so segment CAPEX isn't grabbed blindly.
+            if not re.search(r"net\s+book\s+value|property,\s*plant", text, re.IGNORECASE):
+                continue
+            payload = GroupCapexPayload(
+                amount=MoneyAmount(value=money[0], currency=money[1]),
+                derivation_type=GroupCapexDerivationType.EXPLICIT,
+                additions_amount=MoneyAmount(value=money[0], currency=money[1]),
+                formula="EXPLICIT_ADDITIONS",
+            )
+            out.append(
+                _candidate(
+                    requirement=requirement,
+                    document=document,
+                    authority_domain=authority_domain,
+                    kind=FactKind.GROUP_CAPEX,
+                    payload=payload,
+                    quote=match.group(0)[:400],
+                    page_number=page_number,
+                    char_start=match.start(),
+                    char_end=match.end(),
+                    reason_code="DET_GROUP_CAPEX_EXPLICIT",
+                )
+            )
+
+        opening_m = _PPE_OPENING.search(text)
+        depr_m = _PPE_DEPR.search(text)
+        closing_m = _PPE_CLOSING.search(text)
+        additions_m = _PPE_ADDITIONS.search(text)
+        if not (opening_m and depr_m and closing_m):
+            continue
+        opening = parse_money(opening_m.group("money"))
+        depr = parse_money(depr_m.group("money"))
+        closing = parse_money(closing_m.group("money"))
+        if opening is None or depr is None or closing is None:
+            continue
+        if additions_m is not None:
+            # Explicit additions already emitted above when present.
+            continue
+        # Derive only when source proves other movements are zero.
+        if not _PPE_NO_OTHER.search(text):
+            continue
+        additions_val = closing[0] - opening[0] + depr[0]
+        if additions_val <= 0:
+            continue
+        start = min(opening_m.start(), depr_m.start(), closing_m.start())
+        end = max(opening_m.end(), depr_m.end(), closing_m.end())
+        payload = GroupCapexPayload(
+            amount=MoneyAmount(value=additions_val, currency=closing[1]),
+            derivation_type=GroupCapexDerivationType.PPE_ROLL_FORWARD,
+            opening_amount=MoneyAmount(value=opening[0], currency=opening[1]),
+            depreciation_amount=MoneyAmount(value=depr[0], currency=depr[1]),
+            closing_amount=MoneyAmount(value=closing[0], currency=closing[1]),
+            additions_amount=MoneyAmount(value=additions_val, currency=closing[1]),
+            formula="closing - opening + depreciation",
+            other_movements_proven_zero=True,
+        )
+        out.append(
+            _candidate(
+                requirement=requirement,
+                document=document,
+                authority_domain=authority_domain,
+                kind=FactKind.GROUP_CAPEX,
+                payload=payload,
+                quote=text[start:end][:600],
+                page_number=page_number,
+                char_start=start,
+                char_end=end,
+                reason_code="DET_GROUP_CAPEX_PPE_ROLL_FORWARD",
+            )
+        )
     return out
 
 
@@ -1069,6 +1320,7 @@ _EXTRACTORS: dict[FactKind, ExtractorFn] = {
     FactKind.SUBSIDIARY_STATUS: extract_subsidiary_status,
     FactKind.FX_RATE: extract_fx_rate,
     FactKind.ONE_TIME_ADD_BACK: extract_one_time_add_back,
+    FactKind.GROUP_CAPEX: extract_group_capex,
     FactKind.AMOUNT_CORRECTION: extract_amount_correction,
     FactKind.TRANSACTION_TREATMENT: extract_treatment,
 }

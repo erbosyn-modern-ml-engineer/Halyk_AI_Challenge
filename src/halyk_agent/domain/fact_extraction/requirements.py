@@ -283,6 +283,9 @@ def derive_fact_requirements(
                     "restricted",
                     "неограниченн",
                     "ограниченн",
+                    "периметр",
+                    "залог",
+                    "pledged",
                 ),
                 # Bare "групп"/"group" is NOT enough for model eligibility.
                 strong=(
@@ -292,6 +295,8 @@ def derive_fact_requirements(
                     "restricted",
                     "неограниченн",
                     "ограниченн",
+                    "периметр обеспечения",
+                    "pledged",
                 ),
                 cats=tuple(
                     sorted(
@@ -306,6 +311,34 @@ def derive_fact_requirements(
                 ),
             )
 
+        if MetricCategory.GROUP_CAPEX in categories:
+            add(
+                kind=FactKind.GROUP_CAPEX,
+                derivation=DerivationKind.SEMANTIC_REQUIRED,
+                domains=(AuthorityDomain.GROUP_STRUCTURE, AuthorityDomain.FINANCIAL_ADJUSTMENTS),
+                reason="GROUP_CAPEX_AMOUNT",
+                trigger="group_capex_selector",
+                cues=(
+                    "property, plant and equipment",
+                    "ppe",
+                    "net book value",
+                    "additions",
+                    "capex",
+                    "capital expenditure",
+                    "амортизац",
+                ),
+                # Only closed-bridge / explicit-additions language is model-eligible.
+                # Opening+depreciation+closing alone is incomplete and must stay ABSENT.
+                strong=(
+                    "additions",
+                    "no other movements",
+                    "there were no disposals",
+                    "there were no transfers",
+                    "group capex",
+                ),
+                cats=("GROUP_CAPEX",),
+            )
+
         if add_backs:
             add(
                 kind=FactKind.ONE_TIME_ADD_BACK,
@@ -313,8 +346,24 @@ def derive_fact_requirements(
                 domains=(AuthorityDomain.FINANCIAL_ADJUSTMENTS,),
                 reason="ONE_TIME_ADD_BACK",
                 trigger="one_time_add_backs_category",
-                cues=("one-time", "единовременн", "add-back", "add back", "скорректированн"),
-                strong=("one-time", "единовременн", "add-back", "add back"),
+                cues=(
+                    "one-time",
+                    "единовременн",
+                    "разов",
+                    "add-back",
+                    "add back",
+                    "скорректированн",
+                    "корректировк",
+                ),
+                strong=(
+                    "one-time",
+                    "единовременн",
+                    "разовые статьи",
+                    "разовыми",
+                    "add-back",
+                    "add back",
+                    "корректировки ebitda",
+                ),
                 cats=("ONE_TIME_ADD_BACKS",),
             )
 

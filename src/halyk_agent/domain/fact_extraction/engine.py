@@ -27,7 +27,10 @@ from halyk_agent.domain.fact_extraction.constants import (
     FACT_SCHEMA_VERSION,
     FACT_VALIDATOR_VERSION,
 )
-from halyk_agent.domain.fact_extraction.extractors import extract_candidates
+from halyk_agent.domain.fact_extraction.extractors import (
+    extract_candidates,
+    has_incomplete_ppe_roll_forward,
+)
 from halyk_agent.domain.fact_extraction.models import (
     DerivationKind,
     ExtractionMethod,
@@ -301,10 +304,16 @@ def _evaluate_model_eligibility(
     if not domain_docs:
         return False, "NO_AUTHORITY"
     # Strong cue + window + plausibility on at least one winning doc
+    saw_incomplete_ppe = False
     for domain, winning in domain_docs:
         for doc_id in sorted(winning):
             document = docs.get(doc_id)
             if document is None:
+                continue
+            if requirement.fact_kind is FactKind.GROUP_CAPEX and has_incomplete_ppe_roll_forward(
+                document
+            ):
+                saw_incomplete_ppe = True
                 continue
             if not _doc_has_strong_cue(requirement, document):
                 continue
@@ -317,6 +326,8 @@ def _evaluate_model_eligibility(
                 continue
             _ = domain
             return True, "MODEL_ELIGIBLE"
+    if saw_incomplete_ppe and requirement.fact_kind is FactKind.GROUP_CAPEX:
+        return False, "INCOMPLETE_PPE_ROLL_FORWARD"
     return False, "NO_STRONG_CUE_OR_WINDOW"
 
 
