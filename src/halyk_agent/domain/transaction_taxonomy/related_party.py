@@ -17,6 +17,8 @@ from halyk_agent.domain.transaction_taxonomy.models import (
     RelatedPartyStatus,
 )
 
+_DAMAGED_TOKEN_SENTINEL = "\ue000"
+
 
 @dataclass(frozen=True, slots=True)
 class QualifyingRelatedParty:
@@ -110,37 +112,49 @@ def damaged_qualifying_entities(
     return tuple(out)
 
 
+def _normalized_damaged_identity(
+    damaged_name: str,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Normalize a damaged name without letting punctuation split its damaged token."""
+
+    protected = damaged_name
+    for marker in ("?", "\ufffd"):
+        protected = protected.replace(marker, _DAMAGED_TOKEN_SENTINEL)
+    keys = normalize_legal_name_keys(protected)
+    tokens = tuple(token.replace(_DAMAGED_TOKEN_SENTINEL, "?") for token in keys.identity_tokens)
+    return keys.legal_form, tokens
+
+
 def possible_damaged_identity_match(damaged_name: str, candidate_name: str) -> bool:
-    """
-    Narrow wildcard match for explicitly corrupted tokens only.
+    """Narrow wildcard match for explicitly corrupted tokens only.
 
     Not edit-distance: legal form and every non-damaged token must match exactly;
-    only tokens containing corruption markers may vary.
+    only a token containing an explicit OCR corruption marker may vary. The marker
+    is protected during punctuation normalization so mid-token damage such as
+    ``Tr?de`` remains one token rather than becoming ``Tr`` / ``de``.
     """
     if not is_damaged_entity_name(damaged_name):
         return False
-    left = normalize_legal_name_keys(damaged_name)
+    left_legal_form, left_tokens = _normalized_damaged_identity(damaged_name)
     right = normalize_legal_name_keys(candidate_name)
-    if left.legal_form is None or right.legal_form is None:
+    if left_legal_form is None or right.legal_form is None:
         return False
-    if left.legal_form != right.legal_form:
+    if left_legal_form != right.legal_form:
         return False
-    left_tokens = left.identity_key.split()
-    right_tokens = right.identity_key.split()
+    right_tokens = right.identity_tokens
     if len(left_tokens) != len(right_tokens):
         return False
-    # Drop trailing legal-form token for structural compare (already checked).
-    if left_tokens[-1] == left.legal_form and right_tokens[-1] == right.legal_form:
+    if left_tokens[-1] == left_legal_form and right_tokens[-1] == right.legal_form:
         left_tokens = left_tokens[:-1]
         right_tokens = right_tokens[:-1]
     if len(left_tokens) != len(right_tokens) or not left_tokens:
         return False
     damaged_positions = 0
-    for lt, rt in zip(left_tokens, right_tokens, strict=True):
-        if "?" in lt or "\ufffd" in lt or "�" in lt:
+    for left_token, right_token in zip(left_tokens, right_tokens, strict=True):
+        if "?" in left_token:
             damaged_positions += 1
             continue
-        if lt != rt:
+        if left_token != right_token:
             return False
     return damaged_positions >= 1
 
@@ -171,7 +185,6 @@ def recover_unique_damaged_related_parties(
         identity_key, raw_name = next(iter(by_identity.items()))
         proposals.append((damaged, identity_key, raw_name))
 
-    # One candidate identity must not be used to repair two different damaged owners.
     candidate_counts: dict[tuple[str, str], int] = {}
     for damaged, identity_key, _raw_name in proposals:
         key = (damaged.scenario_id, identity_key)
@@ -198,11 +211,11 @@ def recover_unique_damaged_related_parties(
 def qualifying_related_parties(
     facts: tuple[FactRecord, ...],
 ) -> tuple[QualifyingRelatedParty, ...]:
-    """
-    Entities whose ownership meets scenario threshold.
+    """Entities whose ownership meets scenario threshold.
 
-    Comparator from Stage 5E source wording: \"X% or more\" / \"и более\" → >= .
-    Damaged entity names are excluded from the matchable qualifying set.
+    Comparator from Stage 5E source wording: "X% or more" / source-equivalent
+    phrasing is compiled as >=. Damaged entity names are excluded from the exact
+    matchable qualifying set.
     """
     by_scenario: dict[str, list[FactRecord]] = {}
     for fact in facts:
@@ -273,15 +286,14 @@ def resolve_related_party(
                 fact_ids=tuple(fid for m in matches for fid in m.fact_ids),
             )
     if len(matches) == 1:
-        m = matches[0]
+        matched = matches[0]
         return RelatedPartyDecision(
             status=RelatedPartyStatus.TRUE,
             basis=RelatedPartyBasis.OWNERSHIP_THRESHOLD,
-            matched_entity=m.entity_name,
-            fact_ids=m.fact_ids,
+            matched_entity=matched.entity_name,
+            fact_ids=matched.fact_ids,
         )
 
-    # Narrow UNKNOWN: only when counterparty could be the damaged qualifying entity.
     for damaged in damaged_entities:
         if damaged.scenario_id != scenario_id:
             continue

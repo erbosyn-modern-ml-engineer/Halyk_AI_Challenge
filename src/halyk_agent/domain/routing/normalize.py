@@ -112,40 +112,62 @@ def _preprocess(raw: str) -> tuple[str, list[CompanyAlias]]:
     return folded, aliases
 
 
+def _canonical_legal_form_token(token: str) -> str | None:
+    """Return the legal-form class for one compact token variant."""
+
+    stripped = token.strip(",").rstrip(".")
+    if stripped in _LEGAL_FORM_CANON:
+        return _LEGAL_FORM_CANON[stripped]
+    compact = stripped.replace(".", "")
+    return _LEGAL_FORM_CANON.get(compact)
+
+
+def _trim_comma_before_legal_form(tokens: tuple[str, ...]) -> tuple[tuple[str, ...], bool]:
+    """Ignore only a comma immediately before the legal-form token."""
+
+    if not tokens or not tokens[-1].endswith(","):
+        return tokens, False
+    cleaned = tokens[-1].rstrip(",")
+    if not cleaned:
+        return tokens[:-1], True
+    return (*tokens[:-1], cleaned), True
+
+
 def _extract_legal_form(
     tokens: tuple[str, ...],
 ) -> tuple[tuple[str, ...], str | None, bool]:
-    """
-    Peel a trailing legal-form token, including punctuation variants.
+    """Peel a legal-form token while preserving its identity class.
 
-    Safe equivalents (same form class only):
-      LLP / LLP. / L.L.P. / L.L.P
-      JSC / J.S.C. / J.S.C
-    Distinct forms (JSC vs LLP vs TOO) remain distinct.
+    Legal form may appear as a suffix or a prefix. Only same-class punctuation /
+    position variants are normalized; distinct legal forms remain distinct.
     """
     if not tokens:
         return tokens, None, False
 
-    last = tokens[-1]
-    # Exact canon token (already clean).
-    if last in _LEGAL_FORM_CANON:
-        return tokens[:-1], _LEGAL_FORM_CANON[last], False
+    # Existing/common suffix form: "Foo LLP", "Foo LLP.", "Foo L.L.P.".
+    suffix_form = _canonical_legal_form_token(tokens[-1])
+    if suffix_form is not None:
+        body, comma_normalized = _trim_comma_before_legal_form(tokens[:-1])
+        normalized = comma_normalized or tokens[-1] != suffix_form
+        return body, suffix_form, normalized
 
-    # Trailing period: "llp." → "llp"
-    stripped = last.rstrip(".")
-    if stripped in _LEGAL_FORM_CANON:
-        return tokens[:-1], _LEGAL_FORM_CANON[stripped], True
-
-    # Compact dotted single token: "l.l.p." / "j.s.c"
-    compact = last.replace(".", "")
-    if compact in _LEGAL_FORM_CANON:
-        return tokens[:-1], _LEGAL_FORM_CANON[compact], True
-
-    # Spaced dotted form after punctuation spacing: ("l.", "l.", "p.") → llp
+    # Spaced dotted suffix after punctuation spacing: ("l.", "l.", "p.").
     if len(tokens) >= 3:
-        tail = "".join(tok.rstrip(".") for tok in tokens[-3:])
+        tail = "".join(tok.strip(",").rstrip(".") for tok in tokens[-3:])
         if tail in _LEGAL_FORM_CANON:
-            return tokens[:-3], _LEGAL_FORM_CANON[tail], True
+            body, _ = _trim_comma_before_legal_form(tokens[:-3])
+            return body, _LEGAL_FORM_CANON[tail], True
+
+    # Prefix legal form is an ordering variant, not a different entity.
+    prefix_form = _canonical_legal_form_token(tokens[0])
+    if prefix_form is not None and len(tokens) > 1:
+        return tokens[1:], prefix_form, True
+
+    if len(tokens) >= 3:
+        head = "".join(tok.strip(",").rstrip(".") for tok in tokens[:3])
+        if head in _LEGAL_FORM_CANON and len(tokens) > 3:
+            return tokens[3:], _LEGAL_FORM_CANON[head], True
+
     return tokens, None, False
 
 
@@ -191,8 +213,7 @@ def normalize_legal_name(
     strip_suffixes: bool = False,
     record_aliases: bool = True,
 ) -> tuple[str, tuple[str, ...], tuple[CompanyAlias, ...]]:
-    """
-    Compatibility wrapper.
+    """Compatibility wrapper.
 
     Default (Stage 5B.1): returns identity_key (legal form preserved).
     strip_suffixes=True returns base_key only for diagnostics — never for ACCEPT.
