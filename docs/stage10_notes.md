@@ -1,1 +1,0 @@
-Stage 10 certifies reproducibility and public-corpus execution properties. It does not certify private-set accuracy. Any accepted runtime code change after `bae143f5807463572037f0400ae9c3a62fe5b093` requires re-running the relevant certification gates.
