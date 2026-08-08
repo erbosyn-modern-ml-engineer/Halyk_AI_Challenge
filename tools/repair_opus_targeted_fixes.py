@@ -81,9 +81,21 @@ source = source[:start] + replacement + source[end:]
 source = source.replace("r\"(?<![\\w,.'’`])\"", "r\"(?<![\\w,.'`])\"")
 write(rel, source)
 
-# Harden complete money lexer against `$5,OOO,000` shorter-prefix acceptance.
+# Harden complete money lexer against `$5,OOO,000` shorter-prefix acceptance
+# and keep strict mypy typing explicit for the new threshold helper.
 rel = "src/halyk_agent/domain/covenants/parse.py"
 source = read(rel)
+if "from decimal import Decimal\n" not in source:
+    source = source.replace(
+        "from datetime import date\n",
+        "from datetime import date\nfrom decimal import Decimal\n",
+        1,
+    )
+source = source.replace(
+    "def _coerce_threshold_number(raw: str):\n",
+    "def _coerce_threshold_number(raw: str) -> Decimal:\n",
+    1,
+)
 old = '''            if nxt < n and rest[nxt] == ",":
                 return _MoneyNumericParse(
                     "", _consume_malformed_money_tail(rest, 0), False
