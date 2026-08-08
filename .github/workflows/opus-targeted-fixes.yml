@@ -34,10 +34,11 @@ jobs:
       - name: Apply confirmed red-team fixes
         run: python tools/apply_opus_targeted_fixes.py
 
-      - name: Repair generated regression and suffix-money guards
+      - name: Repair generated regressions and source guards
         run: |
           python - <<'PY'
           from pathlib import Path
+          import textwrap
 
           test_path = Path("tests/solver/test_competitive_fallbacks.py")
           text = test_path.read_text(encoding="utf-8")
@@ -85,12 +86,23 @@ jobs:
 
 
           '''
-          # The replacement literal is indented by this workflow script; normalize it.
-          import textwrap
-          replacement = textwrap.dedent(replacement)
-          source = source[:start] + replacement + source[end:]
+          source = source[:start] + textwrap.dedent(replacement) + source[end:]
           source = source.replace("r\"(?<![\\w,.'’`])\"", "r\"(?<![\\w,.'`])\"")
           source_path.write_text(source, encoding="utf-8", newline="\n")
+
+          fallback_path = Path("src/halyk_agent/solver/fallbacks.py")
+          fallback = fallback_path.read_text(encoding="utf-8")
+          duplicate = (
+              "@dataclass(frozen=True, slots=True)\n"
+              "@dataclass(frozen=True, slots=True)\n"
+          )
+          if duplicate not in fallback:
+              raise SystemExit("generated duplicate fallback dataclass decorator not found")
+          fallback_path.write_text(
+              fallback.replace(duplicate, "@dataclass(frozen=True, slots=True)\n", 1),
+              encoding="utf-8",
+              newline="\n",
+          )
           PY
 
       - name: Normalize changed Python
