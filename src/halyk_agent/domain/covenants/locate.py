@@ -51,7 +51,8 @@ _KEYWORDS = (
 )
 
 
-def _join_document(document: CanonicalDocument) -> tuple[str, tuple[_DocCursor, ...]]:
+def join_document_text(document: CanonicalDocument) -> tuple[str, tuple[_DocCursor, ...]]:
+    """Join page texts with newlines; return (joined_text, page cursors)."""
     parts: list[str] = []
     cursors: list[_DocCursor] = []
     offset = 0
@@ -61,6 +62,10 @@ def _join_document(document: CanonicalDocument) -> tuple[str, tuple[_DocCursor, 
         parts.append(text)
         offset += len(text) + 1
     return "\n".join(parts), tuple(cursors)
+
+
+# Back-compat alias for internal call sites.
+_join_document = join_document_text
 
 
 def _map_global_to_page(cursors: tuple[_DocCursor, ...], global_offset: int) -> tuple[int, int]:
@@ -263,3 +268,47 @@ def formula_region_spans(
         global_start=located.global_start,
         global_end=located.global_end,
     )
+
+
+def find_quote_in_document(
+    document: CanonicalDocument,
+    *,
+    needle: str,
+) -> EvidenceSpan | None:
+    """Locate ``needle`` anywhere in the document (first page hit wins)."""
+    if not needle:
+        return None
+    joined, cursors = _join_document(document)
+    local = joined.find(needle)
+    if local < 0:
+        local = joined.casefold().find(needle.casefold())
+        if local >= 0:
+            needle = joined[local : local + len(needle)]
+    if local < 0:
+        norm_joined, idx_map = build_ws_map(joined)
+        norm_needle, _ = build_ws_map(needle)
+        if not norm_needle:
+            return None
+        pos = norm_joined.casefold().find(norm_needle.casefold())
+        if pos < 0:
+            return None
+        raw_start = idx_map[pos]
+        raw_end = idx_map[pos + len(norm_needle) - 1] + 1
+        local = raw_start
+        needle = joined[raw_start:raw_end]
+    page_number, page_start = _map_global_to_page(cursors, local)
+    page_cursor = next(c for c in cursors if c.page_number == page_number)
+    page_limit = page_cursor.page_start + len(page_cursor.page_text)
+    page_end_global = local + len(needle)
+    char_start = page_start
+    char_end = (
+        page_start + len(needle) if page_end_global <= page_limit else len(page_cursor.page_text)
+    )
+    if char_end <= char_start:
+        return None
+    return create_identity_span(
+        document,
+        page_number=page_number,
+        char_start=char_start,
+        char_end=char_end,
+    ).span

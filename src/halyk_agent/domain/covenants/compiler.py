@@ -335,6 +335,8 @@ def compile_covenant_cell(
                 kind=match.kind,
                 detail=match.detail,
                 evidence_span_ids=span_ids,
+                threshold=match.threshold,
+                applies_to_category=match.applies_to_category,
             )
         )
 

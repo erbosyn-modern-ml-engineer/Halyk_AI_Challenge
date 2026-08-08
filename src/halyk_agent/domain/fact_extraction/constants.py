@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-FACT_SCHEMA_VERSION = "halyk.facts.schema.v4"
-FACT_EXTRACTOR_VERSION = "halyk.facts.extractor.v4"
+FACT_SCHEMA_VERSION = "halyk.facts.schema.v5"
+FACT_EXTRACTOR_VERSION = "halyk.facts.extractor.v5"
 FACT_VALIDATOR_VERSION = "halyk.facts.validator.v4"
 FACT_REQUIREMENT_VERSION = "halyk.facts.requirements.v4"
-FACT_ALGORITHM_VERSION = "halyk.facts.algorithm.v4"
+FACT_ALGORITHM_VERSION = "halyk.facts.algorithm.v5"
 
 MODEL_GATEWAY_VERSION = "halyk.models.gateway.v3"
 MODEL_PROMPT_VERSION = "halyk.models.prompt.v3"

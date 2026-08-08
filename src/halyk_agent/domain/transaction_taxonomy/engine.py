@@ -56,6 +56,7 @@ from halyk_agent.domain.transaction_taxonomy.models import (
     DerivedCalculationInput,
     EntityScopeKind,
     FactConsumptionEntry,
+    InputPeriodSemantics,
     InputSourceKind,
     PeriodMembershipHint,
     RelatedPartyBasis,
@@ -105,6 +106,53 @@ def _parse_amount(raw: str) -> Decimal | None:
 def _hash_models(models: list[Any]) -> str:
     payload = [m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in models]
     return sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
+
+
+def hash_taxonomy_models(models: list[Any] | tuple[Any, ...]) -> str:
+    """Canonical content hash for Stage 5F artifact integrity (stable ordering assumed)."""
+    return _hash_models(list(models))
+
+
+def _flow_period_for_category(
+    definitions: tuple[CovenantDefinition, ...] | list[CovenantDefinition],
+    *,
+    scenario_id: str,
+    category: MetricCategory,
+) -> tuple[date | None, date | None]:
+    """Unique covenant flow interval bound to ``category`` in ``scenario_id``, else undecidable."""
+    periods: set[tuple[date, date]] = set()
+    for definition in definitions:
+        if definition.scenario_id != scenario_id:
+            continue
+        if not any(selector.category is category for selector in definition.selectors):
+            continue
+        start = definition.period.flow_start_date or definition.period.start_date
+        end = definition.period.flow_end_date or definition.period.end_date
+        if start is not None and end is not None:
+            periods.add((start, end))
+    if len(periods) == 1:
+        return next(iter(periods))
+    return None, None
+
+
+def _as_of_for_category(
+    definitions: tuple[CovenantDefinition, ...] | list[CovenantDefinition],
+    *,
+    scenario_id: str,
+    category: MetricCategory,
+) -> date | None:
+    """Unique covenant as-of date bound to ``category`` in ``scenario_id``, else undecidable."""
+    dates: set[date] = set()
+    for definition in definitions:
+        if definition.scenario_id != scenario_id:
+            continue
+        if not any(selector.category is category for selector in definition.selectors):
+            continue
+        if definition.period.as_of_date is not None:
+            dates.add(definition.period.as_of_date)
+    if len(dates) == 1:
+        return next(iter(dates))
+    return None
 
 
 def _abs_amount(value: Decimal | None) -> Decimal | None:
@@ -712,6 +760,20 @@ def run_transaction_taxonomy(
             if "severance" in (payload.label or "").casefold()
             else MetricCategory.ONE_TIME_ADD_BACKS
         )
+        as_of = payload.as_of_date
+        if as_of is None and category is MetricCategory.SEVERANCE_LIABILITY:
+            # Bind unique compiled covenant AS_OF when the fact payload omitted it.
+            as_of = _as_of_for_category(
+                definitions, scenario_id=fact.scenario_id, category=category
+            )
+        if category is MetricCategory.SEVERANCE_LIABILITY:
+            period_semantics = InputPeriodSemantics.AS_OF
+            flow_start, flow_end = None, None
+        else:
+            period_semantics = InputPeriodSemantics.FLOW
+            flow_start, flow_end = _flow_period_for_category(
+                definitions, scenario_id=fact.scenario_id, category=category
+            )
         input_id = deterministic_id("derived", fact.fact_id, payload.label or "off_ledger")
         derived_inputs.append(
             DerivedCalculationInput(
@@ -722,7 +784,10 @@ def run_transaction_taxonomy(
                 category=category,
                 amount=payload.amount.value,
                 currency=payload.amount.currency,
-                as_of_date=payload.as_of_date,
+                period_semantics=period_semantics,
+                as_of_date=as_of,
+                period_start=flow_start,
+                period_end=flow_end,
                 label=payload.label,
                 evidence_span_ids=fact.evidence_span_ids,
             )
@@ -776,6 +841,16 @@ def run_transaction_taxonomy(
             state["flags"].append("ONE_TIME_ADD_BACK_ATTACHED")
             _mark_fact(fact, "CONSUMED", "one-time add-back attached to unique ledger row")
             continue
+        flow_start = payload.period_start
+        flow_end = payload.period_end
+        if flow_start is None or flow_end is None:
+            bound_start, bound_end = _flow_period_for_category(
+                definitions,
+                scenario_id=fact.scenario_id,
+                category=MetricCategory.ONE_TIME_ADD_BACKS,
+            )
+            flow_start = flow_start or bound_start
+            flow_end = flow_end or bound_end
         input_id = deterministic_id("derived", fact.fact_id, payload.label)
         derived_inputs.append(
             DerivedCalculationInput(
@@ -786,6 +861,9 @@ def run_transaction_taxonomy(
                 category=MetricCategory.ONE_TIME_ADD_BACKS,
                 amount=payload.amount.value,
                 currency=payload.amount.currency,
+                period_semantics=InputPeriodSemantics.FLOW,
+                period_start=flow_start,
+                period_end=flow_end,
                 label=payload.label,
                 evidence_span_ids=fact.evidence_span_ids,
             )
@@ -795,6 +873,11 @@ def run_transaction_taxonomy(
     for fact in _facts_by_kind(accepted_facts, FactKind.GROUP_CAPEX):
         payload = fact.payload
         assert isinstance(payload, GroupCapexPayload)
+        flow_start, flow_end = _flow_period_for_category(
+            definitions,
+            scenario_id=fact.scenario_id,
+            category=MetricCategory.GROUP_CAPEX,
+        )
         input_id = deterministic_id("derived", fact.fact_id, "group_capex")
         derived_inputs.append(
             DerivedCalculationInput(
@@ -805,6 +888,9 @@ def run_transaction_taxonomy(
                 category=MetricCategory.GROUP_CAPEX,
                 amount=payload.amount.value,
                 currency=payload.amount.currency,
+                period_semantics=InputPeriodSemantics.FLOW,
+                period_start=flow_start,
+                period_end=flow_end,
                 label=payload.formula or "group_capex",
                 entity_scope=EntityScopeKind.GROUP,
                 evidence_span_ids=fact.evidence_span_ids,
@@ -1019,6 +1105,7 @@ def run_transaction_taxonomy(
                 amount_semantics=semantics,
                 sign_rule=sign_rule,
                 currency=state["effective_currency"],
+                period_semantics=InputPeriodSemantics.FLOW,
                 transaction_date=state["original_date"],
                 period_start=state["effective_period_start"],
                 period_end=state["effective_period_end"],
@@ -1053,6 +1140,16 @@ def run_transaction_taxonomy(
         derived_flags: list[str] = ["OFF_LEDGER"]
         if derived.category is MetricCategory.GROUP_CAPEX:
             derived_flags.append("GROUP_LEVEL_SOURCE")
+        if derived.period_semantics is InputPeriodSemantics.AS_OF:
+            txn_date = derived.as_of_date
+            p_start = None
+            p_end = None
+            as_of = derived.as_of_date
+        else:
+            txn_date = None
+            p_start = derived.period_start
+            p_end = derived.period_end
+            as_of = None
         calc_inputs.append(
             CalculationInput(
                 input_id=deterministic_id("calc-derived", derived.input_id),
@@ -1068,9 +1165,11 @@ def run_transaction_taxonomy(
                 amount_semantics=semantics,
                 sign_rule=sign_rule,
                 currency=derived.currency,
-                transaction_date=derived.as_of_date,
-                period_start=derived.as_of_date,
-                period_end=derived.as_of_date,
+                period_semantics=derived.period_semantics,
+                transaction_date=txn_date,
+                period_start=p_start,
+                period_end=p_end,
+                as_of_date=as_of,
                 related_party=derived.related_party_status,
                 entity_scope=derived.entity_scope,
                 subsidiary_status=SubsidiaryStatusKind.UNKNOWN,
@@ -1231,6 +1330,8 @@ def run_transaction_taxonomy(
     taxonomy_hash = _hash_models(list(classified_rows))
     calc_hash = _hash_models(list(calc_inputs))
     adj_hash = _hash_models(list(adjustments_sorted))
+    selector_coverage_hash = _hash_models(list(selector_coverage))
+    definition_readiness_hash = _hash_models(list(definition_readiness))
 
     manifest = TaxonomyManifest(
         schema_version=TAXONOMY_SCHEMA_VERSION,
@@ -1288,6 +1389,8 @@ def run_transaction_taxonomy(
         taxonomy_hash=taxonomy_hash,
         calculation_inputs_hash=calc_hash,
         adjustments_hash=adj_hash,
+        selector_coverage_hash=selector_coverage_hash,
+        definition_readiness_hash=definition_readiness_hash,
     )
 
     return TaxonomyReport(

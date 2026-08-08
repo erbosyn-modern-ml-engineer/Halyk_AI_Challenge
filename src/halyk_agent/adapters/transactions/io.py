@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,7 @@ from halyk_agent.domain.fact_extraction.engine import hash_fact_models
 from halyk_agent.domain.fact_extraction.models import FactRecord, FactRequirementResult
 from halyk_agent.domain.ids import sha256_text
 from halyk_agent.domain.routing.models import TransactionEntityLink
-from halyk_agent.domain.transaction_taxonomy.models import TaxonomyReport
+from halyk_agent.domain.transaction_taxonomy.models import TaxonomyManifest, TaxonomyReport
 
 
 class TransactionIOError(Exception):
@@ -112,6 +112,47 @@ def load_fact_evidence_spans(path: Path) -> tuple[EvidenceSpan, ...]:
             continue
         items.append(EvidenceSpan.model_validate_json(line))
     return tuple(items)
+
+
+def verify_taxonomy_readiness_hashes(
+    *,
+    taxonomy_manifest: dict[str, Any] | TaxonomyManifest,
+    selector_coverage: Sequence[Any],
+    definition_readiness: Sequence[Any],
+) -> None:
+    """
+    Fail closed when selector_coverage / definition_readiness diverge from manifest hashes.
+
+    Intended for Stage 6 loaders and integrity probes. Hashes are recomputed with the
+    same canonical model-dump convention used at Stage 5F publication.
+    """
+    from halyk_agent.domain.transaction_taxonomy.engine import hash_taxonomy_models
+
+    if isinstance(taxonomy_manifest, TaxonomyManifest):
+        expected_sel: str | None = taxonomy_manifest.selector_coverage_hash
+        expected_def: str | None = taxonomy_manifest.definition_readiness_hash
+    else:
+        raw_sel = taxonomy_manifest.get("selector_coverage_hash")
+        raw_def = taxonomy_manifest.get("definition_readiness_hash")
+        expected_sel = raw_sel if isinstance(raw_sel, str) else None
+        expected_def = raw_def if isinstance(raw_def, str) else None
+    if not expected_sel or not expected_def:
+        raise TransactionIOError(
+            "stage5f manifest missing selector_coverage_hash/definition_readiness_hash",
+            code="TAXONOMY_READINESS_HASH_MISSING",
+        )
+    actual_sel = hash_taxonomy_models(list(selector_coverage))
+    actual_def = hash_taxonomy_models(list(definition_readiness))
+    if actual_sel != expected_sel:
+        raise TransactionIOError(
+            "selector_coverage content hash does not match stage5f_manifest",
+            code="TAXONOMY_READINESS_HASH_MISMATCH",
+        )
+    if actual_def != expected_def:
+        raise TransactionIOError(
+            "definition_readiness content hash does not match stage5f_manifest",
+            code="TAXONOMY_READINESS_HASH_MISMATCH",
+        )
 
 
 def verify_fact_artifact_hashes(

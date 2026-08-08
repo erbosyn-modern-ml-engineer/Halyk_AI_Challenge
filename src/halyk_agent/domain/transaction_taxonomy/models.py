@@ -133,6 +133,17 @@ class PeriodMembershipHint(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class InputPeriodSemantics(StrEnum):
+    """
+    Whether a CalculationInput participates as a FLOW-period quantity or an AS_OF stock.
+
+    Derived from upstream fact/requirement/ledger semantics — never from source_kind alone.
+    """
+
+    FLOW = "FLOW"
+    AS_OF = "AS_OF"
+
+
 class MoneyValue(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -228,7 +239,10 @@ class DerivedCalculationInput(BaseModel):
     category: MetricCategory
     amount: ExactDecimal
     currency: NonEmptyStr
+    period_semantics: InputPeriodSemantics
     as_of_date: date | None = None
+    period_start: date | None = None
+    period_end: date | None = None
     label: NonEmptyStr | None = None
     related_party_status: RelatedPartyStatus = RelatedPartyStatus.UNKNOWN
     entity_scope: EntityScopeKind = EntityScopeKind.BORROWER
@@ -260,9 +274,11 @@ class CalculationInput(BaseModel):
     amount_semantics: AmountSemantics = AmountSemantics.SOURCE_SIGNED_FLOW
     sign_rule: SignRule = SignRule.EXPENSE_NEGATE_SOURCE
     currency: NonEmptyStr
+    period_semantics: InputPeriodSemantics
     transaction_date: date | None = None
     period_start: date | None = None
     period_end: date | None = None
+    as_of_date: date | None = None
     period_excluded: bool = False
     counterparty: NonEmptyStr | None = None
     related_party: RelatedPartyStatus
@@ -382,6 +398,8 @@ class TaxonomyManifest(BaseModel):
     taxonomy_hash: NonEmptyStr
     calculation_inputs_hash: NonEmptyStr
     adjustments_hash: NonEmptyStr
+    selector_coverage_hash: NonEmptyStr
+    definition_readiness_hash: NonEmptyStr
 
 
 class TaxonomyReport(BaseModel):
