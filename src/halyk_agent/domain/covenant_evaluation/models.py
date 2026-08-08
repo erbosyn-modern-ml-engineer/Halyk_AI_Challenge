@@ -97,7 +97,7 @@ class EvaluationNumber(BaseModel):
     zero_currency_identity: bool = False
 
     @model_validator(mode="after")
-    def _validate_currency(self) -> "EvaluationNumber":
+    def _validate_currency(self) -> EvaluationNumber:
         if self.quantity_type is QuantityType.MONEY:
             if self.currency is None and not (self.zero_currency_identity and self.value == 0):
                 raise ValueError(

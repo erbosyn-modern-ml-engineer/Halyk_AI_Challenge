@@ -328,16 +328,15 @@ class PlanStructureValidator:
                 )
             return
 
-        if kind is EvaluationNodeKind.DIVIDE:
-            if (
-                left_type is not right_type
-                or left_type not in {QuantityType.MONEY, QuantityType.RATIO}
-                or qtype is not QuantityType.RATIO
-            ):
-                raise EvaluationValidationError(
-                    "DIVIDE requires MONEY/MONEY or RATIO/RATIO operands",
-                    code="NODE_QUANTITY_TYPE_MISMATCH",
-                )
+        if kind is EvaluationNodeKind.DIVIDE and (
+            left_type is not right_type
+            or left_type not in {QuantityType.MONEY, QuantityType.RATIO}
+            or qtype is not QuantityType.RATIO
+        ):
+            raise EvaluationValidationError(
+                "DIVIDE requires MONEY/MONEY or RATIO/RATIO operands",
+                code="NODE_QUANTITY_TYPE_MISMATCH",
+            )
 
     @staticmethod
     def _topological_order(nodes: tuple[EvaluationNode, ...]) -> tuple[str, ...]:

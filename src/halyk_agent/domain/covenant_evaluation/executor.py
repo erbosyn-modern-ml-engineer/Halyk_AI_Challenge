@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Context, ROUND_HALF_EVEN, localcontext
+from decimal import ROUND_HALF_EVEN, Context, localcontext
 
 from halyk_agent.domain.transaction_taxonomy.models import CalculationInput
 

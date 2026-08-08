@@ -28,9 +28,7 @@ def input_matches_selector_strict(
     flags = set(inp.flags)
     if any(flag not in flags for flag in selector.include_flags):
         return False
-    if any(flag in flags for flag in selector.exclude_flags):
-        return False
-    return True
+    return not any(flag in flags for flag in selector.exclude_flags)
 
 
 def input_period_membership(
