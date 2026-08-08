@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from halyk_agent.domain.covenant_evaluation import (
     EvaluationPlan,
     EvaluationReport,
 )
+from halyk_agent.domain.covenant_evaluation.constants import DECIMAL_PRECISION
 from halyk_agent.domain.covenants.models import CovenantCompileFailure
 from halyk_agent.domain.transaction_taxonomy.models import AdjustmentEvent, ClassifiedTransaction
 from halyk_agent.solver.audit import RunFileAudit
@@ -32,9 +33,16 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def _competition_actual(value: Decimal) -> Decimal:
-    """Positive, two-decimal output value; never used for covenant comparison."""
+    """Positive, two-decimal output value; never used for covenant comparison.
 
-    return abs(value).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    Submission formatting owns an explicit Decimal context just like Stage 6.
+    Ambient process precision/rounding must never turn a valid large amount into
+    ``InvalidOperation`` or change its serialized value.
+    """
+
+    context = Context(prec=DECIMAL_PRECISION, rounding=ROUND_HALF_UP)
+    with localcontext(context):
+        return abs(value).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
 
 
 def _json_ready(document: SubmissionDocument) -> dict[str, Any]:
@@ -79,21 +87,22 @@ def build_final_submission(
 ) -> tuple[SubmissionDocument, tuple[dict[str, Any], ...]]:
     """Fill exactly the template universe; non-evaluable cells remain explicit nulls."""
 
-    try:
-        template = SubmissionDocument.model_validate(template_payload)
-    except Exception as exc:
-        raise SubmissionSchemaError(f"invalid submission template: {exc}") from exc
+    fallback_results = fallback_results or {}
+    template_answers = template_payload.get("answers")
+    if not isinstance(template_answers, dict):
+        raise SubmissionSchemaError("template answers must be an object")
+
+    template_keys: set[tuple[str, str]] = set()
+    for scenario_id, cells in template_answers.items():
+        if not isinstance(scenario_id, str) or not isinstance(cells, dict):
+            raise SubmissionSchemaError("invalid template answers shape")
+        for clause_id in cells:
+            if not isinstance(clause_id, str):
+                raise SubmissionSchemaError("invalid covenant ID in template")
+            template_keys.add((scenario_id, clause_id))
 
     result_map = {(item.scenario_id, item.clause_id): item for item in evaluation.results}
-    fallback_map = fallback_results or {}
-    plan_map: dict[tuple[str, str], EvaluationPlan] = {
-        (item.scenario_id, item.clause_id): item for item in evaluation.plans
-    }
-    template_keys = {
-        (scenario_id, clause_id)
-        for scenario_id, cells in template.answers.items()
-        for clause_id in cells
-    }
+    plan_map = {(item.scenario_id, item.clause_id): item for item in evaluation.plans}
     result_keys = set(result_map)
     plan_keys = set(plan_map)
     if result_keys != plan_keys:
@@ -116,9 +125,10 @@ def build_final_submission(
 
     answers: dict[str, dict[str, CovenantCell]] = {}
     unresolved: list[dict[str, Any]] = []
-    for scenario_id, template_cells in template.answers.items():
+    for scenario_id, cells in template_answers.items():
         answers[scenario_id] = {}
-        for clause_id in template_cells:
+        assert isinstance(cells, dict)
+        for clause_id in cells:
             key = (scenario_id, clause_id)
             if key not in result_map:
                 failure = failure_map[key]
@@ -136,91 +146,60 @@ def build_final_submission(
                 continue
             strict_result = result_map[key]
             plan = plan_map[key]
-            result = strict_result
+            selected = strict_result
             used_fallback = False
-            verdict = competition_verdict(result)
-            if (verdict is None or result.actual is None) and key in fallback_map:
-                result = fallback_map[key]
-                verdict = competition_verdict(result)
-                used_fallback = verdict is not None and result.actual is not None
-            if verdict is None or result.actual is None:
+            if key in fallback_results:
+                selected = fallback_results[key]
+                used_fallback = True
+
+            status, actual_number = competition_verdict(plan, selected)
+            if status is None or actual_number is None:
                 answers[scenario_id][clause_id] = CovenantCell()
                 unresolved.append(
                     {
                         "scenario_id": scenario_id,
                         "covenant_id": clause_id,
-                        "evaluation_status": strict_result.status.value,
-                        "activation_state": strict_result.activation_state.value,
-                        "reason_codes": [issue.code for issue in strict_result.issues],
+                        "evaluation_status": selected.status.value,
+                        "activation_state": selected.activation_state.value,
+                        "reason_codes": [issue.code for issue in selected.issues],
                     }
                 )
                 continue
 
-            evidence = None
+            evidence: str | None = None
             if not used_fallback:
                 evidence = select_causal_evidence(
                     plan=plan,
-                    result=result,
+                    result=selected,
                     context=context,
                     adjustments=adjustments,
                     classified=classified,
                 )
+
             answers[scenario_id][clause_id] = CovenantCell(
-                status=verdict,
-                actual=_competition_actual(result.actual.value),
+                status=status,
+                actual=_competition_actual(actual_number.value),
                 evidence_txn_id=evidence,
             )
 
     document = SubmissionDocument(
-        team=team if team is not None else template.team,
-        contact_email=contact_email if contact_email is not None else template.contact_email,
-        model=model_name if model_name is not None else template.model,
+        team=team or str(template_payload.get("team") or ""),
+        contact_email=contact_email or str(template_payload.get("contact_email") or ""),
+        model=model_name or str(template_payload.get("model") or ""),
         answers=answers,
     )
-    if set(document.answers) != set(template.answers):
-        raise SubmissionSchemaError("submission scenario keys differ from template")
-    for scenario_id in template.answers:
-        if set(document.answers[scenario_id]) != set(template.answers[scenario_id]):
-            raise SubmissionSchemaError(
-                f"submission covenant keys differ from template for {scenario_id}"
-            )
     return document, tuple(unresolved)
 
 
 def write_final_submission(
+    path: Path,
     document: SubmissionDocument,
-    output_dir: Path,
     *,
-    audit: RunFileAudit,
-    unresolved: tuple[dict[str, Any], ...] = (),
-) -> dict[str, Path]:
-    """Publish deterministic JSON plus unresolved diagnostics into a staged directory."""
+    file_audit: RunFileAudit,
+) -> None:
+    """Write the validated template-shaped final submission atomically."""
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    submission_path = output_dir / "submission.json"
     payload = _json_ready(document)
-    text = (
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=False,
-            allow_nan=False,
-        )
-        + "\n"
-    )
-    _atomic_write(submission_path, text)
-    audit.record(
-        submission_path,
-        component="submission",
-        purpose="submission_write",
-        data=text.encode("utf-8"),
-    )
-    unresolved_path = output_dir / "unresolved_cells.jsonl"
-    unresolved_text = "\n".join(
-        json.dumps(item, ensure_ascii=False, sort_keys=True) for item in unresolved
-    )
-    if unresolved_text:
-        unresolved_text += "\n"
-    _atomic_write(unresolved_path, unresolved_text)
-    return {"submission": submission_path, "unresolved": unresolved_path}
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    _atomic_write(path, text)
+    file_audit.record_write(path)
