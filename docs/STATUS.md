@@ -1,77 +1,89 @@
 # Status
 
-Current stage: **6 — Deterministic Covenant Evaluator**
-Stage status: **IMPLEMENTED on branch** `stage-6/covenant-evaluator`
-Source: final materiality root-closure @ `86bb9908b789a9026c64a5d2a09d95b431d242ee`
+Current branch: `stage-7/solver-integration`
 
-## Stage 6 implementation
+Current engineering state: **Stages 6, 7 and 8 implemented; Stage 9 reproduction tooling implemented.**
 
-The pre-flight contract is now executable code. Stage 6 provides:
+Base: final Stage 6 pre-flight closure @ `86bb9908b789a9026c64a5d2a09d95b431d242ee`.
 
-- deterministic `CovenantDefinition -> EvaluationPlan` planning;
-- explicit dependency DAGs with strict missing-dependency / cycle / orphan rejection;
-- `PlanStructureValidator` before binding;
-- `ContextValidator` after Stage 5F binding;
-- strict Stage 5D / Stage 5F artifact and content-hash verification before publication;
-- FLOW / AS_OF period semantics with undecidable membership propagated as `UNRESOLVED`;
-- materiality-floor filtering as an explicit evaluation node;
-- local high-precision `Decimal` execution (`prec=60`, `ROUND_HALF_EVEN`), no float;
-- no implicit FX conversion;
-- zero denominator = `ERROR`;
-- negative denominator = faithful calculation + `NEGATIVE_DENOMINATOR` diagnostic;
-- lazy springing activation subgraph execution;
-- deterministic result / calculation trace artifacts;
-- standalone replay command `halyk-evaluate`.
+## Stage 6 — deterministic covenant evaluator
 
-Implementation map and donor provenance:
-`docs/stage6_evaluator_implementation.md`.
+Implemented:
 
-## Validation
+- typed `CovenantDefinition -> EvaluationPlan` planning;
+- strict DAG / type / modifier validation;
+- Stage 5F context validation and artifact-hash binding;
+- FLOW / AS_OF period semantics;
+- materiality-floor evaluation nodes;
+- local Decimal context (`prec=60`, `ROUND_HALF_EVEN`), no float;
+- no implicit FX;
+- deterministic calculation trace;
+- springing activation while still computing the main metric required by the competition contract.
 
-GitHub Actions on Ubuntu 24.04 / Python 3.12 after the Stage 6 implementation:
+Stage 6 remains strict/source-faithful. It does not use Stage 8 competitive fallbacks.
 
-- `ruff format --check .` — pass;
-- `ruff check .` — pass;
-- `mypy src` — **245 source files, 0 issues**;
-- `pytest -q` — **779 passed, 22 skipped, 0 failed**.
+## Stage 7 — real competition solver integration
 
-The same validation run installs both repository-supported optional stacks used by
-the full suite: `full` (Docling) and `retrieval-full`.
+Implemented production path:
 
-The Linux CI run also exposed and closed an older cross-platform leakage-boundary
-bug: Windows-style aliases of quarantined paths are now normalized before
-allowlist/quarantine membership checks.
+`sanitized manifest -> audited source copies -> parallel FAST parse -> selective OCR -> routing -> authority -> covenant compile -> fact extraction -> Stage 5F -> Stage 6 -> exact submission adapter`
 
-## Source-faithful expectations still to reproduce on the public corpus
+Important competition-contract closures from `CASE.ru.md`:
 
-The pre-flight freeze recorded the following expectations from the last known
-Stage 5F.3 public artifacts. These are **not re-claimed as a fresh Stage 6 public
-run until the gitignored artifacts/dataset are supplied and regenerated**:
+- submission status is exactly `COMPLIANT` / `BREACH`;
+- `actual` is always the main covenant metric, including inactive springing covenants;
+- inactive springing covenant maps to submission `COMPLIANT` only after the main actual is computed;
+- `evidence_txn_id` is causal only; largest/latest/threshold-crossing heuristics are forbidden;
+- final submission `actual` is positive magnitude and rounded only in the submission layer.
 
-- Stage 5D definitions: 36;
-- Stage 5F structural READY / UNRESOLVED: 34 / 2;
-- expected numerically evaluable definitions with current source data: 29;
-- mixed currency must fail closed rather than invent FX.
+The solver reads only sanitized allowlisted paths. `ground_truth.json` is neither required nor read.
 
-No `ground_truth.json`, answer key or training target is required for Stage 6.
+## Stage 8 — bounded competitive fallbacks
 
-## Pipeline map
+Strict Stage 6 output is preserved separately. Stage 8 is an explicitly labeled competition layer used only for strict non-resolved cells because a blank scores the same as an incorrect answer.
 
-| Stage | Question |
-|-------|----------|
-| **5B** | Which scenario owns each ledger row? |
-| **5C** | What type is it, and is it authoritative for a fact domain? |
-| **5D** | What covenant definition/selectors/modifiers apply? |
-| **5E** | What trusted structured facts exist in authoritative sources? |
-| **5F** | What calculation-ready transaction/adjustment inputs feed Stage 6? |
-| **6** | What is the deterministic covenant actual / activation / compliance result? |
-| **7** (next) | How are Stages 3–6 wired into the real competition solver and submission contract? |
-| **8** | How does the end-to-end solver behave under adversarial/private-like mutations? |
-| **9** | Can a fresh environment reproduce the final submission deterministically? |
+Public-corpus fresh run before fallbacks:
+
+- 36 covenant cells;
+- strict Stage 6: 29 resolved / 7 unresolved / 0 errors;
+- Stage 5F after narrow damaged-related-party recovery: 35 READY / 1 UNRESOLVED;
+- source reads: 204;
+- fact extraction model calls: 0.
+
+Bounded public-corpus fallbacks:
+
+1. **EUR/USD settlement-rate fallback** — derives the unique source-backed settlement ratio when exactly one non-conflicting ratio exists. On the supplied public corpus this ratio is `1.16`. Strict Stage 6 still refuses cross-scenario FX generalization; only the competitive fallback uses it.
+2. **P5 GROUP_CAPEX fallback** — reconstructs the Note 7 PPE roll-forward residual only when opening NBV, depreciation, closing NBV and zero disposals are source-backed and no competing movement class is named. Public residual: `21,847,362.55 USD`.
+
+The public end-to-end competitive run fills all 36 template cells. Fallback outputs are separately diagnosable in `fallback_cells.jsonl` and must not be described as strict/source-authoritative Stage 6 results.
+
+## Stage 9 — fresh-run reproduction
+
+Implemented:
+
+- runtime-path-independent dataset identity;
+- runtime-duration-independent parsed input identity;
+- `halyk-agent reproduce-compare` for two independent completed runs;
+- byte comparison of submission and fallback diagnostics;
+- stable pipeline-manifest comparison excluding the intentional `run_id` field;
+- mandatory `ground_truth_access == none` check.
+
+Before the final lineage-normalization patch, two independent public runs already produced byte-identical submission and fallback diagnostics. The post-normalization full duplicate run still needs one successful two-run execution in a fresh environment before claiming full end-to-end lineage determinism.
+
+## Current quality gate
+
+GitHub Actions / Ubuntu 24.04 / Python 3.12:
+
+- Ruff format: pass;
+- Ruff lint: pass;
+- mypy: **251 source files, 0 issues**;
+- pytest: **789 passed, 22 skipped, 0 failed**.
+
+The CI workflow is read-only and installs the repository's `full` and `retrieval-full` extras.
 
 ## Next
 
-Implement Stage 7 real solver integration. Do not map `NOT_ACTIVATED` into the
-competition's binary submission status until that mapping is grounded in the
-case specification. Do not infer `evidence_txn_id` from largest / latest / closest
-transactions; it must be source- and decision-causal.
+1. Run two independent post-lineage public solves and `reproduce-compare`.
+2. Run one final fresh public-corpus submission reproduction from the branch HEAD.
+3. Hand the finished branch to Claude Opus 5 for red-team review.
+4. Do not merge to `main` until red-team findings are triaged.
