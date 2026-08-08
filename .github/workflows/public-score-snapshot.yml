@@ -1,0 +1,25 @@
+name: public-score-snapshot
+
+on:
+  push:
+    branches:
+      - tmp/public-score-snapshot
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack source
+        run: |
+          tar --exclude=.git --exclude=.venv -czf /tmp/halyk-main-source.tar.gz .
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: halyk-main-source
+          path: /tmp/halyk-main-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
