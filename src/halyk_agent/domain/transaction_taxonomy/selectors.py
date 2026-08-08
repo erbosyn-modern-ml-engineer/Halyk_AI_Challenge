@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from halyk_agent.domain.covenants.ast import MetricCategory, TransactionSelector
 from halyk_agent.domain.covenants.models import CovenantDefinition
+from halyk_agent.domain.fact_extraction.models import FactRequirementResult
 from halyk_agent.domain.transaction_taxonomy.models import (
     CalculationInput,
     DefinitionReadinessEntry,
@@ -11,6 +12,11 @@ from halyk_agent.domain.transaction_taxonomy.models import (
     SelectorCoverageEntry,
     SelectorReadinessStatus,
     SubsidiaryStatusKind,
+)
+from halyk_agent.domain.transaction_taxonomy.selector_dependencies import (
+    SelectorSourceDependency,
+    fact_source_complete_for_selector,
+    selector_source_dependency,
 )
 
 
@@ -80,7 +86,10 @@ def _selector_readiness(
     scenario_inputs: list[CalculationInput],
     group_capex_unresolved: set[str],
     unrestricted_unresolved: set[str],
+    requirement_results: tuple[FactRequirementResult, ...] | None,
 ) -> tuple[SelectorReadinessStatus, str]:
+    dep = selector_source_dependency(selector)
+
     if selector.category is MetricCategory.GROUP_CAPEX:
         if definition.scenario_id in group_capex_unresolved:
             return (
@@ -88,6 +97,15 @@ def _selector_readiness(
                 "GROUP_CAPEX_OPERAND_UNRESOLVED",
             )
         if match_count == 0:
+            if not fact_source_complete_for_selector(
+                scenario_id=definition.scenario_id,
+                selector=selector,
+                requirement_results=requirement_results,
+            ):
+                return (
+                    SelectorReadinessStatus.UNRESOLVED,
+                    "UNRESOLVED_SOURCE_QUALITY",
+                )
             return SelectorReadinessStatus.TRUE_ZERO, "NO_GROUP_CAPEX_INPUTS"
         return SelectorReadinessStatus.READY, "OK"
 
@@ -98,28 +116,41 @@ def _selector_readiness(
                 "UNRESTRICTED_SUBSIDIARY_STATUS_UNKNOWN",
             )
         if match_count == 0:
+            if not fact_source_complete_for_selector(
+                scenario_id=definition.scenario_id,
+                selector=selector,
+                requirement_results=requirement_results,
+            ):
+                return (
+                    SelectorReadinessStatus.UNRESOLVED,
+                    "UNRESOLVED_SOURCE_QUALITY",
+                )
             return SelectorReadinessStatus.TRUE_ZERO, "NO_UNRESTRICTED_TRANSFER_INPUTS"
         return SelectorReadinessStatus.READY, "OK"
 
-    if selector.category is MetricCategory.ONE_TIME_ADD_BACKS:
-        # Source-dependent selector: never assert TRUE_ZERO from empty OCR/partial source.
-        if match_count == 0:
-            return (
-                SelectorReadinessStatus.UNRESOLVED,
-                "UNRESOLVED_SOURCE_QUALITY",
-            )
-        return SelectorReadinessStatus.READY, "OK"
-
-    if selector.related_party_only:
+    if selector.related_party_only or dep is SelectorSourceDependency.RELATED_PARTY_IDENTITY:
         unknowns = sum(1 for i in scenario_inputs if i.related_party is RelatedPartyStatus.UNKNOWN)
         if unknowns and match_count == 0:
-            # Unknown identities may hide related-party payments.
             return (
                 SelectorReadinessStatus.UNRESOLVED,
                 "RELATED_PARTY_IDENTITY_UNKNOWN",
             )
 
     if match_count == 0:
+        if dep in {
+            SelectorSourceDependency.FACT_ONLY,
+            SelectorSourceDependency.FACT_AUGMENTED,
+            SelectorSourceDependency.GROUP_SOURCE,
+            SelectorSourceDependency.SUBSIDIARY_STATUS,
+        } and not fact_source_complete_for_selector(
+            scenario_id=definition.scenario_id,
+            selector=selector,
+            requirement_results=requirement_results,
+        ):
+            return (
+                SelectorReadinessStatus.UNRESOLVED,
+                "UNRESOLVED_SOURCE_QUALITY",
+            )
         return SelectorReadinessStatus.TRUE_ZERO, "NO_MATCHING_INPUTS"
     return SelectorReadinessStatus.READY, "OK"
 
@@ -130,6 +161,7 @@ def build_selector_coverage(
     *,
     group_capex_unresolved: set[str] | None = None,
     unrestricted_unresolved: set[str] | None = None,
+    requirement_results: tuple[FactRequirementResult, ...] | None = None,
 ) -> tuple[SelectorCoverageEntry, ...]:
     group_unres = group_capex_unresolved or set()
     unres_sub = unrestricted_unresolved or set()
@@ -145,6 +177,7 @@ def build_selector_coverage(
                 scenario_inputs=scenario_inputs,
                 group_capex_unresolved=group_unres,
                 unrestricted_unresolved=unres_sub,
+                requirement_results=requirement_results,
             )
             entries.append(
                 SelectorCoverageEntry(
