@@ -268,18 +268,7 @@ class EvaluationExecutor:
                         contributing_input_ids=activation_result.contributing_input_ids,
                         inputs_by_id=inputs_by_id,
                     )
-                if not active:
-                    trace = _trace(plan, order, nodes, results)
-                    return self._base_result(
-                        plan,
-                        status=EvaluationStatus.NOT_ACTIVATED,
-                        activation_state=ActivationState.INACTIVE,
-                        issues=activation_issue_tuple,
-                        trace=trace,
-                        contributing_input_ids=activation_result.contributing_input_ids,
-                        inputs_by_id=inputs_by_id,
-                    )
-                activation_state = ActivationState.ACTIVE
+                activation_state = ActivationState.ACTIVE if active else ActivationState.INACTIVE
 
             main_issues = self._context.validate_plan(plan, context)
             if main_issues:
@@ -351,6 +340,26 @@ class EvaluationExecutor:
                     trace=trace,
                     contributing_input_ids=root.contributing_input_ids,
                     inputs_by_id=inputs_by_id,
+                )
+
+            if activation_state is ActivationState.INACTIVE:
+                return CovenantEvaluationResult(
+                    definition_id=plan.definition_id,
+                    scenario_id=plan.scenario_id,
+                    clause_id=plan.clause_id,
+                    family_id=plan.family_id,
+                    status=EvaluationStatus.NOT_ACTIVATED,
+                    compliance_status=None,
+                    activation_state=ActivationState.INACTIVE,
+                    actual=actual,
+                    threshold=plan.threshold,
+                    contributing_input_ids=root.contributing_input_ids,
+                    contributing_transaction_ids=self._transaction_ids(
+                        root.contributing_input_ids,
+                        inputs_by_id,
+                    ),
+                    issues=final_issue_tuple,
+                    trace=trace,
                 )
 
             return CovenantEvaluationResult(

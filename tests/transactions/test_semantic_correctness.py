@@ -341,7 +341,7 @@ def test_jsc_not_llp_and_services_suffix_distinct() -> None:
     assert by_id["TXN-P1-c"].related_party_status is RelatedPartyStatus.TRUE
 
 
-def test_corrupted_ownership_identity_is_unknown_not_false() -> None:
+def test_unique_corrupted_ownership_identity_is_recovered() -> None:
     facts = (
         _fact(
             fact_id="thr",
@@ -385,8 +385,48 @@ def test_corrupted_ownership_identity_is_unknown_not_false() -> None:
     links = tuple(_link(r.txn_id, "P6", r.row_index) for r in rows)
     report = _run(rows, links, (_definition("P6", MetricCategory.OPEX),), facts)
     by_id = {t.transaction_id: t for t in report.classified}
-    assert by_id["TXN-P6-1"].related_party_status is RelatedPartyStatus.UNKNOWN
+    assert by_id["TXN-P6-1"].related_party_status is RelatedPartyStatus.TRUE
     assert by_id["TXN-P6-2"].related_party_status is RelatedPartyStatus.TRUE
+
+
+def test_corrupted_ownership_identity_stays_unknown_when_ledger_match_is_ambiguous() -> None:
+    facts = (
+        _fact(
+            fact_id="thr",
+            scenario_id="P6",
+            kind=FactKind.RELATED_PARTY_THRESHOLD,
+            payload=RelatedPartyThresholdPayload(threshold_percent=Decimal("25.0")),
+        ),
+        _fact(
+            fact_id="own-damaged",
+            scenario_id="P6",
+            kind=FactKind.OWNERSHIP,
+            payload=OwnershipPayload(
+                entity_name="Таға? Holding Group LLP", ownership_percent=Decimal("40.0")
+            ),
+        ),
+    )
+    rows = (
+        _row(
+            "TXN-P6-1",
+            row=0,
+            amount="-1.00",
+            description="Advisory retainer",
+            counterparty="Taraz Holding Group LLP",
+        ),
+        _row(
+            "TXN-P6-2",
+            row=1,
+            amount="-1.00",
+            description="Advisory retainer",
+            counterparty="Tulpar Holding Group LLP",
+        ),
+    )
+    links = tuple(_link(r.txn_id, "P6", r.row_index) for r in rows)
+    report = _run(rows, links, (_definition("P6", MetricCategory.OPEX),), facts)
+    by_id = {t.transaction_id: t for t in report.classified}
+    assert by_id["TXN-P6-1"].related_party_status is RelatedPartyStatus.UNKNOWN
+    assert by_id["TXN-P6-2"].related_party_status is RelatedPartyStatus.UNKNOWN
 
 
 def test_unrestricted_subsidiary_requires_evidence() -> None:

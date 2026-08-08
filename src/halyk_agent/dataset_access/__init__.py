@@ -103,6 +103,7 @@ def validate_manifest_paths(
         resolve_dataset_path(manifest.submission_template.path),
         resolve_dataset_path(manifest.primary_ledger.path),
         *(resolve_dataset_path(case.path) for case in manifest.case_descriptions),
+        *(resolve_dataset_path(document.path) for document in manifest.document_files),
     }
     overlap = allowed & banned
     if overlap:

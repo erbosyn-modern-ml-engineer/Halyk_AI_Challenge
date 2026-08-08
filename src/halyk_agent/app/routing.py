@@ -29,7 +29,6 @@ from halyk_agent.dataset_access import (
     validate_manifest_paths,
 )
 from halyk_agent.domain.evidence import EvidenceSpan
-from halyk_agent.domain.ids import sha256_text
 from halyk_agent.domain.parsing import CanonicalDocument
 from halyk_agent.domain.routing.engine import RoutingEngineError, run_routing
 from halyk_agent.domain.routing.models import LedgerRow, RoutingReport, TxnIdParserConfig
@@ -43,6 +42,36 @@ class RoutingServiceError(Exception):
         super().__init__(message)
         self.message = message
         self.code = code
+
+
+def _manifest_identity_payload(manifest: SanitizedDatasetManifest) -> dict[str, Any]:
+    """Path-independent identity payload for a sanitized dataset manifest.
+
+    Runtime materialization intentionally rewrites allowlisted files into a private
+    workspace. Absolute workspace paths are execution details, not dataset identity.
+    Keep basenames plus source hashes/sizes/roles so two fresh runs bind to the same
+    source universe without leaking temporary-directory entropy downstream.
+    """
+
+    payload = manifest.model_dump(mode="json")
+
+    def normalize_ref(item: object) -> None:
+        if not isinstance(item, dict):
+            return
+        raw = item.get("path")
+        if isinstance(raw, str):
+            item["path"] = raw.replace("\\", "/").rsplit("/", 1)[-1]
+
+    for key in ("case_descriptions", "document_files", "technical_noise", "ignored", "quarantined"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            for item in values:
+                normalize_ref(item)
+    normalize_ref(payload.get("primary_ledger"))
+    normalize_ref(payload.get("submission_template"))
+    if payload.get("documents_dir") is not None:
+        payload["documents_dir"] = "<documents>"
+    return payload
 
 
 def route_entities(
@@ -68,7 +97,7 @@ def route_entities(
             ledger_rows=ledger_rows,
             documents=documents,
             evidence_catalogue=evidence_catalogue,
-            dataset_manifest_payload=manifest.model_dump(mode="json"),
+            dataset_manifest_payload=_manifest_identity_payload(manifest),
             txn_id_parser=txn_id_parser,
             parsed_input_identity=parsed_input_identity,
             ledger_source_sha256=ledger_source_sha256,
@@ -80,23 +109,39 @@ def route_entities(
 
 
 def _parsed_input_identity(parsed_dir: Path, documents: list[CanonicalDocument]) -> dict[str, Any]:
-    report_path = parsed_dir / "parse_report.json"
-    evidence_path = parsed_dir / "evidence_catalog.jsonl"
+    """Deterministic parser identity without timing/cache-path entropy.
+
+    Canonical document identities are already hashed separately by the routing
+    engine. This field records only stable execution-mode facts; raw parse/OCR
+    report hashes are intentionally excluded because they contain durations and
+    host-specific probe paths that do not affect semantic document content.
+    """
+
     ocr_report = parsed_dir / "ocr_report.json"
     identity: dict[str, Any] = {
-        "parse_report_sha256": (
-            sha256_text(report_path.read_text(encoding="utf-8")) if report_path.is_file() else ""
-        ),
-        "evidence_catalogue_sha256": (
-            sha256_text(evidence_path.read_text(encoding="utf-8"))
-            if evidence_path.is_file()
-            else ""
-        ),
         "document_count": len(documents),
         "ocr_enriched": ocr_report.is_file(),
     }
     if ocr_report.is_file():
-        identity["ocr_report_sha256"] = sha256_text(ocr_report.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(ocr_report.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        backend = payload.get("backend") if isinstance(payload, dict) else None
+        if isinstance(backend, dict):
+            identity["ocr_backend"] = {
+                key: backend[key]
+                for key in (
+                    "kind",
+                    "backend_version",
+                    "language_data_identity",
+                    "languages",
+                    "render_scale",
+                    "page_segmentation_mode",
+                    "configuration_hash",
+                )
+                if key in backend
+            }
     return identity
 
 

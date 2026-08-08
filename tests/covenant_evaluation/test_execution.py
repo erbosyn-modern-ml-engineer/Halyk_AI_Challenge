@@ -283,7 +283,56 @@ def test_unknown_input_scenario_is_global_failure() -> None:
     assert exc.value.code == "SCENARIO_UNIVERSE_MISMATCH"
 
 
-def test_inactive_springing_condition_does_not_evaluate_main_metric() -> None:
+def test_inactive_springing_condition_still_evaluates_main_metric() -> None:
+    financing = _selector(MetricCategory.FINANCING_INFLOWS)
+    revenue = _selector(MetricCategory.REVENUE)
+    definition = _definition(
+        Divide(
+            numerator=Sum(of=TransactionSet(selector=revenue)),
+            denominator=Constant(
+                quantity=TypedQuantity(
+                    quantity_type=QuantityType.MONEY,
+                    value=Decimal("50"),
+                    currency="USD",
+                )
+            ),
+        ),
+        threshold=TypedQuantity(
+            quantity_type=QuantityType.RATIO,
+            value=Decimal("1"),
+        ),
+        selectors=(revenue, financing),
+    )
+    definition = definition.model_copy(
+        update={
+            "activation_condition": ActivationCondition(
+                metric=Sum(of=TransactionSet(selector=financing)),
+                comparator=Comparator.GT,
+                threshold=TypedQuantity(
+                    quantity_type=QuantityType.MONEY,
+                    value=Decimal("100"),
+                    currency="USD",
+                ),
+            )
+        }
+    )
+    context = _context(
+        definition,
+        (
+            _input("financing", "50", category=MetricCategory.FINANCING_INFLOWS),
+            _input("revenue", "100", category=MetricCategory.REVENUE),
+        ),
+    )
+    result = EvaluationExecutor().execute(plan_definition(definition), context)
+    assert result.status is EvaluationStatus.NOT_ACTIVATED
+    assert result.activation_state is ActivationState.INACTIVE
+    assert result.compliance_status is None
+    assert result.actual is not None
+    assert result.actual.value == Decimal("2")
+    assert result.contributing_transaction_ids == ("TX-revenue",)
+
+
+def test_inactive_springing_condition_surfaces_uncomputable_main_metric() -> None:
     financing = _selector(MetricCategory.FINANCING_INFLOWS)
     revenue = _selector(MetricCategory.REVENUE)
     definition = _definition(
@@ -324,10 +373,10 @@ def test_inactive_springing_condition_does_not_evaluate_main_metric() -> None:
         ),
     )
     result = EvaluationExecutor().execute(plan_definition(definition), context)
-    assert result.status is EvaluationStatus.NOT_ACTIVATED
+    assert result.status is EvaluationStatus.ERROR
     assert result.activation_state is ActivationState.INACTIVE
-    assert result.compliance_status is None
-    assert "ZERO_DENOMINATOR" not in {issue.code for issue in result.issues}
+    assert result.actual is None
+    assert "ZERO_DENOMINATOR" in {issue.code for issue in result.issues}
 
 
 def test_financial_quarter_uses_quarter_period_helper() -> None:

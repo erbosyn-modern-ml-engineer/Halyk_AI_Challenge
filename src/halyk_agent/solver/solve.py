@@ -216,3 +216,190 @@ def _template_looks_like_scored_answers(payload: object) -> bool:
             ):
                 return True
     return False
+
+
+def solve_competition_from_manifest(
+    manifest: SanitizedDatasetManifest,
+    output_dir: Path,
+    *,
+    team: str | None = None,
+    contact_email: str | None = None,
+    model_name: str | None = None,
+    run_id: str | None = None,
+    opener: FileOpener | None = None,
+) -> dict[str, str]:
+    """Stage 7 real solver: sanitized sources -> deterministic pipeline -> submission.
+
+    The raw dataset root is never passed into this service.  Every source read is
+    constrained by ``SanitizedDatasetManifest`` and the audited opener; downstream
+    stages operate only on verified private copies inside the run workspace.
+    """
+
+    from halyk_agent.adapters.archive.hashing import sha256_file
+    from halyk_agent.solver.pipeline import run_competition_pipeline
+    from halyk_agent.solver.submission.final import build_final_submission, write_final_submission
+
+    rid = run_id or uuid.uuid4().hex
+    file_opener = require_audited_opener(opener or RecordingFileOpener())
+    allowed, banned = _validate_manifest_paths(manifest)
+
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if any(output_dir.iterdir()):
+        raise DatasetAdapterError(f"output directory must be empty: {output_dir}")
+    workspace = Path(tempfile.mkdtemp(prefix=".solve-real-", dir=output_dir))
+    public_stage = workspace / "public"
+    public_stage.mkdir(parents=True, exist_ok=True)
+    audit = RunFileAudit(run_id=rid)
+
+    try:
+        pipeline = run_competition_pipeline(
+            manifest,
+            workspace=workspace / "pipeline",
+            opener=file_opener,
+            audit=audit,
+        )
+        _assert_opens_allowlisted(file_opener, allowed=allowed, banned=banned)
+        audit.assert_no_ground_truth()
+
+        from halyk_agent.solver.fallbacks import build_competitive_fallbacks
+
+        fallback = build_competitive_fallbacks(
+            evaluation=pipeline.evaluation,
+            context=pipeline.context,
+            adjustments=pipeline.taxonomy.adjustments,
+            parsed_dir=pipeline.parsed_dir,
+            routing_dir=pipeline.routing_dir,
+        )
+        document, unresolved = build_final_submission(
+            pipeline.materialized.template_payload,
+            evaluation=pipeline.evaluation,
+            context=pipeline.context,
+            adjustments=pipeline.taxonomy.adjustments,
+            classified=pipeline.taxonomy.classified,
+            team=team,
+            contact_email=contact_email,
+            model_name=model_name,
+            fallback_results=fallback.results,
+        )
+        written = write_final_submission(
+            document,
+            public_stage,
+            audit=audit,
+            unresolved=unresolved,
+        )
+        audit.assert_no_ground_truth()
+
+        opened_files = []
+        for item in audit.files:
+            Path(item.path)
+            purpose = item.purpose
+            if purpose not in {
+                "submission_template",
+                "primary_ledger",
+                "case_description",
+                "document",
+                "submission_write",
+            }:
+                raise LeakageAttemptError(f"unexpected real-solver purpose: {purpose}")
+            published_path = item.path
+            if purpose == "submission_write":
+                published_path = (output_dir / "submission.json").as_posix()
+            opened_files.append(
+                {
+                    **item.model_dump(mode="json"),
+                    "path": published_path,
+                }
+            )
+
+        fallback_path = public_stage / "fallback_cells.jsonl"
+        fallback_text = "\n".join(
+            json.dumps(item, ensure_ascii=False, sort_keys=True) for item in fallback.diagnostics
+        )
+        if fallback_text:
+            fallback_text += "\n"
+        fallback_path.write_text(fallback_text, encoding="utf-8", newline="\n")
+
+        pipeline_manifest = {
+            "schema_version": "halyk.competition_pipeline.v2",
+            "run_id": rid,
+            "stage_summary": pipeline.stage_summary,
+            "source_read_count": sum(
+                1 for item in audit.files if item.purpose != "submission_write"
+            ),
+            "ground_truth_access": "none",
+            "evaluation_manifest_sha256": sha256_file(
+                pipeline.evaluation_dir / "evaluation_manifest.json"
+            ),
+            "submission_sha256": sha256_file(written["submission"]),
+            "unresolved_cell_count": len(unresolved),
+            "fallback_cell_count": len(fallback.results),
+            "fallback_eur_usd_rate": (
+                str(fallback.eur_usd_rate) if fallback.eur_usd_rate is not None else None
+            ),
+        }
+        (public_stage / "pipeline_manifest.json").write_text(
+            json.dumps(pipeline_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        run_manifest = {
+            "schema_version": "halyk.competition_run.v1",
+            "run_id": rid,
+            "opened_files": opened_files,
+            "stage_summary": pipeline.stage_summary,
+            "unresolved_cell_count": len(unresolved),
+            "fallback_cell_count": len(fallback.results),
+            "ground_truth_access": "none",
+        }
+        (public_stage / "run_manifest.json").write_text(
+            json.dumps(run_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        summary_lines = [
+            "# Solver summary",
+            "",
+            f"- run_id: `{rid}`",
+            f"- cells: {sum(len(cells) for cells in document.answers.values())}",
+            f"- unresolved_cells: {len(unresolved)}",
+            f"- fallback_cells: {len(fallback.results)}",
+            f"- evaluation_resolved: {pipeline.evaluation.manifest.resolved_count}",
+            f"- evaluation_unresolved: {pipeline.evaluation.manifest.unresolved_count}",
+            f"- evaluation_errors: {pipeline.evaluation.manifest.error_count}",
+            "- ground_truth_access: none",
+            "",
+        ]
+        (public_stage / "solver_summary.md").write_text(
+            "\n".join(summary_lines), encoding="utf-8", newline="\n"
+        )
+        evaluation_summary = pipeline.evaluation_dir / "evaluation_summary.md"
+        if evaluation_summary.is_file():
+            (public_stage / "evaluation_summary.md").write_bytes(evaluation_summary.read_bytes())
+
+        for child in sorted(public_stage.iterdir()):
+            os.replace(child, output_dir / child.name)
+    except Exception:
+        for child in list(output_dir.iterdir()):
+            if child == workspace:
+                continue
+            with contextlib.suppress(OSError):
+                if child.is_dir():
+                    import shutil
+
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        raise
+    finally:
+        import shutil
+
+        shutil.rmtree(workspace, ignore_errors=True)
+
+    return {
+        "submission": str((output_dir / "submission.json").as_posix()),
+        "run_manifest": str((output_dir / "run_manifest.json").as_posix()),
+        "summary": str((output_dir / "solver_summary.md").as_posix()),
+        "pipeline_manifest": str((output_dir / "pipeline_manifest.json").as_posix()),
+        "run_id": rid,
+    }
