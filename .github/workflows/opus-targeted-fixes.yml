@@ -98,11 +98,26 @@ jobs:
           )
           if duplicate not in fallback:
               raise SystemExit("generated duplicate fallback dataclass decorator not found")
-          fallback_path.write_text(
-              fallback.replace(duplicate, "@dataclass(frozen=True, slots=True)\n", 1),
-              encoding="utf-8",
-              newline="\n",
-          )
+          fallback = fallback.replace(duplicate, "@dataclass(frozen=True, slots=True)\n", 1)
+
+          old_helper = '''def _money_after_label(note: str, match: re.Match[str]) -> tuple[Decimal, str] | None:
+              # Keep the window narrow enough that a missing value cannot bind to the next
+              # row, while the money parser itself enforces complete-token semantics.
+              return parse_money(note[match.end() : match.end() + 120])
+          '''
+          new_helper = '''def _money_after_label(note: str, match: re.Match[str]) -> tuple[Decimal, str] | None:
+              # A PPE row may only bind to money on that same logical line.  Searching
+              # farther would let a malformed opening value borrow a later valid row.
+              remainder = note[match.end() :]
+              line = remainder.splitlines()[0] if remainder else ""
+              return parse_money(line[:120])
+          '''
+          old_helper = textwrap.dedent(old_helper)
+          new_helper = textwrap.dedent(new_helper)
+          if old_helper not in fallback:
+              raise SystemExit("generated P5 money helper not found")
+          fallback = fallback.replace(old_helper, new_helper, 1)
+          fallback_path.write_text(fallback, encoding="utf-8", newline="\n")
           PY
 
       - name: Normalize changed Python
