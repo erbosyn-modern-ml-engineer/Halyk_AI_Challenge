@@ -358,7 +358,9 @@ def _unique_group_capex_plan(
         if key not in target_keys:
             continue
         if any(
-            node.selector is not None and node.selector.category is MetricCategory.GROUP_CAPEX
+            node.selector is not None
+            and node.selector.category is MetricCategory.GROUP_CAPEX
+            and node.selector.group_level is True
             for node in plan.nodes
         ):
             candidates.append(plan)

@@ -252,3 +252,20 @@ def test_group_capex_plan_selection_requires_one_semantic_unresolved_candidate()
         )
         is None
     )
+
+
+def test_group_capex_plan_selection_requires_group_level_selector() -> None:
+    selector = _selector(MetricCategory.GROUP_CAPEX).model_copy(update={"group_level": False})
+    definition = _definition(
+        Sum(of=TransactionSet(selector=selector)),
+        definition_id="borrower-capex",
+        selectors=(selector,),
+    ).model_copy(update={"scenario_id": "PRIVATE-BORROWER"})
+    plan = plan_definition(definition)
+    assert (
+        _unique_group_capex_plan(
+            (plan,),
+            {(plan.scenario_id, plan.clause_id)},
+        )
+        is None
+    )
