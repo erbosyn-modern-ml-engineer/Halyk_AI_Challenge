@@ -23,43 +23,73 @@ jobs:
       - name: Install uv
         run: python -m pip install --disable-pip-version-check uv
 
-      - name: Apply staged Stage 7-9 patch
-        if: github.event_name == 'push' && github.ref_name == 'stage-7/solver-integration' && hashFiles('.stage789/fix00-0.b64') != ''
+      - name: Apply one-time strict typing closures
+        if: github.event_name == 'push' && github.ref_name == 'stage-7/solver-integration'
         run: |
-          cat > /tmp/chunks.sha256 <<'EOF'
-          2d2ec3533ffb33ff5712b7c1be034e88564ba72f1314a2f78e54fdf99e00fb6f  .stage789/fix00-0.b64
-          de006aa50d4f92237974f9fdb1a52305f250641c59526ed208c925308b307ab6  .stage789/fix00-1.b64
-          8169f105fd3a748fef445c3b497b47abe97da74cfb1771258baa5e3349b42080  .stage789/fix00-2.b64
-          36ad888d396f75a6735760d407a51f5c8c5ec7798f0e019bbd8fa9330dd60f01  .stage789/fix00-3.b64
-          25abb69818198ffbb52dd12ae8169a6924b4cf7d8cd7dde81bcda1471cdb94cd  .stage789/part01.b64
-          bd4313980f83e11440454c666f4ce07e2340310297a7862937c88b7e33a1a6b9  .stage789/fix02-0.b64
-          39b29167e0c6ec92c059755571020763b9d7e41173abbfe1f2ba8daf37b3b66f  .stage789/fix02-1.b64
-          3a3c3fb1fc6a1017a1ef1ba6820bba1559aa1e0e73eea15f036ddf96415d6bf1  .stage789/fix02-2.b64
-          b33aac71076eb75d6ec1e039f8d30b568a852e2c1ff3ae7900e8d0a6e84035b1  .stage789/fix02-3.b64
-          842b91508d6b77da35be0d2831efaacb0d73a58232865d97d3ad064b9fd2072f  .stage789/part03.b64
-          89511dcca1e0a8a2b24fcc214a0c6de94be702c71234e28752f4c68c7e36b4f2  .stage789/part04.b64
-          EOF
-          sha256sum -c /tmp/chunks.sha256
-          cat .stage789/fix00-*.b64 .stage789/part01.b64 .stage789/fix02-*.b64 .stage789/part03.b64 .stage789/part04.b64 | base64 -d | gzip -d > /tmp/stage789.patch
-          echo "a2b1e379fd006c93bc1182bff611a4f3af14ca4d19895854f49995282ba6af34  /tmp/stage789.patch" | sha256sum -c -
-          git apply --check /tmp/stage789.patch
-          git apply /tmp/stage789.patch
-          rm -rf .stage789
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              if old not in text:
+                  raise SystemExit(f"expected typing closure pattern missing: {path}")
+              p.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+
+          replace(
+              "src/halyk_agent/app/reproduction.py",
+              '''def _stable_pipeline_payload(path: Path) -> dict[str, object]:\n    payload = json.loads(path.read_text(encoding="utf-8"))\n    if not isinstance(payload, dict):\n        raise ReproductionError("pipeline manifest is not a JSON object")\n    return {key: value for key, value in payload.items() if key != "run_id"}\n''',
+              '''def _stable_pipeline_payload(path: Path) -> dict[str, object]:\n    payload = json.loads(path.read_text(encoding="utf-8"))\n    if not isinstance(payload, dict):\n        raise ReproductionError("pipeline manifest is not a JSON object")\n    return {key: value for key, value in payload.items() if key != "run_id"}\n\n\ndef _required_int(payload: dict[str, object], key: str) -> int:\n    value = payload.get(key)\n    if isinstance(value, bool) or not isinstance(value, (int, str)):\n        raise ReproductionError(f"pipeline manifest field {key!r} is not an integer")\n    try:\n        return int(value)\n    except ValueError as exc:\n        raise ReproductionError(\n            f"pipeline manifest field {key!r} is not an integer"\n        ) from exc\n''',
+          )
+          replace(
+              "src/halyk_agent/app/reproduction.py",
+              '''        run_a_source_reads=int(stable_a["source_read_count"]),\n        run_b_source_reads=int(stable_b["source_read_count"]),''',
+              '''        run_a_source_reads=_required_int(stable_a, "source_read_count"),\n        run_b_source_reads=_required_int(stable_b, "source_read_count"),''',
+          )
+          replace(
+              "src/halyk_agent/solver/fallbacks.py",
+              '''input_id=deterministic_id("stage8-fallback", "P5", "GROUP_CAPEX", amount),''',
+              '''input_id=deterministic_id("stage8-fallback", "P5", "GROUP_CAPEX", str(amount)),''',
+          )
+          replace(
+              "src/halyk_agent/solver/fallbacks.py",
+              '''    updated_readiness: list[DefinitionReadinessEntry] = []\n    for entry in readiness:\n        if entry.definition_id == definition_id:\n            updated_readiness.append(\n                entry.model_copy(\n                    update={\n                        "status": SelectorReadinessStatus.READY,\n                        "reason_code": "STAGE8_PPE_ROLL_FORWARD_RESIDUAL",\n                        "unresolved_selectors": (),\n                    }\n                )\n            )\n        else:\n            updated_readiness.append(entry)''',
+              '''    updated_readiness: list[DefinitionReadinessEntry] = []\n    for readiness_entry in readiness:\n        if readiness_entry.definition_id == definition_id:\n            updated_readiness.append(\n                readiness_entry.model_copy(\n                    update={\n                        "status": SelectorReadinessStatus.READY,\n                        "reason_code": "STAGE8_PPE_ROLL_FORWARD_RESIDUAL",\n                        "unresolved_selectors": (),\n                    }\n                )\n            )\n        else:\n            updated_readiness.append(readiness_entry)''',
+          )
+          replace(
+              "src/halyk_agent/solver/evidence.py",
+              '''        category = map_category_label(proposed)\n        if category is None:\n            return None\n        updated = _recompute_category_fields(inp, category=category, description=description)''',
+              '''        proposed_category = map_category_label(proposed)\n        if proposed_category is None:\n            return None\n        updated = _recompute_category_fields(\n            inp, category=proposed_category, description=description\n        )''',
+          )
+          replace(
+              "src/halyk_agent/app/cli.py",
+              '''            report = verify_reproduction_pair(args.run_a, args.run_b, args.output)''',
+              '''            reproduction_report = verify_reproduction_pair(\n                args.run_a, args.run_b, args.output\n            )''',
+          )
+          replace(
+              "src/halyk_agent/app/cli.py",
+              '''        print(f"deterministic={report.deterministic}")\n        print(f"submission_sha256={report.submission_sha256}")''',
+              '''        print(f"deterministic={reproduction_report.deterministic}")\n        print(f"submission_sha256={reproduction_report.submission_sha256}")''',
+          )
+          PY
 
       - name: Sync locked environment
         run: uv sync --frozen --extra full --extra retrieval-full
 
-      - name: Normalize and publish branch changes
+      - name: Normalize and publish typing closures
         if: github.event_name == 'push' && github.ref_name == 'stage-7/solver-integration'
         run: |
           uv run ruff format .
           uv run ruff check --fix --unsafe-fixes .
           git diff --check
-          if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+          if ! git diff --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "feat(solver): integrate deterministic Stage 7-9 competition pipeline"
+            git add src/halyk_agent/app/reproduction.py \
+                    src/halyk_agent/app/cli.py \
+                    src/halyk_agent/solver/fallbacks.py \
+                    src/halyk_agent/solver/evidence.py
+            git commit -m "fix(solver): satisfy strict Stage 7-9 typing"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
