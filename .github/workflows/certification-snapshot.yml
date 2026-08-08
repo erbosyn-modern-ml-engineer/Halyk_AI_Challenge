@@ -18,11 +18,11 @@ jobs:
 
       - name: Package source snapshot
         run: |
-          tar --exclude=.git --exclude=.venv --exclude=.mypy_cache --exclude=.pytest_cache --exclude=.ruff_cache -czf halyk-source.tar.gz .
+          tar --exclude=.git --exclude=.venv --exclude=.mypy_cache --exclude=.pytest_cache --exclude=.ruff_cache -czf /tmp/halyk-source.tar.gz .
 
       - name: Upload source snapshot
         uses: actions/upload-artifact@v4
         with:
           name: halyk-cert-source-${{ github.sha }}
-          path: halyk-source.tar.gz
+          path: /tmp/halyk-source.tar.gz
           retention-days: 1
