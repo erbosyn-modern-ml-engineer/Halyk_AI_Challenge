@@ -56,8 +56,12 @@ def test_legal_form_position_and_boundary_separator_variants_match() -> None:
     assert names_match_exact("Astana Trade Holding LLP", "LLP Astana Trade Holding")
     assert names_match_exact("Astana Trade Holding LLP", "Astana Trade Holding, LLP")
     assert names_match_exact("Astana Trade Holding LLP", "LLP, Astana Trade Holding")
-    cyrillic_suffix = "\u0410\u0441\u0442\u0430\u043d\u0430 \u0422\u0440\u0435\u0439\u0434 \u0422\u041e\u041e"
-    cyrillic_prefix = "\u0422\u041e\u041e «\u0410\u0441\u0442\u0430\u043d\u0430 \u0422\u0440\u0435\u0439\u0434»"
+    cyrillic_suffix = (
+        "\u0410\u0441\u0442\u0430\u043d\u0430 \u0422\u0440\u0435\u0439\u0434 \u0422\u041e\u041e"
+    )
+    cyrillic_prefix = (
+        "\u0422\u041e\u041e «\u0410\u0441\u0442\u0430\u043d\u0430 \u0422\u0440\u0435\u0439\u0434»"
+    )
     assert names_match_exact(cyrillic_suffix, cyrillic_prefix)
 
 
