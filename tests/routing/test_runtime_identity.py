@@ -68,7 +68,11 @@ def test_parsed_input_identity_ignores_ocr_paths_timings_and_cache_bytes(tmp_pat
         "cache_hits": 0,
         "results": [{"attempts": [{"duration_ms": 1}]}],
     }
-    parse_right = {**parse_left, "cache_hits": 1, "results": [{"attempts": [{"duration_ms": 9999}]}]}
+    parse_right = {
+        **parse_left,
+        "cache_hits": 1,
+        "results": [{"attempts": [{"duration_ms": 9999}]}],
+    }
     backend = {
         "kind": "TESSERACT_CLI",
         "backend_version": "tesseract 5.5.0",
@@ -91,17 +95,13 @@ def test_parsed_input_identity_ignores_ocr_paths_timings_and_cache_bytes(tmp_pat
         "documents_processed": 1,
         "offline_ready": True,
         "blocked_reason": None,
-        "page_results": [
-            {"request": {"source_path": "/tmp/run-a/doc.pdf"}, "duration_ms": 5}
-        ],
+        "page_results": [{"request": {"source_path": "/tmp/run-a/doc.pdf"}, "duration_ms": 5}],
     }
     ocr_right = {
         **ocr_left,
         "backend": {**backend, "executable_or_package": "C:/tools/tesseract.exe"},
         "persistent_cache_bytes_written": 999,
-        "page_results": [
-            {"request": {"source_path": "C:/run-b/doc.pdf"}, "duration_ms": 5000}
-        ],
+        "page_results": [{"request": {"source_path": "C:/run-b/doc.pdf"}, "duration_ms": 5000}],
     }
     for directory, parse_payload, ocr_payload in (
         (left, parse_left, ocr_left),
@@ -121,8 +121,6 @@ def test_ledger_provenance_uses_stable_basename_across_host_paths() -> None:
         b"TXN-P1-0001,2025-01-01,ACC-1,Customer,Revenue,100,USD\n"
     )
     left = load_ledger_csv_bytes(data, source_file="/tmp/run-a/input/master_ledger_2025.csv")
-    right = load_ledger_csv_bytes(
-        data, source_file=r"C:\run-b\input\master_ledger_2025.csv"
-    )
+    right = load_ledger_csv_bytes(data, source_file=r"C:\run-b\input\master_ledger_2025.csv")
     assert left == right
     assert left[0].ledger_source_file == "master_ledger_2025.csv"
