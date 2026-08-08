@@ -11,7 +11,10 @@ from enum import StrEnum
 from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.locate import build_ws_map
 from halyk_agent.domain.covenants.models import CovenantModifier, CovenantModifierKind
-from halyk_agent.domain.covenants.parse import iter_unique_money_quantities
+from halyk_agent.domain.covenants.parse import (
+    extend_span_through_money_tokens,
+    scan_money_quantities,
+)
 from halyk_agent.domain.covenants.quantity import TypedQuantity
 
 
@@ -118,15 +121,52 @@ def _search(norm: str, pattern: str) -> re.Match[str] | None:
     return re.search(pattern, norm, flags=re.IGNORECASE | re.DOTALL)
 
 
+def _is_decimal_dot(norm: str, index: int) -> bool:
+    """True when ``norm[index]`` is a decimal point inside a numeric money/ratio token."""
+    if index < 0 or index >= len(norm) or norm[index] != ".":
+        return False
+    return (
+        index > 0
+        and index + 1 < len(norm)
+        and norm[index - 1].isdigit()
+        and norm[index + 1].isdigit()
+    )
+
+
+# Legal / clause abbreviations whose trailing '.' must not end an instruction region.
+_ABBREV_DOT_RE = re.compile(
+    r"(?:^|[\s(])(?:п|пп|ст|cl|sec|art|no|nos|vol|fig|vs)\.$",
+    re.IGNORECASE,
+)
+
+
+def _is_abbrev_dot(norm: str, index: int) -> bool:
+    """True when ``norm[index]`` is '.' in a short legal abbreviation (п. / Sec. / cl.)."""
+    if index < 0 or index >= len(norm) or norm[index] != ".":
+        return False
+    window = norm[max(0, index - 6) : index + 1]
+    return _ABBREV_DOT_RE.search(window) is not None
+
+
+def _is_sentence_break(norm: str, index: int) -> bool:
+    if index < 0 or index >= len(norm):
+        return False
+    ch = norm[index]
+    if ch in {"!", "?", ";", "\n"}:
+        return True
+    if ch != ".":
+        return False
+    return not (_is_decimal_dot(norm, index) or _is_abbrev_dot(norm, index))
+
+
 def _sentence_window(norm: str, pos: int) -> tuple[int, int]:
     """Return [start, end) of the sentence containing ``pos``, else a radius window."""
-    break_chars = {".", "!", "?", ";", "\n"}
     start = pos
-    while start > 0 and norm[start - 1] not in break_chars:
+    while start > 0 and not _is_sentence_break(norm, start - 1):
         start -= 1
     end = pos
     n = len(norm)
-    while end < n and norm[end] not in break_chars:
+    while end < n and not _is_sentence_break(norm, end):
         end += 1
     if end < n:
         end += 1
@@ -272,28 +312,24 @@ def _financial_context(window: str) -> bool:
     )
 
 
-def _money_in_window(window: str) -> list[TypedQuantity]:
-    """Return unique valid MONEY quantities found in ``window`` (order preserved)."""
-    return list(iter_unique_money_quantities(window))
-
-
 _MATERIALITY_CUE_RE = re.compile(
     r"порог\w*\s+существенност\w*|materialit(?:y|ies)\b",
     re.IGNORECASE,
 )
+# Locate add-back / one-time floor *instructions* (not a single captured money token).
+# Money candidates are collected from the bounded instruction region afterwards.
 _ADD_BACK_FLOOR_RE = re.compile(
     r"(?:"
-    r"разов\w*.{0,120}?не\s+менее\s+(?P<m1>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
-    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
+    r"разов\w*.{0,160}?не\s+менее\s+"
+    r"(?:\$|USD\s*|€|EUR\s*|₸|KZT\s*)"
     r"|"
-    r"не\s+менее\s+(?P<m2>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
-    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
-    r".{0,80}?(?:к\s+EBITDA\s+не\s+прибавля|не\s+прибавля\w*\s+к\s+EBITDA|"
+    r"не\s+менее\s+"
+    r"(?:\$|USD\s*|€|EUR\s*|₸|KZT\s*)"
+    r".{0,100}?(?:к\s+EBITDA\s+не\s+прибавля|не\s+прибавля\w*\s+к\s+EBITDA|"
     r"add[- ]?backs?\s+below|below\s+materiality)"
     r"|"
-    r"(?:one[- ]?time|add[- ]?back)\w*.{0,100}?not\s+less\s+than\s+"
-    r"(?P<m3>\$[\d,]+(?:\.\d+)?|USD\s*[\d,]+(?:\.\d+)?|"
-    r"€[\d,]+(?:\.\d+)?|EUR\s*[\d,]+(?:\.\d+)?|₸[\d,]+(?:\.\d+)?|KZT\s*[\d,]+(?:\.\d+)?)"
+    r"(?:one[- ]?time|add[- ]?back)\w*.{0,120}?not\s+less\s+than\s+"
+    r"(?:\$|USD\s*|€|EUR\s*|₸|KZT\s*)"
     r")",
     re.IGNORECASE | re.DOTALL,
 )
@@ -303,6 +339,95 @@ _ADD_BACK_CATEGORY_CUE_RE = re.compile(
 )
 
 
+def _instruction_region(
+    norm: str,
+    match: re.Match[str],
+    *,
+    anchor_at_match_start: bool,
+) -> tuple[int, int, str]:
+    """
+    Bounded instruction region for materiality money collection.
+
+    The region always covers the complete regex match (``end >= match.end()``), then
+    expands forward to the sentence containing ``match.end() - 1`` so legal
+    abbreviations (``п.`` / ``Sec.``) that break the *start* sentence cannot truncate
+    the instruction to its first money token.
+
+    For add-back instructions, ``anchor_at_match_start=True`` prevents walking
+    backward through OCR tables / line-item amounts in one whitespace-normalized
+    paragraph.
+    """
+    start_sent0, _start_sent1 = _sentence_window(norm, match.start())
+    start = match.start() if anchor_at_match_start else min(start_sent0, match.start())
+    end_anchor = match.end() - 1 if match.end() > match.start() else match.start()
+    _end_sent0, end_sent1 = _sentence_window(norm, end_anchor)
+    end = max(match.end(), end_sent1)
+    end = extend_span_through_money_tokens(norm, start, end)
+    return start, end, norm[start:end]
+
+
+def _region_quote(raw: str, idx_map: list[int], region_start: int, region_end: int) -> str | None:
+    if region_end <= region_start:
+        return None
+    return raw[idx_map[region_start] : idx_map[region_end - 1] + 1]
+
+
+def _reconcile_materiality_regions(
+    raw: str,
+    idx_map: list[int],
+    regions: list[tuple[int, int, str, MetricCategory | None]],
+) -> ModifierMatch | None:
+    """
+    Document-level materiality reconciliation across bounded instruction regions.
+
+    Semantics:
+      - any region with malformed threshold-like money → no confident modifier
+      - 0 distinct typed floors → no modifier
+      - 1 distinct typed floor → publish (identical repeats dedupe)
+      - >1 distinct (currency, Decimal) floors → ambiguous / no modifier
+
+    No first/last/highest/lowest preference.
+    """
+    if not regions:
+        return None
+    seen: dict[tuple[str, object], TypedQuantity] = {}
+    quotes: list[str] = []
+    category: MetricCategory | None = None
+    has_malformed = False
+    for region_start, region_end, window, region_category in regions:
+        scan = scan_money_quantities(window)
+        if scan.has_malformed:
+            has_malformed = True
+            continue
+        if not scan.quantities:
+            continue
+        quote = _region_quote(raw, idx_map, region_start, region_end)
+        if quote is None:
+            continue
+        quotes.append(quote)
+        if region_category is not None:
+            category = region_category
+        for quantity in scan.quantities:
+            if quantity.currency is None:
+                continue
+            key = (quantity.currency, quantity.value)
+            if key not in seen:
+                seen[key] = quantity
+    if has_malformed:
+        return None
+    if len(seen) != 1 or not quotes:
+        return None
+    threshold = next(iter(seen.values()))
+    return ModifierMatch(
+        kind=CovenantModifierKind.MATERIALITY_FLOOR,
+        detail="materiality floor for add-backs / adjustments",
+        reason_code="MATERIALITY_FLOOR",
+        quotes=tuple(dict.fromkeys(quotes)),
+        threshold=threshold,
+        applies_to_category=category,
+    )
+
+
 def _materiality_match(
     raw: str,
     idx_map: list[int],
@@ -310,50 +435,30 @@ def _materiality_match(
 ) -> ModifierMatch | None:
     """
     Emit MATERIALITY_FLOOR only when an unambiguous typed monetary threshold
-    is present in the same clause text that generates the modifier.
+    is present after reconciling *all* materiality / add-back-floor instructions.
 
-    Bare materiality language without a parseable floor fails closed (no emit).
+    Bare materiality language, malformed money, or competing distinct floors fail closed.
     """
-    # Prefer explicit add-back floor wording (auditor notes / adjustment tables).
-    floor = _ADD_BACK_FLOOR_RE.search(norm)
-    if floor is not None:
-        money_raw = floor.group("m1") or floor.group("m2") or floor.group("m3")
-        quantities = _money_in_window(money_raw or "")
-        if len(quantities) == 1:
-            quote = _quote_from_match(raw, idx_map, floor)
-            return ModifierMatch(
-                kind=CovenantModifierKind.MATERIALITY_FLOOR,
-                detail="materiality floor for add-backs / adjustments",
-                reason_code="MATERIALITY_FLOOR",
-                quotes=(quote,),
-                threshold=quantities[0],
-                applies_to_category=MetricCategory.ONE_TIME_ADD_BACKS,
-            )
-        return None
+    regions: list[tuple[int, int, str, MetricCategory | None]] = []
 
-    cue = _MATERIALITY_CUE_RE.search(norm)
-    if cue is None:
-        return None
-    w0, w1, window = _local_window(norm, cue)
-    quantities = _money_in_window(window)
-    if len(quantities) != 1:
-        # Fail closed: cue without unambiguous typed threshold must not emit.
-        return None
-    # Quote both the cue and the money token window slice for evidence coupling.
-    quote = (
-        raw[idx_map[w0] : idx_map[w1 - 1] + 1] if w1 > w0 else _quote_from_match(raw, idx_map, cue)
-    )
-    category = (
-        MetricCategory.ONE_TIME_ADD_BACKS if _ADD_BACK_CATEGORY_CUE_RE.search(window) else None
-    )
-    return ModifierMatch(
-        kind=CovenantModifierKind.MATERIALITY_FLOOR,
-        detail="materiality floor for add-backs / adjustments",
-        reason_code="MATERIALITY_FLOOR",
-        quotes=(quote,),
-        threshold=quantities[0],
-        applies_to_category=category,
-    )
+    floor_matches = list(_ADD_BACK_FLOOR_RE.finditer(norm))
+    for floor in floor_matches:
+        w0, w1, window = _instruction_region(norm, floor, anchor_at_match_start=True)
+        regions.append((w0, w1, window, MetricCategory.ONE_TIME_ADD_BACKS))
+
+    # Materiality cue regions also participate (same document-level reconciliation).
+    # Skip cues fully inside an already-collected add-back instruction span.
+    covered = [(a, b) for a, b, _w, _c in regions]
+    for cue in _MATERIALITY_CUE_RE.finditer(norm):
+        if any(a <= cue.start() < b for a, b in covered):
+            continue
+        w0, w1, window = _instruction_region(norm, cue, anchor_at_match_start=False)
+        region_category = (
+            MetricCategory.ONE_TIME_ADD_BACKS if _ADD_BACK_CATEGORY_CUE_RE.search(window) else None
+        )
+        regions.append((w0, w1, window, region_category))
+
+    return _reconcile_materiality_regions(raw, idx_map, regions)
 
 
 def _collect_matches(clause_text: str) -> list[ModifierMatch]:

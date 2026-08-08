@@ -52,10 +52,8 @@ class ThresholdParseResult:
     candidates: tuple[ThresholdCandidate, ...] = ()
 
 
-# Currency prefix + numeric body attempt (validated separately; no prefix truncation).
+# Currency prefix; numeric body is consumed by the complete-token lexer (no prefix truncation).
 _MONEY_PREFIX_RE = re.compile(r"(?P<prefix>\$|USD\s+|EUR\s+|€|KZT\s+|₸)\s*", re.IGNORECASE)
-_MONEY_BODY_RE = re.compile(r"[0-9][0-9,.]*")
-_VALID_MONEY_NUM_RE = re.compile(r"^(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?$")
 _RATIO_TOKEN_RE = re.compile(
     r"(?<![0-9.])(?P<num>\d+(?:\.\d+)?)\s*x\b(?!\w)",
     re.IGNORECASE,
@@ -69,6 +67,10 @@ _BARE_CURRENCY_RE = re.compile(
     r"(?<!\w)(?:\$|USD|EUR|€|KZT|₸)(?!\s*[0-9])",
     re.IGNORECASE,
 )
+# Thousands grouping spaces (ordinary + common Unicode financial spaces).
+_MONEY_GROUP_SPACES = frozenset({" ", "\t", "\xa0", "\u202f", "\u2009"})
+_MONEY_DASHES = frozenset({"-", "—", "–"})
+_MONEY_APOSTROPHES = frozenset({"'", "’", "`"})
 _ISO_RANGE_RE = re.compile(
     r"(20\d{2}-\d{2}-\d{2})\s*(?:по|to|-|—|–)\s*(20\d{2}-\d{2}-\d{2})",
     re.IGNORECASE,
@@ -201,59 +203,230 @@ def _role_for_window(window: str) -> ThresholdRole:
     return ThresholdRole.ACTIVATION
 
 
+# Prose delimiters that may immediately follow a *complete* monetary token.
+# Letters/digits glued to the token are never allowed (OCR corruption / junk).
+# Dashes are terminators only after a complete token (range boundary before a new
+# currency amount); digit-glued dashes inside a body are rejected by the lexer.
+_MONEY_TRAILING_OK = frozenset(" \t\r\n.,;:!?)]}'\"“”‘’`—–-/")
+
+
+@dataclass(frozen=True, slots=True)
+class _MoneyNumericParse:
+    """Result of lexing one complete monetary numeric token after a currency prefix."""
+
+    canonical_body: str
+    consumed: int
+    is_valid: bool
+
+
+def _has_invalid_money_continuation(rest_after_body: str) -> bool:
+    """True when a monetary body is glued to non-prose junk (letter/OCR corruption)."""
+    if not rest_after_body:
+        return False
+    ch = rest_after_body[0]
+    return not (ch.isspace() or ch in _MONEY_TRAILING_OK)
+
+
+def _is_money_group_space(ch: str) -> bool:
+    return ch in _MONEY_GROUP_SPACES
+
+
+def _consume_digit_run(text: str, start: int) -> int:
+    i = start
+    n = len(text)
+    while i < n and text[i].isdigit():
+        i += 1
+    return i
+
+
+def _consume_malformed_money_tail(rest: str, start: int) -> int:
+    """Extend consumed length through glued alnum / money-separator junk."""
+    i = start
+    n = len(rest)
+    while i < n and (
+        rest[i].isalnum()
+        or rest[i] in ",.'’`"
+        or rest[i] in _MONEY_DASHES
+        or _is_money_group_space(rest[i])
+    ):
+        i += 1
+    return i
+
+
+def _parse_complete_money_numeric(rest: str) -> _MoneyNumericParse:
+    """
+    Lex one COMPLETE monetary numeric token.
+
+    Supported (unambiguous) integer forms:
+      - plain digits
+      - comma thousands (1-3 leading digits, then groups of exactly 3)
+      - space thousands (same grouping; incl. NBSP / narrow NBSP / thin space)
+
+    Optional decimal: '.' + digits (single decimal point only).
+
+    Fail closed (never emit a shorter valid prefix) for:
+      - OCR letter-as-digit corruption
+      - malformed grouping
+      - mixed/unclear separators (e.g. hyphen inside number, apostrophe groups)
+      - glued alphabetic junk
+    """
+    if not rest or not rest[0].isdigit():
+        return _MoneyNumericParse("", 0, False)
+
+    i = _consume_digit_run(rest, 0)
+    first = rest[0:i]
+    groups: list[str] = [first]
+    sep_kind: str | None = None  # 'comma' | 'space'
+    n = len(rest)
+
+    while i < n:
+        ch = rest[i]
+        if ch == ".":
+            break
+        if ch == ",":
+            if sep_kind == "space":
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            nxt = i + 1
+            if nxt < n and _is_money_group_space(rest[nxt]):
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            if nxt >= n or not rest[nxt].isdigit():
+                break  # trailing comma → prose terminator (not part of number)
+            end = _consume_digit_run(rest, nxt)
+            grp = rest[nxt:end]
+            if sep_kind is None:
+                if len(first) > 3:
+                    return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+                sep_kind = "comma"
+            if len(grp) != 3:
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            groups.append(grp)
+            i = end
+            continue
+        if _is_money_group_space(ch):
+            j = i
+            while j < n and _is_money_group_space(rest[j]):
+                j += 1
+            if j >= n or not rest[j].isdigit():
+                break  # whitespace terminator (including after comma-grouped amounts)
+            # Space + digits after comma groups is mixed-separator corruption.
+            if sep_kind == "comma":
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            end = _consume_digit_run(rest, j)
+            grp = rest[j:end]
+            if sep_kind is None:
+                if len(first) > 3:
+                    return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+                sep_kind = "space"
+            if len(grp) != 3:
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            groups.append(grp)
+            i = end
+            continue
+        if ch in _MONEY_APOSTROPHES:
+            # Apostrophe thousands are not accepted; digit continuation → malformed.
+            if i + 1 < n and rest[i + 1].isdigit():
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            break
+        if ch in _MONEY_DASHES:
+            # Digits after dash ⇒ malformed body (never a shorter valid prefix).
+            if i + 1 < n and rest[i + 1].isdigit():
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            break  # range / prose boundary after a complete token
+        break
+
+    if sep_kind is not None and not (1 <= len(groups[0]) <= 3):
+        return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+
+    int_digits = "".join(groups)
+    decimal_digits: str | None = None
+    if i < n and rest[i] == ".":
+        if i + 1 < n and rest[i + 1] == ".":
+            return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+        if i + 1 < n and rest[i + 1].isdigit():
+            end = _consume_digit_run(rest, i + 1)
+            decimal_digits = rest[i + 1 : end]
+            i = end
+        # else: trailing '.' is prose punctuation; do not consume
+
+    after = rest[i:]
+    if after and _has_invalid_money_continuation(after):
+        return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+
+    canonical = int_digits if decimal_digits is None else f"{int_digits}.{decimal_digits}"
+    return _MoneyNumericParse(canonical, i, True)
+
+
 def _iter_money_tokens(text: str) -> list[tuple[str, str, str, bool]]:
     """
-    Yield (prefix, num_body, matched_text, is_valid) for each currency-prefixed amount attempt.
+    Yield (prefix, canonical_num_body, matched_text, is_valid) for each currency amount.
 
-    Invalid bodies (e.g. $1,00,0.0.0) are reported as malformed rather than truncated.
+    A candidate is valid only when the *entire* monetary token is syntactically valid.
+    A valid numeric prefix followed by letter/junk/partial grouping continuation is
+    malformed — never silently truncated to a shorter TypedQuantity.
     """
     out: list[tuple[str, str, str, bool]] = []
     for prefix_m in _MONEY_PREFIX_RE.finditer(text):
         rest = text[prefix_m.end() :]
-        body_m = _MONEY_BODY_RE.match(rest)
-        if body_m is None:
-            out.append((prefix_m.group("prefix"), "", prefix_m.group(0).rstrip(), False))
+        parsed = _parse_complete_money_numeric(rest)
+        if parsed.consumed <= 0 and not parsed.is_valid:
+            # Bare prefix or non-numeric body: still a malformed monetary-looking attempt
+            # when the prefix matched with no complete number.
+            junk = _consume_malformed_money_tail(rest, 0)
+            matched_end = prefix_m.end() + junk
+            matched = text[prefix_m.start() : matched_end] if junk else prefix_m.group(0).rstrip()
+            out.append((prefix_m.group("prefix"), "", matched, False))
             continue
-        body = body_m.group(0)
-        # Trim trailing separators that are clause punctuation, not part of the number.
-        while body and body[-1] in {",", "."}:
-            candidate = body[:-1]
-            if _VALID_MONEY_NUM_RE.fullmatch(candidate):
-                body = candidate
-                break
-            body = candidate
-        matched = text[prefix_m.start() : prefix_m.end() + len(body_m.group(0))]
-        # Prefer trimmed body length for matched_text when trailing punctuation was clipped.
-        if body != body_m.group(0):
-            matched = text[prefix_m.start() : prefix_m.end() + len(body)]
-        valid = bool(_VALID_MONEY_NUM_RE.fullmatch(body))
-        out.append((prefix_m.group("prefix"), body, matched, valid))
+        matched_end = prefix_m.end() + parsed.consumed
+        matched = text[prefix_m.start() : matched_end]
+        out.append((prefix_m.group("prefix"), parsed.canonical_body, matched, parsed.is_valid))
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class MoneyScanResult:
+    """Valid unique MONEY quantities plus whether any malformed money token was seen."""
+
+    quantities: tuple[TypedQuantity, ...]
+    has_malformed: bool
+
+
+def scan_money_quantities(text: str) -> MoneyScanResult:
+    """
+    Scan currency-prefixed money tokens in ``text``.
+
+    Malformed monetary-looking tokens are reported via ``has_malformed`` and never
+    contribute a truncated TypedQuantity. Distinctness uses Decimal equality so
+    equivalent integer / trailing-zero forms collapse to one typed candidate.
+    """
+    seen: dict[tuple[str, object], TypedQuantity] = {}
+    has_malformed = False
+    for prefix, body, _matched, is_valid in _iter_money_tokens(text):
+        if not is_valid:
+            has_malformed = True
+            continue
+        if not body:
+            has_malformed = True
+            continue
+        currency = _currency_from_prefix(prefix)
+        if currency is None:
+            has_malformed = True
+            continue
+        value = coerce_decimal_amount(body)
+        key = (currency, value)
+        if key in seen:
+            continue
+        seen[key] = TypedQuantity(
+            quantity_type=QuantityType.MONEY,
+            value=value,
+            currency=currency,
+        )
+    # Deterministic order: first-seen insertion order of dict (py3.7+).
+    return MoneyScanResult(quantities=tuple(seen.values()), has_malformed=has_malformed)
 
 
 def iter_unique_money_quantities(text: str) -> tuple[TypedQuantity, ...]:
     """Parse unique valid MONEY quantities from currency-prefixed tokens in ``text``."""
-    seen: set[tuple[str, str]] = set()
-    out: list[TypedQuantity] = []
-    for prefix, body, _matched, is_valid in _iter_money_tokens(text):
-        if not is_valid or not body:
-            continue
-        currency = _currency_from_prefix(prefix)
-        if currency is None:
-            continue
-        value = coerce_decimal_amount(body.replace(",", ""))
-        key = (str(value), currency)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(
-            TypedQuantity(
-                quantity_type=QuantityType.MONEY,
-                value=value,
-                currency=currency,
-            )
-        )
-    return tuple(out)
+    return scan_money_quantities(text).quantities
 
 
 def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, ...]:
@@ -278,8 +451,7 @@ def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, 
         currency = _currency_from_prefix(prefix)
         if currency is None:
             continue
-        value = coerce_decimal_amount(num_body.replace(",", ""))
-        # Locate match for window context.
+        value = coerce_decimal_amount(num_body)
         pos = text.find(matched_text)
         window = text[max(0, pos - 90) : pos + len(matched_text) + 20] if pos >= 0 else matched_text
         out.append(
@@ -304,6 +476,27 @@ def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, 
             )
         )
     return tuple(out)
+
+
+def extend_span_through_money_tokens(text: str, start: int, end: int) -> int:
+    """
+    Extend ``end`` so no currency-prefixed money token that begins in
+    ``[start, end)`` is truncated mid-token (including glued OCR junk).
+    """
+    if start < 0:
+        start = 0
+    if end < start:
+        end = start
+    extended = end
+    for prefix_m in _MONEY_PREFIX_RE.finditer(text, start, end):
+        rest = text[prefix_m.end() :]
+        parsed = _parse_complete_money_numeric(rest)
+        token_end = prefix_m.end() + max(parsed.consumed, 0)
+        if not parsed.is_valid:
+            token_end = prefix_m.end() + _consume_malformed_money_tail(rest, 0)
+        if token_end > extended:
+            extended = token_end
+    return extended
 
 
 def has_malformed_threshold_token(clause_text: str) -> bool:

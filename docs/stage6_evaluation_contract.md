@@ -51,6 +51,32 @@ Rules:
 4. Period helpers remain in `domain/transaction_taxonomy/period.py`
    (tri-state: `None` means undecidable, not false).
 
+## Materiality money safety (closed by materiality-final-closure)
+
+Parsing rules for `MATERIALITY_FLOOR.threshold` (and other typed money thresholds
+that share the covenant money scanner):
+
+- **Complete monetary token grammar.** One lexer recognizes plain digits,
+  comma thousands, and space thousands (incl. NBSP / narrow NBSP / thin space),
+  plus an optional `.` decimal part. Grouping must be well-formed
+  (1–3 / 3 / 3…). Hyphen/apostrophe mixtures and OCR letter-as-digit tokens
+  fail closed — never emit a shorter valid prefix.
+- **No OCR auto-correction.** Letter-as-digit corruption is not rewritten into
+  digits.
+- **Instruction region invariant.** A materiality/add-back regex match always
+  contributes a region with `end >= match.end()`, then expands to the sentence
+  containing `match.end() - 1`. Legal abbreviations (`п.`, `ст.`, `cl.`, `Sec.`)
+  are not sentence terminators.
+- **All-instruction reconciliation.** Every matched materiality / add-back-floor
+  instruction is scanned; document-level candidates are reconciled:
+  - any relevant malformed threshold-like money → no confident modifier
+  - 0 distinct typed floors → no modifier
+  - 1 distinct `(currency, Decimal)` → publish
+  - >1 distinct → ambiguous / no modifier
+  - identical typed repeats dedupe (no first/last/highest preference)
+- Unrelated money outside a matched materiality instruction must not create
+  false ambiguity. Ranges like `$300,000-$500,000` discover both endpoints.
+
 ## Validation split (HIGH-4)
 
 ### A. PlanStructureValidator
