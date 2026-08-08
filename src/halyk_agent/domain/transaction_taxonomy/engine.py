@@ -14,6 +14,7 @@ from halyk_agent.domain.fact_extraction.models import (
     AmountCorrectionPayload,
     FactKind,
     FactRecord,
+    FactRequirementResult,
     FxRatePayload,
     GroupCapexPayload,
     OffLedgerAmountPayload,
@@ -40,6 +41,7 @@ from halyk_agent.domain.transaction_taxonomy.constants import (
     TAXONOMY_SCHEMA_VERSION,
 )
 from halyk_agent.domain.transaction_taxonomy.membership import (
+    MEMBERSHIP_REASON_ONE_TIME_ADD_BACK,
     membership_reasons,
     selector_memberships,
 )
@@ -153,6 +155,7 @@ def run_transaction_taxonomy(
     routing_manifest_hash: str,
     covenant_manifest_hash: str,
     facts_manifest_hash: str,
+    fact_requirement_results: tuple[FactRequirementResult, ...] | None = None,
 ) -> TaxonomyReport:
     """
     Deterministic Stage 5F pipeline.
@@ -767,8 +770,7 @@ def run_transaction_taxonomy(
         if len(ledger_matches) == 1:
             tid = ledger_matches[0]
             state = classified_mutable[tid]
-            state["effective_category"] = MetricCategory.ONE_TIME_ADD_BACKS
-            state["classification_method"] = ClassificationMethod.AUTHORITATIVE_RECLASSIFICATION
+            # Metric-role augmentation — do NOT replace the expense category.
             state["applied_fact_ids"].append(fact.fact_id)
             state["evidence_refs"].extend(list(fact.evidence_span_ids))
             state["flags"].append("ONE_TIME_ADD_BACK_ATTACHED")
@@ -924,12 +926,16 @@ def run_transaction_taxonomy(
         # Attach semantic memberships (primary + hierarchy; tax is row-level).
         if state["effective_category"] is not None:
             desc = state["description"] or ""
-            state["selector_categories"] = list(
-                selector_memberships(state["effective_category"], description=desc)
-            )
-            state["membership_reasons"] = list(
-                membership_reasons(state["effective_category"], description=desc)
-            )
+            cats = list(selector_memberships(state["effective_category"], description=desc))
+            reason_codes = list(membership_reasons(state["effective_category"], description=desc))
+            # ONE_TIME_ADD_BACK is an additional metric membership, not a reclassification.
+            if "ONE_TIME_ADD_BACK_ATTACHED" in state["flags"]:
+                if MetricCategory.ONE_TIME_ADD_BACKS not in cats:
+                    cats.append(MetricCategory.ONE_TIME_ADD_BACKS)
+                if MEMBERSHIP_REASON_ONE_TIME_ADD_BACK not in reason_codes:
+                    reason_codes.append(MEMBERSHIP_REASON_ONE_TIME_ADD_BACK)
+            state["selector_categories"] = cats
+            state["membership_reasons"] = reason_codes
         else:
             state["selector_categories"] = []
             state["membership_reasons"] = []
@@ -1167,6 +1173,7 @@ def run_transaction_taxonomy(
         tuple(calc_inputs),
         group_capex_unresolved=group_capex_unresolved,
         unrestricted_unresolved=unrestricted_unresolved,
+        requirement_results=fact_requirement_results,
     )
     definition_readiness = build_definition_readiness(definitions, selector_coverage)
 

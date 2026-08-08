@@ -25,7 +25,9 @@ _OPEX_MEMBERS: frozenset[MetricCategory] = frozenset(
 MEMBERSHIP_REASON_HIERARCHY = "METRIC_HIERARCHY_MEMBERSHIP"
 MEMBERSHIP_REASON_PRIMARY = "PRIMARY_CATEGORY"
 MEMBERSHIP_REASON_OPERATING_TAX = "OPERATING_TAX_IN_OPEX"
-MEMBERSHIP_REASON_INCOME_TAX_EXCLUDED = "INCOME_TAX_EXCLUDED_FROM_OPEX"
+MEMBERSHIP_REASON_INCOME_TAX_EXCLUDED = "INCOME_OR_PROFIT_TAX_EXCLUDED_FROM_OPEX"
+MEMBERSHIP_REASON_TAX_SUBTYPE_UNPROVEN = "TAX_SUBTYPE_NOT_PROVEN_OPERATING"
+MEMBERSHIP_REASON_ONE_TIME_ADD_BACK = "AUTHORITATIVE_ONE_TIME_ADD_BACK"
 
 _INCOME_PROFIT_TAX = re.compile(
     r"\b(?:corporate\s+)?(?:income|profit)\s+tax\b|"
@@ -84,8 +86,10 @@ def membership_reasons(
     if primary is MetricCategory.TAXES:
         if tax_has_opex_membership(description):
             reasons.append(MEMBERSHIP_REASON_OPERATING_TAX)
-        else:
+        elif _INCOME_PROFIT_TAX.search(description or ""):
             reasons.append(MEMBERSHIP_REASON_INCOME_TAX_EXCLUDED)
+        else:
+            reasons.append(MEMBERSHIP_REASON_TAX_SUBTYPE_UNPROVEN)
     return tuple(reasons)
 
 
