@@ -77,11 +77,11 @@ def test_advance_profit_tax_not_opex() -> None:
     assert MetricCategory.OPEX not in members
 
 
-def test_property_and_mineral_tax_in_opex() -> None:
-    assert MetricCategory.OPEX in selector_memberships(
+def test_property_and_mineral_tax_remain_tax_statement_lines() -> None:
+    assert MetricCategory.OPEX not in selector_memberships(
         MetricCategory.TAXES, description="Property tax assessment Q2"
     )
-    assert MetricCategory.OPEX in selector_memberships(
+    assert MetricCategory.OPEX not in selector_memberships(
         MetricCategory.TAXES, description="Mineral extraction tax remittance"
     )
 

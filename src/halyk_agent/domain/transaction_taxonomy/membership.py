@@ -8,19 +8,10 @@ import re
 
 from halyk_agent.domain.covenants.ast import MetricCategory
 
-# Operating-expense hierarchy for EBITDA-style Stage 5D "Operating Expenses".
-# LEASE stays outside OPEX: P1 formula is explicitly OPEX + LEASE (additive).
-# INTEREST/CAPEX/REVENUE/FINANCING remain separate from OPEX.
-# TAXES: OPEX membership is row-level (income/profit tax excluded).
-_OPEX_MEMBERS: frozenset[MetricCategory] = frozenset(
-    {
-        MetricCategory.OPEX,
-        MetricCategory.LABOR,
-        MetricCategory.UTILITIES,
-        MetricCategory.INSURANCE_PREMIUMS,
-        MetricCategory.RENT,
-    }
-)
+# Stage 5D selector categories are statement-line semantics, not a generic
+# accounting hierarchy. "Operating Expenses" therefore consumes explicit OPEX
+# statement rows and authoritative OPEX reclassifications only.
+_OPEX_MEMBERS: frozenset[MetricCategory] = frozenset({MetricCategory.OPEX})
 
 MEMBERSHIP_REASON_HIERARCHY = "METRIC_HIERARCHY_MEMBERSHIP"
 MEMBERSHIP_REASON_PRIMARY = "PRIMARY_CATEGORY"
@@ -46,6 +37,13 @@ _OPERATING_TAX = re.compile(
 )
 
 
+_PROPERTY_RENT_LIKE = re.compile(
+    r"\b(?:land|warehouse|premises|office|yard|garage|store|property|ground)\b.{0,40}\b(?:lease|rent)\b|"
+    r"\b(?:lease|rent)\b.{0,40}\b(?:land|warehouse|premises|office|yard|garage|store|property|ground)\b",
+    re.IGNORECASE,
+)
+
+
 def tax_has_opex_membership(text: str) -> bool:
     """Return True when a TAXES row should also match OPEX selectors."""
     if _INCOME_PROFIT_TAX.search(text or ""):
@@ -63,14 +61,15 @@ def selector_memberships(
     members: list[MetricCategory] = [primary]
     if primary in _OPEX_MEMBERS and primary is not MetricCategory.OPEX:
         members.append(MetricCategory.OPEX)
-    if primary is MetricCategory.TAXES and tax_has_opex_membership(description):
-        members.append(MetricCategory.OPEX)
+    if primary is MetricCategory.LEASE_PAYMENTS and _PROPERTY_RENT_LIKE.search(description):
+        members.append(MetricCategory.RENT)
     if (
         primary is MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS
         or primary is MetricCategory.CAPITAL_ASSET_TRANSFER
     ):
-        # Unrestricted-sub selector matches only via unrestricted category + status.
-        pass
+        # The transferred item remains part of the period's capital-asset spend
+        # denominator while its transfer status controls the covenant numerator.
+        members.append(MetricCategory.CAPEX)
     extras = sorted({m for m in members[1:]}, key=lambda m: m.value)
     return (primary, *extras)
 

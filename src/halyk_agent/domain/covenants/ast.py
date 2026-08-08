@@ -35,7 +35,9 @@ class MetricCategory(StrEnum):
     CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS = "CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS"
     GROUP_CAPEX = "GROUP_CAPEX"
     ONE_TIME_ADD_BACKS = "ONE_TIME_ADD_BACKS"
-    # Non-selector audit category — interest income and similar non-covenant inflows.
+    # Non-selector audit categories: classified for provenance / related-party
+    # overlays, but never widened into explicit covenant statement-line selectors.
+    OTHER_EXPENSE = "OTHER_EXPENSE"
     NON_OPERATING_INCOME = "NON_OPERATING_INCOME"
 
 

@@ -175,7 +175,7 @@ def test_accepted_and_rejected_reclassification() -> None:
         facts_manifest_hash="f" * 64,
     )
     by_id = {t.transaction_id: t for t in report.classified}
-    assert by_id["TXN-P1-0001"].original_category is MetricCategory.OPEX
+    assert by_id["TXN-P1-0001"].original_category is MetricCategory.OTHER_EXPENSE
     assert by_id["TXN-P1-0001"].effective_category is MetricCategory.INSURANCE_PREMIUMS
     assert by_id["TXN-P1-0002"].effective_category == by_id["TXN-P1-0002"].original_category
     assert "f-rej" in by_id["TXN-P1-0002"].rejected_fact_ids

@@ -79,7 +79,7 @@ def test_attached_one_time_add_back_preserves_original_expense_membership() -> N
     report = _run(rows, links, defs, facts)
     assert len(report.calculation_inputs) == 1
     inp = report.calculation_inputs[0]
-    assert inp.category is MetricCategory.OPEX
+    assert inp.category is MetricCategory.OTHER_EXPENSE
     assert MetricCategory.OPEX in inp.selector_categories
     assert MetricCategory.ONE_TIME_ADD_BACKS in inp.selector_categories
     assert MEMBERSHIP_REASON_ONE_TIME_ADD_BACK in inp.membership_reasons
@@ -147,7 +147,9 @@ def test_public_shaped_p4_add_backs_share_semantics() -> None:
             ),
         ),
     )
-    # Force unique attach only for A; B/C become fact-derived while ledger twins stay OPEX.
+    # Force unique attach only for A; B/C become fact-derived. The generic
+    # ledger rows stay OTHER_EXPENSE while authoritative facts supply paired
+    # OPEX + add-back inputs.
     report = _run(
         rows,
         links,
@@ -163,16 +165,22 @@ def test_public_shaped_p4_add_backs_share_semantics() -> None:
     )
     by_txn = {i.transaction_id: i for i in report.calculation_inputs if i.transaction_id}
     attached = by_txn["TXN-P4-A"]
-    assert attached.category is MetricCategory.OPEX
+    assert attached.category is MetricCategory.OTHER_EXPENSE
     assert MetricCategory.ONE_TIME_ADD_BACKS in attached.selector_categories
     assert MetricCategory.OPEX in attached.selector_categories
 
     for tid in ("TXN-P4-B", "TXN-P4-C"):
         twin = by_txn[tid]
-        assert twin.category is MetricCategory.OPEX
-        assert MetricCategory.OPEX in twin.selector_categories
+        assert twin.category is MetricCategory.OTHER_EXPENSE
+        assert MetricCategory.OPEX not in twin.selector_categories
         assert MetricCategory.ONE_TIME_ADD_BACKS not in twin.selector_categories
 
+    derived_opex = [
+        i
+        for i in report.calculation_inputs
+        if i.category is MetricCategory.OPEX and i.transaction_id is None
+    ]
+    assert len(derived_opex) == 2
     derived = [
         i
         for i in report.calculation_inputs

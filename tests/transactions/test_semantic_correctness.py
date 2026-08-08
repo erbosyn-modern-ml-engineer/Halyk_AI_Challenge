@@ -169,62 +169,75 @@ def _run(
     )
 
 
-def test_opex_hierarchy_membership_without_duplicate_input() -> None:
+def test_statement_opex_does_not_widen_specialized_expense_families() -> None:
     rows = (
         _row("TXN-X-1", row=0, amount="-100.00", description="Plant insurance premium 2025"),
         _row("TXN-X-2", row=1, amount="-50.00", description="Payroll for laboratory staff"),
         _row("TXN-X-3", row=2, amount="-75.00", description="Warehouse lease — June"),
+        _row("TXN-X-4", row=3, amount="-200.00", description="Operating expenses — June"),
     )
     links = tuple(_link(r.txn_id, "P1", r.row_index) for r in rows)
     report = _run(
-        rows, links, (_definition("P1", MetricCategory.OPEX, MetricCategory.LEASE_PAYMENTS),)
+        rows,
+        links,
+        (_definition("P1", MetricCategory.OPEX, MetricCategory.LEASE_PAYMENTS),),
     )
     by_txn = {i.transaction_id: i for i in report.calculation_inputs}
 
     ins = by_txn["TXN-X-1"]
     assert ins.category is MetricCategory.INSURANCE_PREMIUMS
-    assert MetricCategory.INSURANCE_PREMIUMS in ins.selector_categories
-    assert MetricCategory.OPEX in ins.selector_categories
-    assert len([i for i in report.calculation_inputs if i.transaction_id == "TXN-X-1"]) == 1
+    assert MetricCategory.OPEX not in ins.selector_categories
 
     labor = by_txn["TXN-X-2"]
     assert labor.category is MetricCategory.LABOR
-    assert MetricCategory.OPEX in labor.selector_categories
+    assert MetricCategory.OPEX not in labor.selector_categories
 
     lease = by_txn["TXN-X-3"]
     assert lease.category is MetricCategory.LEASE_PAYMENTS
+    assert MetricCategory.RENT in lease.selector_categories
     assert MetricCategory.OPEX not in lease.selector_categories
+
+    opex = by_txn["TXN-X-4"]
+    assert opex.category is MetricCategory.OPEX
+    assert MetricCategory.OPEX in opex.selector_categories
 
     opex_sel = TransactionSelector(category=MetricCategory.OPEX)
     lease_sel = TransactionSelector(category=MetricCategory.LEASE_PAYMENTS)
-    capex_sel = TransactionSelector(category=MetricCategory.CAPEX)
-    assert input_matches_selector(ins, opex_sel)
-    assert input_matches_selector(
-        ins, TransactionSelector(category=MetricCategory.INSURANCE_PREMIUMS)
-    )
-    assert not input_matches_selector(ins, capex_sel)
-    assert input_matches_selector(labor, opex_sel)
+    assert not input_matches_selector(ins, opex_sel)
+    assert not input_matches_selector(labor, opex_sel)
     assert input_matches_selector(lease, lease_sel)
     assert not input_matches_selector(lease, opex_sel)
+    assert input_matches_selector(opex, opex_sel)
 
 
-def test_membership_helpers_labor_utilities_insurance() -> None:
+def test_membership_helpers_preserve_statement_line_boundaries() -> None:
     for primary in (
         MetricCategory.LABOR,
         MetricCategory.UTILITIES,
         MetricCategory.INSURANCE_PREMIUMS,
         MetricCategory.RENT,
+        MetricCategory.TAXES,
     ):
-        members = selector_memberships(primary)
+        members = selector_memberships(primary, description="Property tax assessment")
         assert members[0] is primary
-        assert MetricCategory.OPEX in members
-    assert MetricCategory.OPEX in selector_memberships(
-        MetricCategory.TAXES, description="Property tax assessment"
+        assert MetricCategory.OPEX not in members
+
+    property_lease = selector_memberships(
+        MetricCategory.LEASE_PAYMENTS, description="Warehouse lease — June"
     )
-    assert MetricCategory.OPEX not in selector_memberships(
-        MetricCategory.TAXES, description="Corporate income tax instalment"
+    assert MetricCategory.RENT in property_lease
+    telecom_lease = selector_memberships(
+        MetricCategory.LEASE_PAYMENTS, description="Telecom leased line — site office"
     )
-    assert MetricCategory.OPEX not in selector_memberships(MetricCategory.LEASE_PAYMENTS)
+    assert MetricCategory.RENT not in telecom_lease
+
+    for primary in (
+        MetricCategory.CAPITAL_ASSET_TRANSFER,
+        MetricCategory.CAPITAL_ASSET_TRANSFERS_TO_UNRESTRICTED_SUBS,
+    ):
+        assert MetricCategory.CAPEX in selector_memberships(primary)
+
+    assert selector_memberships(MetricCategory.OPEX) == (MetricCategory.OPEX,)
     assert MetricCategory.OPEX not in selector_memberships(MetricCategory.CAPEX)
     assert MetricCategory.OPEX not in selector_memberships(MetricCategory.REVENUE)
 
@@ -236,7 +249,7 @@ def test_membership_helpers_labor_utilities_insurance() -> None:
         ("VAT refund received — Q1", MetricCategory.TAXES),
         ("Insurance broker rebate — annual", MetricCategory.INSURANCE_PREMIUMS),
         ("Tax overpayment refunded", MetricCategory.TAXES),
-        ("Marketing overbilling refund", MetricCategory.OPEX),
+        ("Marketing overbilling refund", MetricCategory.OTHER_EXPENSE),
         ("Interest income on treasury bills", MetricCategory.NON_OPERATING_INCOME),
         ("Interest credited on current account", MetricCategory.NON_OPERATING_INCOME),
         ("Customer invoice collection — April", MetricCategory.REVENUE),
@@ -572,8 +585,8 @@ def test_accepted_reclass_survives_memberships() -> None:
     report = _run(rows, links, (_definition("P1", MetricCategory.OPEX),), facts)
     inp = report.calculation_inputs[0]
     assert inp.category is MetricCategory.INSURANCE_PREMIUMS
-    assert MetricCategory.OPEX in inp.selector_categories
-    assert input_matches_selector(inp, TransactionSelector(category=MetricCategory.OPEX))
+    assert MetricCategory.OPEX not in inp.selector_categories
+    assert not input_matches_selector(inp, TransactionSelector(category=MetricCategory.OPEX))
     assert inp.source_amount == Decimal("-100.00")
     assert inp.metric_amount == Decimal("100.00")
     assert any(

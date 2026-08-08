@@ -155,11 +155,32 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
         MetricCategory.REVENUE,
         _REVENUE_PRIMITIVES,
     ),
+    (
+        "OPEX_STATEMENT_LINE",
+        MetricCategory.OPEX,
+        re.compile(
+            r"\boperating\s+(?:and\s+maintenance\s+)?expenses?\b|"
+            r"\b(?:servicing\s+and\s+)?operating\s+costs?\b|"
+            r"\boperational\s+expenses?\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "OPEX_DIRECT_OPERATIONS",
+        MetricCategory.OPEX,
+        re.compile(
+            r"\b(?:catalyst|equipment|plant|machinery|turbine|pump|kiln|refinery)\b"
+            r".{0,60}\b(?:servicing|maintenance|repair|regeneration)\b|"
+            r"\b(?:servicing|maintenance|repair|regeneration)\b.{0,60}"
+            r"\b(?:catalyst|equipment|plant|machinery|turbine|pump|kiln|refinery)\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 _WEAK_OPEX = (
-    "OPEX_WEAK",
-    MetricCategory.OPEX,
+    "OTHER_EXPENSE_WEAK",
+    MetricCategory.OTHER_EXPENSE,
     re.compile(
         r"\badvisory\b|\bretainer\b|\bconsulting\b|\bservicing\b|\bsupplies\b|"
         r"\bmarketing\b|\bad\s+campaign\b|\badvertis|\bsponsorship\b|\bmedia\b|"
@@ -210,8 +231,8 @@ _EXPENSE_CREDIT_FAMILIES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...
         re.compile(r"\binterest\b", re.IGNORECASE),
     ),
     (
-        "OPEX_CREDIT",
-        MetricCategory.OPEX,
+        "OTHER_EXPENSE_CREDIT",
+        MetricCategory.OTHER_EXPENSE,
         re.compile(
             r"\bmarketing\b|\bad\s+campaign\b|\badvertis|\badvisory\b|"
             r"\bservicing\b|\bsupplies\b",
@@ -261,8 +282,8 @@ def _classify_credit_family(text: str) -> ClassificationHit | None:
                 category=only,
                 rule="+".join(sorted(r for r, _ in hits)),
             )
-        # Prefer more specific expense families over OPEX_CREDIT.
-        non_opex = [(r, c) for r, c in hits if c is not MetricCategory.OPEX]
+        # Prefer more specific expense families over the generic expense bucket.
+        non_opex = [(r, c) for r, c in hits if c is not MetricCategory.OTHER_EXPENSE]
         if len({c for _, c in non_opex}) == 1:
             rule_id, category = non_opex[0]
             return ClassificationHit(status="CLASSIFIED", category=category, rule=rule_id)
@@ -314,11 +335,12 @@ def classify_description(description: str) -> ClassificationHit:
 
     if len(strong_hits) > 1:
         rule_ids = {r for r, _ in strong_hits}
-        # capitalised interest → CAPEX
+        # Capitalised interest remains an interest financing cost for covenant
+        # CAPEX selectors unless the covenant/source explicitly reclassifies it.
         if rule_ids >= {"CAPEX", "INTEREST_EXPENSE"} and re.search(
-            r"\bcapitalis(?:ed|ed)\b", text, re.IGNORECASE
+            r"\bcapitalis(?:ed|ed)\s+interest\b", text, re.IGNORECASE
         ):
-            strong_hits = [("CAPEX_CAPITALISED_INTEREST", MetricCategory.CAPEX)]
+            strong_hits = [("INTEREST_CAPITALISED", MetricCategory.INTEREST_EXPENSE)]
         # unrestricted transfer beats bare subsidiary transfer
         elif "CAPITAL_TRANSFER_UNRESTRICTED" in rule_ids:
             strong_hits = [
@@ -329,11 +351,12 @@ def classify_description(description: str) -> ClassificationHit:
             ]
         elif rule_ids >= {"CAPITAL_TRANSFER_SUBSIDIARY", "CAPEX"}:
             strong_hits = [("CAPITAL_TRANSFER_SUBSIDIARY", MetricCategory.CAPITAL_ASSET_TRANSFER)]
-        # "leased line" is a lease product; prefer LEASE over UTILITIES(telecom).
+        # A telecom leased line is a telecom utility service, not a property or
+        # equipment lease payment for covenant denominator purposes.
         elif rule_ids >= {"LEASE", "UTILITIES"} and re.search(
             r"\bleased\s+line\b", text, re.IGNORECASE
         ):
-            strong_hits = [("LEASE_LINE", MetricCategory.LEASE_PAYMENTS)]
+            strong_hits = [("TELECOM_LEASED_LINE", MetricCategory.UTILITIES)]
 
     if len(strong_hits) > 1:
         categories = {c for _, c in strong_hits}
