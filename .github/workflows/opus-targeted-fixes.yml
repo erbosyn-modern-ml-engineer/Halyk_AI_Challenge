@@ -48,6 +48,17 @@ jobs:
               raise SystemExit("generated long-note literal not found")
           test_path.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
 
+          fact_test = Path("tests/facts/test_parse_money_contract.py")
+          fact_text = fact_test.read_text(encoding="utf-8")
+          marker = '        "$3OO,OOO",\n'
+          if marker not in fact_text:
+              raise SystemExit("Stage 5E malformed money regression marker not found")
+          fact_test.write_text(
+              fact_text.replace(marker, marker + '        "$5,OOO,000",\n', 1),
+              encoding="utf-8",
+              newline="\n",
+          )
+
           source_path = Path("src/halyk_agent/domain/fact_extraction/text_locate.py")
           source = source_path.read_text(encoding="utf-8")
           start = source.index("def parse_money(text: str) -> tuple[Decimal, str] | None:\n")
@@ -90,6 +101,51 @@ jobs:
           source = source.replace("r\"(?<![\\w,.'’`])\"", "r\"(?<![\\w,.'`])\"")
           source_path.write_text(source, encoding="utf-8", newline="\n")
 
+          covenant_path = Path("src/halyk_agent/domain/covenants/parse.py")
+          covenant = covenant_path.read_text(encoding="utf-8")
+          needle = '''            if nxt < n and rest[nxt] == ",":
+                return _MoneyNumericParse(
+                    "", _consume_malformed_money_tail(rest, 0), False
+                )
+            if nxt < n and _is_money_group_space(rest[nxt]):
+          '''
+          replacement = '''            if nxt < n and rest[nxt] == ",":
+                return _MoneyNumericParse(
+                    "", _consume_malformed_money_tail(rest, 0), False
+                )
+            if nxt < n and (rest[nxt].isalpha() or rest[nxt] in "._-'`"):
+                return _MoneyNumericParse(
+                    "", _consume_malformed_money_tail(rest, 0), False
+                )
+            if nxt < n and _is_money_group_space(rest[nxt]):
+          '''
+          needle = textwrap.dedent(needle)
+          replacement = textwrap.dedent(replacement)
+          # Dedent destroys the function indentation; replace using stripped fragments.
+          old_fragment = '''            if nxt < n and rest[nxt] == ",":
+                return _MoneyNumericParse(
+                    "", _consume_malformed_money_tail(rest, 0), False
+                )
+            if nxt < n and _is_money_group_space(rest[nxt]):
+'''
+          new_fragment = '''            if nxt < n and rest[nxt] == ",":
+                return _MoneyNumericParse(
+                    "", _consume_malformed_money_tail(rest, 0), False
+                )
+            if nxt < n and (rest[nxt].isalpha() or rest[nxt] in "._-'`"):
+                return _MoneyNumericParse(
+                    "", _consume_malformed_money_tail(rest, 0), False
+                )
+            if nxt < n and _is_money_group_space(rest[nxt]):
+'''
+          if old_fragment not in covenant:
+              raise SystemExit("generated money comma guard not found")
+          covenant_path.write_text(
+              covenant.replace(old_fragment, new_fragment, 1),
+              encoding="utf-8",
+              newline="\n",
+          )
+
           fallback_path = Path("src/halyk_agent/solver/fallbacks.py")
           fallback = fallback_path.read_text(encoding="utf-8")
           duplicate = (
@@ -106,7 +162,7 @@ jobs:
               return parse_money(note[match.end() : match.end() + 120])
           '''
           new_helper = '''def _money_after_label(note: str, match: re.Match[str]) -> tuple[Decimal, str] | None:
-              # A PPE row may only bind to money on that same logical line.  Searching
+              # A PPE row may only bind to money on that same logical line. Searching
               # farther would let a malformed opening value borrow a later valid row.
               remainder = note[match.end() :]
               line = remainder.splitlines()[0] if remainder else ""
