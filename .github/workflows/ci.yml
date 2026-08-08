@@ -49,17 +49,19 @@ jobs:
       - name: Sync locked environment
         run: uv sync --frozen --extra full --extra retrieval-full
 
-      - name: Normalize staged patch
-        if: github.event_name == 'push' && github.ref_name == 'stage-7/solver-integration' && hashFiles('/tmp/stage789.patch') != ''
+      - name: Normalize and publish branch changes
+        if: github.event_name == 'push' && github.ref_name == 'stage-7/solver-integration'
         run: |
           uv run ruff format .
           uv run ruff check --fix --unsafe-fixes .
           git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "feat(solver): integrate deterministic Stage 7-9 competition pipeline"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "feat(solver): integrate deterministic Stage 7-9 competition pipeline"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
 
       - name: Ruff format
         run: uv run ruff format --check .
