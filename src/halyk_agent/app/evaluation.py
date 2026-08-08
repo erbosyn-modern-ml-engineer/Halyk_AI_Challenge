@@ -191,9 +191,13 @@ def evaluate_from_paths(
         )
 
     plans = plan_definitions(definitions)
+    plan_scenarios = {plan.scenario_id for plan in plans}
+    execution_inputs = tuple(
+        item for item in calculation_inputs if item.scenario_id in plan_scenarios
+    )
     context = EvaluationContext(
         amount_contract_version=taxonomy_manifest.amount_contract_version,
-        calculation_inputs=calculation_inputs,
+        calculation_inputs=execution_inputs,
         selector_coverage=selector_coverage,
         definition_readiness=definition_readiness,
     )

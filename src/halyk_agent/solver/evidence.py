@@ -241,6 +241,21 @@ def _counterfactual_context(
     if not relevant:
         return None
 
+    amount_was_absent = any(
+        event.event_type is AdjustmentEventType.AMOUNT_CORRECTION
+        and event.before.get("effective_amount") in {None, ""}
+        and classified_row.original_amount is None
+        for event in relevant
+    )
+    if amount_was_absent:
+        return context.model_copy(
+            update={
+                "calculation_inputs": tuple(
+                    item for item in context.calculation_inputs if item.input_id != current.input_id
+                )
+            }
+        )
+
     # Restoration is deterministic and conservative.  Category is restored before
     # amount/period fields because metric sign semantics depend on category.
     priority = {

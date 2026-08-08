@@ -14,6 +14,7 @@ from halyk_agent.domain.covenant_evaluation import (
     EvaluationPlan,
     EvaluationReport,
 )
+from halyk_agent.domain.covenants.models import CovenantCompileFailure
 from halyk_agent.domain.transaction_taxonomy.models import AdjustmentEvent, ClassifiedTransaction
 from halyk_agent.solver.audit import RunFileAudit
 from halyk_agent.solver.errors import SubmissionSchemaError
@@ -74,6 +75,7 @@ def build_final_submission(
     contact_email: str | None = None,
     model_name: str | None = None,
     fallback_results: dict[tuple[str, str], CovenantEvaluationResult] | None = None,
+    compile_failures: tuple[CovenantCompileFailure, ...] = (),
 ) -> tuple[SubmissionDocument, tuple[dict[str, Any], ...]]:
     """Fill exactly the template universe; non-evaluable cells remain explicit nulls."""
 
@@ -92,9 +94,24 @@ def build_final_submission(
         for scenario_id, cells in template.answers.items()
         for clause_id in cells
     }
-    if set(result_map) != template_keys or set(plan_map) != template_keys:
+    result_keys = set(result_map)
+    plan_keys = set(plan_map)
+    if result_keys != plan_keys:
+        raise SubmissionSchemaError("evaluation result/plan universes differ")
+    if not result_keys.issubset(template_keys):
+        raise SubmissionSchemaError("evaluation contains keys outside submission template")
+    failure_map: dict[tuple[str, str], CovenantCompileFailure] = {}
+    for failure in compile_failures:
+        key = (failure.scenario_id, failure.clause_id)
+        if key in failure_map:
+            raise SubmissionSchemaError(f"duplicate compile failure for {key}")
+        failure_map[key] = failure
+    if set(failure_map) & result_keys:
+        raise SubmissionSchemaError("compiled results overlap covenant compile failures")
+    missing_keys = template_keys - result_keys
+    if set(failure_map) != missing_keys:
         raise SubmissionSchemaError(
-            "evaluation universe must exactly match submission template keys"
+            "missing evaluation keys must exactly match covenant compile failures"
         )
 
     answers: dict[str, dict[str, CovenantCell]] = {}
@@ -103,6 +120,20 @@ def build_final_submission(
         answers[scenario_id] = {}
         for clause_id in template_cells:
             key = (scenario_id, clause_id)
+            if key not in result_map:
+                failure = failure_map[key]
+                answers[scenario_id][clause_id] = CovenantCell()
+                unresolved.append(
+                    {
+                        "scenario_id": scenario_id,
+                        "covenant_id": clause_id,
+                        "evaluation_status": "COMPILE_FAILURE",
+                        "activation_state": "NOT_APPLICABLE",
+                        "reason_codes": [failure.status.value],
+                        "compile_reason": failure.reason,
+                    }
+                )
+                continue
             strict_result = result_map[key]
             plan = plan_map[key]
             result = strict_result

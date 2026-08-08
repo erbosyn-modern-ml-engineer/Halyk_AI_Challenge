@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation
 
+from halyk_agent.domain.covenants.parse import scan_money_quantities
 from halyk_agent.domain.parsing import CanonicalDocument
 
 TXN_ID_RE = re.compile(r"\bTXN-[A-Za-z0-9]+-\d+\b")
@@ -25,6 +26,12 @@ _PERCENT_RE = re.compile(
 )
 
 _SYM_CURRENCY = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
+_SUFFIX_MONEY_RE = re.compile(
+    r"(?<![\w,.'`])"
+    r"(?P<num>(?:\d{1,3}(?:[ \xa0\u202f\u2009]\d{3})+|\d{1,3}(?:,\d{3})+|\d+)"
+    r"(?:[.,]\d{1,2})?)\s*(?P<code>USD|EUR|GBP|KZT|RUB|JPY)\b",
+    re.IGNORECASE,
+)
 
 
 def find_quote_offsets(
@@ -48,7 +55,9 @@ def find_quote_offsets(
 
 
 def _normalize_number(raw: str) -> Decimal:
-    cleaned = raw.strip().replace("\xa0", "").replace(" ", "")
+    cleaned = raw.strip()
+    for separator in ("\xa0", "\u202f", "\u2009", " ", "\t"):
+        cleaned = cleaned.replace(separator, "")
     if "," in cleaned and "." in cleaned:
         if cleaned.rfind(",") > cleaned.rfind("."):
             cleaned = cleaned.replace(".", "").replace(",", ".")
@@ -67,35 +76,32 @@ def _normalize_number(raw: str) -> Decimal:
 
 
 def parse_money(text: str) -> tuple[Decimal, str] | None:
-    """Parse the first money amount in ``text`` → (Decimal, currency)."""
-    for match in _MONEY_RE.finditer(text):
-        sym = match.group("sym")
-        num = match.group("num")
-        if num is None and sym is None:
-            continue
-        # Require either a currency symbol/code or a clearly decimal amount near $.
-        if sym is None and not (match.group("code") or match.group("code2")):
-            # Skip bare numbers without currency markers.
-            continue
-        if num is None:
-            continue
-        currency = (
-            _SYM_CURRENCY.get(sym or "", "") or (match.group("code") or match.group("code2") or "")
-        ).upper()
-        if not currency:
-            continue
-        try:
-            return _normalize_number(num), currency
-        except ValueError:
-            continue
-    # Explicit "$1,234.56" style when group names miss overlapping alternatives.
-    simple = re.search(
-        r"(?P<sym>\$|€|£)\s*(?P<num>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)",
-        text,
-    )
-    if simple:
-        currency = _SYM_CURRENCY[simple.group("sym")]
-        return _normalize_number(simple.group("num")), currency
+    """Parse the first complete money token without shorter-prefix recovery."""
+
+    # Suffix ISO notation (``1 234,56 USD``) is legitimate, but it may
+    # not rescue a malformed currency-prefixed token such as ``$300,00 USD``.
+    suffix = _SUFFIX_MONEY_RE.search(text)
+    if suffix is not None:
+        before = text[: suffix.start()]
+        prior_currency = re.search(
+            r"[$€£¥₸]|\b(?:USD|EUR|GBP|KZT|RUB|JPY)\b", before, re.IGNORECASE
+        )
+        prefix = before.rstrip()
+        bad_numeric_continuation = bool(prefix and (prefix[-1].isdigit() or prefix[-1] in ",.'`"))
+        if prior_currency is None and not bad_numeric_continuation:
+            try:
+                return _normalize_number(suffix.group("num")), suffix.group("code").upper()
+            except ValueError:
+                return None
+
+    scan = scan_money_quantities(text)
+    if scan.has_malformed:
+        return None
+    if scan.quantities:
+        quantity = scan.quantities[0]
+        if quantity.currency is None:
+            return None
+        return quantity.value, quantity.currency
     return None
 
 

@@ -25,6 +25,7 @@ from halyk_agent.app.transactions import transactions_from_paths
 from halyk_agent.config import Settings, get_settings
 from halyk_agent.dataset_access import FileOpener, resolve_dataset_path
 from halyk_agent.domain.covenant_evaluation import EvaluationContext, EvaluationReport
+from halyk_agent.domain.covenants.models import CovenantReport
 from halyk_agent.domain.datasets import (
     ArtifactFormat,
     ArtifactRole,
@@ -68,6 +69,7 @@ class CompetitionPipelineRun:
     facts_dir: Path
     transactions_dir: Path
     evaluation_dir: Path
+    covenants: CovenantReport
     taxonomy: TaxonomyReport
     evaluation: EvaluationReport
     context: EvaluationContext
@@ -390,9 +392,12 @@ def run_competition_pipeline(
     except Exception as exc:
         raise CompetitionPipelineError(str(exc), stage="evaluation") from exc
 
+    evaluation_scenarios = {plan.scenario_id for plan in evaluation.plans}
     context = EvaluationContext(
         amount_contract_version=taxonomy.manifest.amount_contract_version,
-        calculation_inputs=taxonomy.calculation_inputs,
+        calculation_inputs=tuple(
+            item for item in taxonomy.calculation_inputs if item.scenario_id in evaluation_scenarios
+        ),
         selector_coverage=taxonomy.selector_coverage,
         definition_readiness=taxonomy.definition_readiness,
     )
@@ -447,6 +452,7 @@ def run_competition_pipeline(
         facts_dir=facts_dir,
         transactions_dir=transactions_dir,
         evaluation_dir=evaluation_dir,
+        covenants=covenants,
         taxonomy=taxonomy,
         evaluation=evaluation,
         context=context,
