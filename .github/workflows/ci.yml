@@ -24,7 +24,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check uv
 
       - name: Sync locked environment
-        run: uv sync --frozen --extra retrieval-full
+        run: uv sync --frozen --extra full --extra retrieval-full
 
       - name: Ruff normalize Stage 6 branch
         if: github.event_name == 'push' && github.ref_name == 'stage-6/covenant-evaluator'
