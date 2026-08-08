@@ -205,7 +205,12 @@ def discover_and_sanitize(root: Path) -> tuple[SanitizedDatasetManifest, list[di
 
     root_ledgers = [item for item in ledgers if Path(item.path).parent == root]
     primary_ledger = sorted(root_ledgers or ledgers, key=lambda r: r.path)[0]
-    submission_template = sorted(templates, key=lambda r: r.path)[0]
+    root_templates = [item for item in templates if Path(item.path).parent == root]
+    template_candidates = root_templates or templates
+    if len(template_candidates) != 1:
+        paths = sorted(item.path for item in template_candidates)
+        raise DatasetAdapterError(f"ambiguous submission templates: {paths}")
+    submission_template = template_candidates[0]
 
     manifest = SanitizedDatasetManifest(
         case_descriptions=sorted(case_descriptions, key=lambda r: r.path),

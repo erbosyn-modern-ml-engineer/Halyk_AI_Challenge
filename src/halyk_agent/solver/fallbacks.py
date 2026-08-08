@@ -25,6 +25,7 @@ from halyk_agent.domain.covenant_evaluation import (
     EvaluationStatus,
 )
 from halyk_agent.domain.covenants.ast import MetricCategory
+from halyk_agent.domain.fact_extraction.text_locate import parse_money
 from halyk_agent.domain.ids import deterministic_id
 from halyk_agent.domain.transaction_taxonomy.amounts import sign_contract_for_category
 from halyk_agent.domain.transaction_taxonomy.models import (
@@ -40,17 +41,44 @@ from halyk_agent.domain.transaction_taxonomy.models import (
     SelectorReadinessStatus,
 )
 
-_MONEY = r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)"
-_OPENING_RE = re.compile(rf"Net book value at the beginning of the year\s*{_MONEY}", re.I)
-_DEPRECIATION_RE = re.compile(rf"Depreciation charge for the year\s*{_MONEY}", re.I)
-_CLOSING_RE = re.compile(rf"Net book value at the end of the year\s*{_MONEY}", re.I)
+_OPENING_RE = re.compile(r"Net book value at the beginning of the year\s*", re.I)
+_DEPRECIATION_RE = re.compile(r"Depreciation charge for the year\s*", re.I)
+_CLOSING_RE = re.compile(r"Net book value at the end of the year\s*", re.I)
 _NO_DISPOSALS_RE = re.compile(
     r"There were no disposals of property, plant and equipment during the year", re.I
 )
+_NO_OTHER_MOVEMENTS_RE = re.compile(r"There were no other movements[^.\n]*", re.I)
+_NOTE_HEADING_RE = re.compile(r"(?im)^\s*note\s+(?P<number>\d+)\b")
 _OTHER_MOVEMENT_RE = re.compile(
-    r"\b(?:acquisition|transfer|revaluation|impairment|foreign exchange|fx movement)\b",
+    r"\b(?:"
+    r"additions?|acquisitions?|business combinations?|"
+    r"transfers?(?:\s+(?:in|out))?|revaluations?|impairments?|"
+    r"foreign exchange(?:\s+movements?)?|fx movements?|"
+    r"(?:currency\s+)?translation(?:\s+(?:differences?|movements?))?|"
+    r"assets? held for sale|write[- ]?offs?|reclassifications?|"
+    r"government grants?|capitali[sz]ed borrowing costs?|depletion|"
+    r"right[- ]of[- ]use|other movements?"
+    r")\b",
     re.I,
 )
+
+
+def _extract_note_section(full_text: str, number: int) -> str | None:
+    headings = list(_NOTE_HEADING_RE.finditer(full_text))
+    for index, heading in enumerate(headings):
+        if int(heading.group("number")) != number:
+            continue
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(full_text)
+        return full_text[heading.start() : end]
+    return None
+
+
+def _money_after_label(note: str, match: re.Match[str]) -> tuple[Decimal, str] | None:
+    # A PPE row may only bind to money on that same logical line. Searching
+    # farther would let a malformed opening value borrow a later valid row.
+    remainder = note[match.end() :]
+    line = remainder.splitlines()[0] if remainder else ""
+    return parse_money(line[:120])
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +89,6 @@ class CompetitiveFallbackReport:
     context: EvaluationContext
     diagnostics: tuple[dict[str, Any], ...]
     eur_usd_rate: Decimal | None
-
-
-def _decimal_money(match: re.Match[str]) -> Decimal:
-    return Decimal(match.group(1).replace(",", ""))
 
 
 def _settlement_eur_usd_rate(
@@ -154,12 +178,11 @@ def _derive_p5_group_capex(
     parsed_dir: Path,
     routing_dir: Path,
 ) -> tuple[Decimal | None, dict[str, Any] | None]:
-    """Bounded PPE residual bridge for the one incomplete P5 group-capex source.
+    """Conservative competition-only PPE residual bridge for the P5 group source.
 
-    The strict extractor correctly refuses to *prove* all unlisted movement classes
-    are zero.  For competition fallback only, accept a group-linked Note 7 when it
-    contains one opening NBV, one depreciation charge, one closing NBV, an explicit
-    no-disposals sentence, and no named competing movement class in that note.
+    Unlike strict Stage 5E, this bridge still assumes *unmentioned* movement
+    families are zero.  It must therefore close whenever the actual Note 7 names
+    another movement family, contains malformed money, or is structurally ambiguous.
     """
 
     docs = _parsed_documents(parsed_dir)
@@ -170,10 +193,9 @@ def _derive_p5_group_capex(
         if item is None:
             continue
         source_file, full_text = item
-        note_start = full_text.casefold().find("note 7")
-        if note_start < 0:
+        note = _extract_note_section(full_text, 7)
+        if note is None:
             continue
-        note = full_text[note_start : note_start + 2500]
         opening_matches = list(_OPENING_RE.finditer(note))
         dep_matches = list(_DEPRECIATION_RE.finditer(note))
         closing_matches = list(_CLOSING_RE.finditer(note))
@@ -182,14 +204,21 @@ def _derive_p5_group_capex(
             and _NO_DISPOSALS_RE.search(note)
         ):
             continue
-        # Do not residual-bridge a note that itself names another movement class.
+
         scrubbed = _NO_DISPOSALS_RE.sub("", note)
+        scrubbed = _NO_OTHER_MOVEMENTS_RE.sub("", scrubbed)
         if _OTHER_MOVEMENT_RE.search(scrubbed):
             continue
-        opening = _decimal_money(opening_matches[0])
-        depreciation = _decimal_money(dep_matches[0])
-        closing = _decimal_money(closing_matches[0])
-        residual = closing - opening + depreciation
+
+        opening = _money_after_label(note, opening_matches[0])
+        depreciation = _money_after_label(note, dep_matches[0])
+        closing = _money_after_label(note, closing_matches[0])
+        if opening is None or depreciation is None or closing is None:
+            continue
+        currencies = {opening[1], depreciation[1], closing[1]}
+        if currencies != {"USD"}:
+            continue
+        residual = closing[0] - opening[0] + depreciation[0]
         if residual <= 0:
             continue
         candidates.append(
@@ -200,13 +229,14 @@ def _derive_p5_group_capex(
                     "scenario_id": "P5",
                     "source_file": source_file,
                     "document_id": document_id,
-                    "opening_nbv": str(opening),
-                    "depreciation": str(depreciation),
-                    "closing_nbv": str(closing),
+                    "opening_nbv": str(opening[0]),
+                    "depreciation": str(depreciation[0]),
+                    "closing_nbv": str(closing[0]),
                     "derived_group_capex": str(residual),
                     "assumption": (
-                        "competition-only residual: movements not named in the bounded Note 7 "
-                        "are treated as zero; strict Stage 5E remains unresolved"
+                        "competition-only residual: movement families not named in the "
+                        "complete Note 7 section are treated as zero; strict Stage 5E "
+                        "remains unresolved"
                     ),
                 },
             )

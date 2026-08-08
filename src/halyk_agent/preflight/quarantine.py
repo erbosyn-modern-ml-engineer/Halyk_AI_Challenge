@@ -34,7 +34,9 @@ def is_answer_key_payload(obj: Any) -> bool:
                 continue
             for cell in scenario.values():
                 if isinstance(cell, dict) and (
-                    cell.get("status") is not None or cell.get("actual") is not None
+                    cell.get("status") is not None
+                    or cell.get("actual") is not None
+                    or cell.get("evidence_txn_id") is not None
                 ):
                     return True
     return False

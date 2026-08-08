@@ -212,7 +212,9 @@ def _template_looks_like_scored_answers(payload: object) -> bool:
             continue
         for cell in scenario.values():
             if isinstance(cell, dict) and (
-                cell.get("status") is not None or cell.get("actual") is not None
+                cell.get("status") is not None
+                or cell.get("actual") is not None
+                or cell.get("evidence_txn_id") is not None
             ):
                 return True
     return False
@@ -281,6 +283,7 @@ def solve_competition_from_manifest(
             contact_email=contact_email,
             model_name=model_name,
             fallback_results=fallback.results,
+            compile_failures=pipeline.covenants.failures,
         )
         written = write_final_submission(
             document,

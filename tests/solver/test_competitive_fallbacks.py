@@ -6,6 +6,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from halyk_agent.domain.transaction_taxonomy.models import AdjustmentEvent, AdjustmentEventType
 from halyk_agent.solver.fallbacks import _derive_p5_group_capex, _settlement_eur_usd_rate
 
@@ -91,3 +93,74 @@ Net book value at the end of the year $154,050,122.81
     value, diagnostic = _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing)
     assert value is None
     assert diagnostic is None
+
+
+@pytest.mark.parametrize(
+    "movement",
+    [
+        "Acquisitions were recorded during the year.",
+        "Transfers in were recorded during the year.",
+        "Revaluations were recorded during the year.",
+        "Impairments were recorded during the year.",
+        "FX movements were recorded during the year.",
+        "Currency translation differences were recorded during the year.",
+        "Business combination activity occurred during the year.",
+        "Assets held for sale movement occurred during the year.",
+        "Write-offs were recorded during the year.",
+        "Reclassifications were recorded during the year.",
+        "Government grants affected PPE during the year.",
+        "Capitalised borrowing costs affected PPE during the year.",
+        "Right-of-use movement affected PPE during the year.",
+    ],
+)
+def test_p5_bridge_closes_on_plural_and_synonym_competing_movements(
+    tmp_path: Path, movement: str
+) -> None:
+    note = f"""Note 7 — Property, Plant and Equipment
+There were no disposals of property, plant and equipment during the year.
+Net book value at the beginning of the year $5,000,000
+Depreciation charge for the year $400,000
+Net book value at the end of the year $5,600,000
+{movement}
+"""
+    parsed, routing = _write_p5_bundle(tmp_path, note)
+    assert _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing) == (None, None)
+
+
+def test_p5_bridge_scans_complete_note_not_fixed_character_window(tmp_path: Path) -> None:
+    note = (
+        """Note 7 — Property, Plant and Equipment
+There were no disposals of property, plant and equipment during the year.
+Net book value at the beginning of the year $5,000,000
+Depreciation charge for the year $400,000
+Net book value at the end of the year $5,600,000
+"""
+        + ("narrative " * 400)
+        + "\nRevaluations were recorded.\nNote 8 — Other\n"
+    )
+    parsed, routing = _write_p5_bundle(tmp_path, note)
+    assert _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing) == (None, None)
+
+
+def test_p5_bridge_accepts_complete_unseparated_money_without_truncation(tmp_path: Path) -> None:
+    note = """Note 7 — Property, Plant and Equipment
+There were no disposals of property, plant and equipment during the year.
+Net book value at the beginning of the year $5000000
+Depreciation charge for the year $400000
+Net book value at the end of the year $5600000
+"""
+    parsed, routing = _write_p5_bundle(tmp_path, note)
+    value, diagnostic = _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing)
+    assert value == Decimal("1000000")
+    assert diagnostic is not None
+
+
+def test_p5_bridge_rejects_ocr_corrupt_money(tmp_path: Path) -> None:
+    note = """Note 7 — Property, Plant and Equipment
+There were no disposals of property, plant and equipment during the year.
+Net book value at the beginning of the year $5,OOO,000
+Depreciation charge for the year $400,000
+Net book value at the end of the year $5,600,000
+"""
+    parsed, routing = _write_p5_bundle(tmp_path, note)
+    assert _derive_p5_group_capex(parsed_dir=parsed, routing_dir=routing) == (None, None)

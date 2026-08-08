@@ -171,14 +171,14 @@ def transactions_from_paths(
     routing_scenarios = {link.scenario_id for link in links if link.scenario_id}
     covenant_scenarios = {definition.scenario_id for definition in definitions}
     facts_scenarios = {fact.scenario_id for fact in facts}
-    if routing_scenarios != covenant_scenarios:
+    if not covenant_scenarios.issubset(routing_scenarios):
         raise TransactionServiceError(
-            "routing scenario universe incompatible with covenant scenario universe",
+            "covenant scenario universe is not a subset of routing scenarios",
             code="SCENARIO_UNIVERSE_MISMATCH",
         )
-    if not facts_scenarios.issubset(covenant_scenarios):
+    if not facts_scenarios.issubset(routing_scenarios):
         raise TransactionServiceError(
-            "accepted facts scenario universe incompatible with covenants",
+            "accepted facts scenario universe incompatible with routing",
             code="FACTS_SCENARIO_MISMATCH",
         )
 

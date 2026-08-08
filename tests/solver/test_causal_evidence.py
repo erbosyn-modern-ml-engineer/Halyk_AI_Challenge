@@ -191,3 +191,74 @@ def test_amount_correction_is_causal_inside_shared_multi_definition_context() ->
     )
 
     assert evidence == "TX-i1"
+
+
+def test_amount_correction_from_absent_amount_removes_input_in_counterfactual() -> None:
+    selector = TransactionSelector(category=MetricCategory.REVENUE)
+    definition = _definition(selector)
+    current_input = _input("off", "120", scenario_id="S1").model_copy(
+        update={"applied_fact_ids": ("fact-off-ledger",)}
+    )
+    coverage = SelectorCoverageEntry(
+        definition_id=definition.definition_id,
+        scenario_id=definition.scenario_id,
+        category=selector.category,
+        related_party_only=False,
+        group_level=False,
+        status=SelectorReadinessStatus.READY,
+        reason_code="OK",
+        matching_input_count=1,
+    )
+    readiness = DefinitionReadinessEntry(
+        definition_id=definition.definition_id,
+        scenario_id=definition.scenario_id,
+        status=SelectorReadinessStatus.READY,
+        reason_code="OK",
+    )
+    context = EvaluationContext(
+        amount_contract_version=AMOUNT_CONTRACT_VERSION,
+        calculation_inputs=(current_input,),
+        selector_coverage=(coverage,),
+        definition_readiness=(readiness,),
+    )
+    plan = plan_definition(definition)
+    result = EvaluationExecutor().execute(plan, context)
+    adjustment = AdjustmentEvent(
+        event_id="event-off-ledger",
+        event_type=AdjustmentEventType.AMOUNT_CORRECTION,
+        scenario_id="S1",
+        fact_id="fact-off-ledger",
+        transaction_id="TX-off",
+        before={"effective_amount": None, "currency": "USD"},
+        after={"effective_amount": "120", "currency": "USD"},
+        reason_code="AUTHORITATIVE_AMOUNT_CORRECTION",
+    )
+    classified = ClassifiedTransaction(
+        transaction_id="TX-off",
+        source_ledger="ledger.csv",
+        source_row_index=1,
+        source_sha256="b" * 64,
+        scenario_id="S1",
+        account_id="REV-1",
+        original_amount=None,
+        original_currency="USD",
+        effective_amount=Decimal("120"),
+        effective_currency="USD",
+        original_date=date(2025, 6, 1),
+        original_category=selector.category,
+        effective_category=selector.category,
+        counterparty_raw="Customer LLC",
+        description="Off-ledger revenue correction",
+        classification_status=ClassificationStatus.CLASSIFIED,
+        classification_method=ClassificationMethod.AUTHORITATIVE_RECLASSIFICATION,
+    )
+    assert (
+        select_causal_evidence(
+            plan=plan,
+            result=result,
+            context=context,
+            adjustments=(adjustment,),
+            classified=(classified,),
+        )
+        == "TX-off"
+    )

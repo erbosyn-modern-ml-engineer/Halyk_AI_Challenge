@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from enum import StrEnum
 
 from halyk_agent.domain.covenants.ast import TransactionSelector
@@ -53,15 +54,18 @@ class ThresholdParseResult:
 
 
 # Currency prefix; numeric body is consumed by the complete-token lexer (no prefix truncation).
-_MONEY_PREFIX_RE = re.compile(r"(?P<prefix>\$|USD\s+|EUR\s+|€|KZT\s+|₸)\s*", re.IGNORECASE)
+_MONEY_PREFIX_RE = re.compile(
+    r"(?P<prefix>\$|USD\s+|EUR\s+|€|KZT\s+|₸|GBP\s+|£|RUB\s+|JPY\s+|¥)\s*",
+    re.IGNORECASE,
+)
 _RATIO_TOKEN_RE = re.compile(
-    r"(?<![0-9.])(?P<num>\d+(?:\.\d+)?)\s*x\b(?!\w)",
+    r"(?<![0-9.,])(?P<num>\d+(?:[.,]\d+)?)\s*x\b(?!\w)",
     re.IGNORECASE,
 )
 _PERCENT_TOKEN_RE = re.compile(
-    r"(?<![0-9.])(?P<num>\d+(?:\.\d+)?)\s*%(?!\w)",
+    r"(?<![0-9.,])(?P<num>\d+(?:[.,]\d+)?)\s*%(?!\w)",
 )
-_MALFORMED_RATIO_RE = re.compile(r"(?<![0-9])\d+(?:\.\d+){2,}\s*x\b", re.IGNORECASE)
+_MALFORMED_RATIO_RE = re.compile(r"(?<![0-9])\d+(?:[.,]\d+){2,}\s*x\b", re.IGNORECASE)
 # Bare currency with no following numeric body (do not fire on "USD 1,000").
 _BARE_CURRENCY_RE = re.compile(
     r"(?<!\w)(?:\$|USD|EUR|€|KZT|₸)(?!\s*[0-9])",
@@ -122,6 +126,12 @@ def _norm(text: str) -> str:
     return " ".join(text.replace("\xa0", " ").split())
 
 
+def _coerce_threshold_number(raw: str) -> Decimal:
+    """Parse a dot/comma decimal threshold without permitting partial matches."""
+
+    return coerce_decimal_amount(raw.replace(",", "."))
+
+
 def _currency_from_prefix(prefix: str) -> str | None:
     token = prefix.strip().upper().replace(" ", "")
     if token in {"$", "USD"}:
@@ -130,6 +140,12 @@ def _currency_from_prefix(prefix: str) -> str | None:
         return "EUR"
     if token in {"₸", "KZT"}:
         return "KZT"
+    if token in {"£", "GBP"}:
+        return "GBP"
+    if token == "RUB":
+        return "RUB"
+    if token in {"¥", "JPY"}:
+        return "JPY"
     return None
 
 
@@ -287,6 +303,10 @@ def _parse_complete_money_numeric(rest: str) -> _MoneyNumericParse:
             if sep_kind == "space":
                 return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
             nxt = i + 1
+            if nxt < n and rest[nxt] == ",":
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
+            if nxt < n and (rest[nxt].isalpha() or rest[nxt] in "._-'`"):
+                return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
             if nxt < n and _is_money_group_space(rest[nxt]):
                 return _MoneyNumericParse("", _consume_malformed_money_tail(rest, 0), False)
             if nxt >= n or not rest[nxt].isdigit():
@@ -435,7 +455,7 @@ def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, 
         return ()
     out: list[ThresholdCandidate] = []
     for match in _RATIO_TOKEN_RE.finditer(text):
-        value = coerce_decimal_amount(match.group("num"))
+        value = _coerce_threshold_number(match.group("num"))
         window = text[max(0, match.start() - 90) : match.end() + 20]
         out.append(
             ThresholdCandidate(
@@ -465,7 +485,7 @@ def collect_threshold_candidates(clause_text: str) -> tuple[ThresholdCandidate, 
             )
         )
     for match in _PERCENT_TOKEN_RE.finditer(text):
-        value = coerce_decimal_amount(match.group("num"))
+        value = _coerce_threshold_number(match.group("num"))
         window = text[max(0, match.start() - 90) : match.end() + 20]
         out.append(
             ThresholdCandidate(
