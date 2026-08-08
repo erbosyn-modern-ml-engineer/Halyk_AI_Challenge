@@ -67,11 +67,16 @@ def test_ocr_corrupted_or_malformed_money_never_truncates(text: str) -> None:
     scan = scan_money_quantities(text)
     assert scan.has_malformed is True
     assert scan.quantities == ()
-    # Fail-open regressions explicitly forbidden.
-    assert all(q.value not in {Decimal("3"), Decimal("1"), Decimal("5")} for q in scan.quantities)
+    # Fail-open regressions: truncated prefix amounts must not be published.
+    leaked = {Decimal("3"), Decimal("1"), Decimal("5"), Decimal("300")}
+    assert not any(q.value in leaked for q in scan.quantities)
     assert _floor(f"Разовыми статьи {text}; к EBITDA не прибавляются.") == []
     assert _floor(f"One-time add-backs {text}.") == []
     assert has_malformed_threshold_token(text) is True
+    # Ordinary threshold path must also refuse the token (status present + not ok).
+    threshold = parse_threshold(f"must not exceed {text} for the period")
+    assert threshold.status == "malformed"
+    assert threshold.quantity is None
 
 
 @pytest.mark.parametrize(
