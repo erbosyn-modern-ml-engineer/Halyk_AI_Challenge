@@ -170,9 +170,7 @@ class EvaluationExecutor:
         order = self._structure.validate(plan)
         nodes = {node.node_id: node for node in plan.nodes}
         scenario_inputs = tuple(
-            item
-            for item in context.calculation_inputs
-            if item.scenario_id == plan.scenario_id
+            item for item in context.calculation_inputs if item.scenario_id == plan.scenario_id
         )
         inputs_by_id = {item.input_id: item for item in scenario_inputs}
         results: dict[str, EvaluationNodeResult] = {}
@@ -209,11 +207,7 @@ class EvaluationExecutor:
                 )
                 activation_result = results[plan.activation_root_node_id]
                 activation_node_issues = _dedupe_issues(
-                    [
-                        issue
-                        for node_id in activation_nodes
-                        for issue in results[node_id].issues
-                    ]
+                    [issue for node_id in activation_nodes for issue in results[node_id].issues]
                 )
                 if activation_result.status is NodeResultStatus.ERROR:
                     trace = _trace(plan, order, nodes, results)

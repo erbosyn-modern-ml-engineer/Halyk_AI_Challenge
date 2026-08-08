@@ -76,9 +76,7 @@ def _definition(
         family_id="TEST",
         metric=metric,
         metric_quantity_type=(
-            QuantityType.RATIO
-            if isinstance(metric, Divide)
-            else QuantityType.MONEY
+            QuantityType.RATIO if isinstance(metric, Divide) else QuantityType.MONEY
         ),
         comparator=comparator,
         threshold=threshold,
@@ -162,9 +160,7 @@ def _context(
                     else SelectorReadinessStatus.READY
                 ),
                 reason_code=(
-                    "UNRESOLVED_INPUT"
-                    if readiness is SelectorReadinessStatus.UNRESOLVED
-                    else "OK"
+                    "UNRESOLVED_INPUT" if readiness is SelectorReadinessStatus.UNRESOLVED else "OK"
                 ),
             ),
         ),

@@ -202,13 +202,11 @@ class ContextValidator:
             target_nodes.add(current)
             stack.extend(nodes[current].dependencies)
         coverage = {_coverage_key(entry): entry for entry in context.selector_coverage}
-        readiness = {
-            entry.definition_id: entry for entry in context.definition_readiness
-        }[plan.definition_id]
+        readiness = {entry.definition_id: entry for entry in context.definition_readiness}[
+            plan.definition_id
+        ]
         scenario_inputs = tuple(
-            item
-            for item in context.calculation_inputs
-            if item.scenario_id == plan.scenario_id
+            item for item in context.calculation_inputs if item.scenario_id == plan.scenario_id
         )
 
         issues: list[EvaluationIssue] = []
@@ -264,9 +262,7 @@ class ContextValidator:
                             input_ids=tuple(sorted(undecidable)),
                         )
                     )
-                selected_inputs[node_id] = tuple(
-                    sorted(matches, key=lambda item: item.input_id)
-                )
+                selected_inputs[node_id] = tuple(sorted(matches, key=lambda item: item.input_id))
                 currency_sets[node_id] = frozenset(item.currency for item in matches)
                 continue
 
@@ -320,15 +316,12 @@ class ContextValidator:
                         )
                     )
                 currency_sets[node_id] = (
-                    parent_currencies
-                    if node.kind is EvaluationNodeKind.SUM
-                    else frozenset()
+                    parent_currencies if node.kind is EvaluationNodeKind.SUM else frozenset()
                 )
                 continue
 
             dependency_currency_sets = [
-                currency_sets.get(dependency, frozenset())
-                for dependency in node.dependencies
+                currency_sets.get(dependency, frozenset()) for dependency in node.dependencies
             ]
 
             if node.quantity_type is not QuantityType.MONEY and node.kind not in {

@@ -75,10 +75,7 @@ class PlanStructureValidator:
                 f"root node is missing: {plan.root_node_id}",
                 code="MISSING_ROOT",
             )
-        if (
-            plan.activation_root_node_id is not None
-            and plan.activation_root_node_id not in nodes
-        ):
+        if plan.activation_root_node_id is not None and plan.activation_root_node_id not in nodes:
             raise EvaluationValidationError(
                 f"activation root is missing: {plan.activation_root_node_id}",
                 code="MISSING_ACTIVATION_ROOT",
@@ -166,9 +163,7 @@ class PlanStructureValidator:
                     code="ACTIVATION_PAYLOAD_MISMATCH",
                 )
             activation_type = _numeric_type(nodes[plan.activation_root_node_id])
-            if not _compatible_threshold(
-                activation_type, plan.activation_threshold.quantity_type
-            ):
+            if not _compatible_threshold(activation_type, plan.activation_threshold.quantity_type):
                 raise EvaluationValidationError(
                     "activation threshold type is incompatible with activation metric",
                     code="ACTIVATION_TYPE_MISMATCH",
@@ -306,11 +301,7 @@ class PlanStructureValidator:
 
         if kind in {EvaluationNodeKind.ADD, EvaluationNodeKind.SUBTRACT}:
             allowed = {QuantityType.MONEY, QuantityType.RATIO, QuantityType.COUNT}
-            if (
-                left_type is not right_type
-                or left_type is not qtype
-                or left_type not in allowed
-            ):
+            if left_type is not right_type or left_type is not qtype or left_type not in allowed:
                 raise EvaluationValidationError(
                     f"{kind.value} operands have incompatible types",
                     code="NODE_QUANTITY_TYPE_MISMATCH",

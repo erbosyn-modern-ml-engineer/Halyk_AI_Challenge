@@ -363,9 +363,7 @@ def execute_node(
         )
 
     numbers = tuple(
-        dependency.number
-        for dependency in dependencies
-        if dependency.number is not None
+        dependency.number for dependency in dependencies if dependency.number is not None
     )
     if len(numbers) != len(dependencies):
         issue = _issue(
@@ -383,9 +381,7 @@ def execute_node(
             issues=(issue,),
         )
 
-    contributing = _combine_input_ids(
-        *(item.contributing_input_ids for item in dependencies)
-    )
+    contributing = _combine_input_ids(*(item.contributing_input_ids for item in dependencies))
 
     if node.kind in {EvaluationNodeKind.MIN, EvaluationNodeKind.MAX}:
         assert numbers
@@ -497,10 +493,7 @@ def execute_node(
                     node_id=node.node_id,
                 )
             )
-        if (
-            left.quantity_type is QuantityType.MONEY
-            and right.quantity_type is QuantityType.MONEY
-        ):
+        if left.quantity_type is QuantityType.MONEY and right.quantity_type is QuantityType.MONEY:
             _currency, currency_issue = _money_currency(numbers, node_id=node.node_id)
             if currency_issue is not None:
                 return EvaluationNodeResult(

@@ -62,8 +62,7 @@ def test_missing_dependency_fails_closed() -> None:
     broken = plan.model_copy(
         update={
             "nodes": tuple(
-                broken_root if node.node_id == root.node_id else node
-                for node in plan.nodes
+                broken_root if node.node_id == root.node_id else node for node in plan.nodes
             )
         }
     )

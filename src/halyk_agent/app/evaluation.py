@@ -51,9 +51,7 @@ class EvaluationServiceError(Exception):
 def assert_no_gt_access(path: Path) -> None:
     parts = tuple(part.casefold() for part in path.parts)
     if any(
-        "ground_truth" in part
-        or part.endswith("answer_key.json")
-        or "training_target" in part
+        "ground_truth" in part or part.endswith("answer_key.json") or "training_target" in part
         for part in parts
     ):
         raise EvaluationServiceError(
@@ -86,9 +84,7 @@ def _replace_published_outputs(stage_dir: Path, output_dir: Path) -> None:
     backup_dir: Path | None = None
     existing = list(output_dir.iterdir())
     if existing:
-        backup_dir = Path(
-            tempfile.mkdtemp(prefix=".evaluation-prev-", dir=str(output_dir.parent))
-        )
+        backup_dir = Path(tempfile.mkdtemp(prefix=".evaluation-prev-", dir=str(output_dir.parent)))
         for child in existing:
             os.replace(child, backup_dir / child.name)
     try:
@@ -159,8 +155,7 @@ def evaluate_from_paths(
             code="SELECTOR_COVERAGE_COUNT_MISMATCH",
         )
     expected_readiness_count = (
-        taxonomy_manifest.definition_ready_count
-        + taxonomy_manifest.definition_unresolved_count
+        taxonomy_manifest.definition_ready_count + taxonomy_manifest.definition_unresolved_count
     )
     if len(definition_readiness) != expected_readiness_count:
         raise EvaluationServiceError(
@@ -218,9 +213,7 @@ def evaluate_from_paths(
         plan_count=len(plans),
         result_count=len(results),
         resolved_count=sum(1 for item in results if item.status is EvaluationStatus.RESOLVED),
-        unresolved_count=sum(
-            1 for item in results if item.status is EvaluationStatus.UNRESOLVED
-        ),
+        unresolved_count=sum(1 for item in results if item.status is EvaluationStatus.UNRESOLVED),
         error_count=sum(1 for item in results if item.status is EvaluationStatus.ERROR),
         not_activated_count=sum(
             1 for item in results if item.status is EvaluationStatus.NOT_ACTIVATED

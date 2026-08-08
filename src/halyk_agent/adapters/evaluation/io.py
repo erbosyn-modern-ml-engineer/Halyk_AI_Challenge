@@ -47,8 +47,7 @@ def hash_evaluation_models(models: Sequence[Any]) -> str:
     """Canonical Stage 6 hash; stable ordering is an explicit caller contract."""
 
     payload = [
-        model.model_dump(mode="json") if hasattr(model, "model_dump") else model
-        for model in models
+        model.model_dump(mode="json") if hasattr(model, "model_dump") else model for model in models
     ]
     return sha256_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str))
 
@@ -160,19 +159,14 @@ def render_evaluation_summary(report: EvaluationReport) -> str:
         "## Non-resolved definitions",
         "",
     ]
-    non_resolved = [
-        result
-        for result in report.results
-        if result.status.value != "RESOLVED"
-    ]
+    non_resolved = [result for result in report.results if result.status.value != "RESOLVED"]
     if not non_resolved:
         lines.append("- none")
     else:
         for result in non_resolved:
             issue_codes = ", ".join(issue.code for issue in result.issues) or "none"
             lines.append(
-                f"- `{result.scenario_id}/{result.clause_id}` "
-                f"{result.status.value}: {issue_codes}"
+                f"- `{result.scenario_id}/{result.clause_id}` {result.status.value}: {issue_codes}"
             )
     lines.append("")
     return "\n".join(lines)

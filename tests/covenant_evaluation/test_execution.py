@@ -172,9 +172,7 @@ def test_mixed_currency_fails_closed() -> None:
     )
     result = EvaluationExecutor().execute(plan_definition(definition), context)
     assert result.status is EvaluationStatus.UNRESOLVED
-    assert "MIXED_CURRENCY_NO_TRUSTED_CONVERSION" in {
-        issue.code for issue in result.issues
-    }
+    assert "MIXED_CURRENCY_NO_TRUSTED_CONVERSION" in {issue.code for issue in result.issues}
 
 
 def test_undecidable_period_is_unresolved_not_silently_dropped() -> None:
