@@ -29,6 +29,15 @@ class QualifyingRelatedParty:
 
 
 @dataclass(frozen=True, slots=True)
+class DamagedOwnershipEntity:
+    scenario_id: str
+    entity_name: str
+    ownership_percent: Decimal
+    threshold_percent: Decimal
+    fact_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RelatedPartyDecision:
     status: RelatedPartyStatus
     basis: RelatedPartyBasis
@@ -67,6 +76,73 @@ def scenario_has_damaged_ownership(facts: tuple[FactRecord, ...], scenario_id: s
         if is_damaged_entity_name(payload.entity_name):
             return True
     return False
+
+
+def damaged_qualifying_entities(
+    facts: tuple[FactRecord, ...],
+) -> tuple[DamagedOwnershipEntity, ...]:
+    """Ownership rows that meet threshold but have damaged names (not matchable exactly)."""
+    by_scenario: dict[str, list[FactRecord]] = {}
+    for fact in facts:
+        by_scenario.setdefault(fact.scenario_id, []).append(fact)
+    out: list[DamagedOwnershipEntity] = []
+    for scenario_id, scenario_facts in sorted(by_scenario.items()):
+        threshold, thr_fact_id = _threshold_for_scenario(tuple(scenario_facts), scenario_id)
+        if threshold is None or thr_fact_id is None:
+            continue
+        for fact in scenario_facts:
+            if fact.fact_kind is not FactKind.OWNERSHIP:
+                continue
+            payload = fact.payload
+            assert isinstance(payload, OwnershipPayload)
+            if not is_damaged_entity_name(payload.entity_name):
+                continue
+            if payload.ownership_percent >= threshold:
+                out.append(
+                    DamagedOwnershipEntity(
+                        scenario_id=scenario_id,
+                        entity_name=payload.entity_name,
+                        ownership_percent=payload.ownership_percent,
+                        threshold_percent=threshold,
+                        fact_ids=(thr_fact_id, fact.fact_id),
+                    )
+                )
+    return tuple(out)
+
+
+def possible_damaged_identity_match(damaged_name: str, candidate_name: str) -> bool:
+    """
+    Narrow wildcard match for explicitly corrupted tokens only.
+
+    Not edit-distance: legal form and every non-damaged token must match exactly;
+    only tokens containing corruption markers may vary.
+    """
+    if not is_damaged_entity_name(damaged_name):
+        return False
+    left = normalize_legal_name_keys(damaged_name)
+    right = normalize_legal_name_keys(candidate_name)
+    if left.legal_form is None or right.legal_form is None:
+        return False
+    if left.legal_form != right.legal_form:
+        return False
+    left_tokens = left.identity_key.split()
+    right_tokens = right.identity_key.split()
+    if len(left_tokens) != len(right_tokens):
+        return False
+    # Drop trailing legal-form token for structural compare (already checked).
+    if left_tokens[-1] == left.legal_form and right_tokens[-1] == right.legal_form:
+        left_tokens = left_tokens[:-1]
+        right_tokens = right_tokens[:-1]
+    if len(left_tokens) != len(right_tokens) or not left_tokens:
+        return False
+    damaged_positions = 0
+    for lt, rt in zip(left_tokens, right_tokens, strict=True):
+        if "?" in lt or "\ufffd" in lt or "�" in lt:
+            damaged_positions += 1
+            continue
+        if lt != rt:
+            return False
+    return damaged_positions >= 1
 
 
 def qualifying_related_parties(
@@ -117,7 +193,7 @@ def resolve_related_party(
     qualifying: tuple[QualifyingRelatedParty, ...],
     has_threshold: bool,
     has_ownership: bool,
-    has_damaged_ownership: bool = False,
+    damaged_entities: tuple[DamagedOwnershipEntity, ...] = (),
 ) -> RelatedPartyDecision:
     """Exact identity_key match only — never JSC==LLP fuzzy."""
     if scenario_id is None:
@@ -154,12 +230,18 @@ def resolve_related_party(
             matched_entity=m.entity_name,
             fact_ids=m.fact_ids,
         )
-    # Damaged ownership identities make closed-world FALSE unsafe for non-matches.
-    if has_damaged_ownership:
-        return RelatedPartyDecision(
-            status=RelatedPartyStatus.UNKNOWN,
-            basis=RelatedPartyBasis.DAMAGED_OWNERSHIP_IDENTITY,
-        )
+
+    # Narrow UNKNOWN: only when counterparty could be the damaged qualifying entity.
+    for damaged in damaged_entities:
+        if damaged.scenario_id != scenario_id:
+            continue
+        if possible_damaged_identity_match(damaged.entity_name, counterparty_raw):
+            return RelatedPartyDecision(
+                status=RelatedPartyStatus.UNKNOWN,
+                basis=RelatedPartyBasis.DAMAGED_OWNERSHIP_IDENTITY,
+                fact_ids=damaged.fact_ids,
+            )
+
     return RelatedPartyDecision(
         status=RelatedPartyStatus.FALSE,
         basis=RelatedPartyBasis.NO_IDENTITY_MATCH,
