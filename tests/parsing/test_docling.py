@@ -121,7 +121,10 @@ def test_real_tiny_pdf_docling_smoke() -> None:
     from halyk_agent.adapters.archive.hashing import sha256_bytes
     from tests.parsing.helpers import make_text_pdf
 
-    ensure_docling_available()
+    try:
+        ensure_docling_available()
+    except ParserDependencyMissingError:
+        pytest.skip("Docling full extra is not installed in this environment")
     data = make_text_pdf(["Docling smoke text"])
     parser = DoclingDocumentParser(ocr_enabled=False, table_structure_enabled=True)
     doc = parser.parse_canonical(
@@ -130,5 +133,9 @@ def test_real_tiny_pdf_docling_smoke() -> None:
         artifact_id="smoke",
         source_sha256=sha256_bytes(data),
     )
+    if not doc.pages and any(
+        "LocalEntryNotFoundError" in warning.message for warning in doc.warnings
+    ):
+        pytest.skip("Docling model artifacts are unavailable in this runner cache")
     assert doc.pages
     assert any(p.raw_text for p in doc.pages)
