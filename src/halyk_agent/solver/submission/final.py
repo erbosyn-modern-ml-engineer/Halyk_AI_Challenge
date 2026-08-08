@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Context, Decimal, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from halyk_agent.domain.covenant_evaluation import (
     EvaluationPlan,
     EvaluationReport,
 )
+from halyk_agent.domain.covenant_evaluation.constants import DECIMAL_PRECISION
 from halyk_agent.domain.covenants.models import CovenantCompileFailure
 from halyk_agent.domain.transaction_taxonomy.models import AdjustmentEvent, ClassifiedTransaction
 from halyk_agent.solver.audit import RunFileAudit
@@ -32,9 +33,11 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def _competition_actual(value: Decimal) -> Decimal:
-    """Positive, two-decimal output value; never used for covenant comparison."""
+    """Positive two-decimal output independent of ambient Decimal state."""
 
-    return abs(value).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    context = Context(prec=DECIMAL_PRECISION, rounding=ROUND_HALF_UP)
+    with localcontext(context):
+        return abs(value).quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
 
 
 def _json_ready(document: SubmissionDocument) -> dict[str, Any]:
