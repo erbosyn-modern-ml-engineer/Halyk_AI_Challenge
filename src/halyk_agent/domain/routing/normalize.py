@@ -155,11 +155,10 @@ def _extract_legal_form(
     if len(tokens) >= 3:
         tail = "".join(tok.strip(",").rstrip(".") for tok in tokens[-3:])
         if tail in _LEGAL_FORM_CANON:
-            body, comma_normalized = _trim_comma_before_legal_form(tokens[:-3])
-            return body, _LEGAL_FORM_CANON[tail], True or comma_normalized
+            body, _ = _trim_comma_before_legal_form(tokens[:-3])
+            return body, _LEGAL_FORM_CANON[tail], True
 
-    # Prefix legal form is an ordering variant, not a different entity:
-    # "LLP Foo" / "ТОО Астана" canonicalize to the same suffix identity key.
+    # Prefix legal form is an ordering variant, not a different entity.
     prefix_form = _canonical_legal_form_token(tokens[0])
     if prefix_form is not None and len(tokens) > 1:
         return tokens[1:], prefix_form, True
