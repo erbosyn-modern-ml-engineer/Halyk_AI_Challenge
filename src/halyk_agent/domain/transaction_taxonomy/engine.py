@@ -853,6 +853,26 @@ def run_transaction_taxonomy(
             flow_start = flow_start or bound_start
             flow_end = flow_end or bound_end
         input_id = deterministic_id("derived", fact.fact_id, payload.label)
+        # When no unique ledger row can be attached, the authoritative fact
+        # proves both the underlying one-time expense and its add-back role. Emit
+        # paired inputs so adjusted EBITDA is expense-first, add-back-second.
+        expense_input_id = deterministic_id("derived", fact.fact_id, payload.label, "opex")
+        derived_inputs.append(
+            DerivedCalculationInput(
+                input_id=expense_input_id,
+                scenario_id=fact.scenario_id,
+                fact_id=fact.fact_id,
+                fact_kind=fact.fact_kind.value,
+                category=MetricCategory.OPEX,
+                amount=payload.amount.value,
+                currency=payload.amount.currency,
+                period_semantics=InputPeriodSemantics.FLOW,
+                period_start=flow_start,
+                period_end=flow_end,
+                label=payload.label,
+                evidence_span_ids=fact.evidence_span_ids,
+            )
+        )
         derived_inputs.append(
             DerivedCalculationInput(
                 input_id=input_id,
@@ -869,7 +889,7 @@ def run_transaction_taxonomy(
                 evidence_span_ids=fact.evidence_span_ids,
             )
         )
-        _mark_fact(fact, "CONSUMED", "one-time add-back emitted as derived input")
+        _mark_fact(fact, "CONSUMED", "one-time expense/add-back emitted as paired derived inputs")
 
     for fact in _facts_by_kind(accepted_facts, FactKind.GROUP_CAPEX):
         payload = fact.payload
@@ -1037,6 +1057,10 @@ def run_transaction_taxonomy(
             reason_codes = list(membership_reasons(state["effective_category"], description=desc))
             # ONE_TIME_ADD_BACK is an additional metric membership, not a reclassification.
             if "ONE_TIME_ADD_BACK_ATTACHED" in state["flags"]:
+                # The item was expensed first; the covenant may then add it back
+                # subject to its materiality filter. Preserve both metric roles.
+                if MetricCategory.OPEX not in cats:
+                    cats.append(MetricCategory.OPEX)
                 if MetricCategory.ONE_TIME_ADD_BACKS not in cats:
                     cats.append(MetricCategory.ONE_TIME_ADD_BACKS)
                 if MEMBERSHIP_REASON_ONE_TIME_ADD_BACK not in reason_codes:

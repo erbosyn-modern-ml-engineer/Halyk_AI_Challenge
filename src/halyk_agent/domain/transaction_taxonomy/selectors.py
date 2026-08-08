@@ -41,6 +41,7 @@ def input_matches_selector(inp: CalculationInput, selector: TransactionSelector)
                 cat
                 in {
                     MetricCategory.OPEX,
+                    MetricCategory.OTHER_EXPENSE,
                     MetricCategory.LABOR,
                     MetricCategory.RENT,
                     MetricCategory.LEASE_PAYMENTS,

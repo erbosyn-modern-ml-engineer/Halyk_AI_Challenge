@@ -12,10 +12,10 @@ def test_strong_category_beats_misleading_keyword() -> None:
     assert hit.category is MetricCategory.INSURANCE_PREMIUMS
 
 
-def test_capitalised_interest_is_capex_not_conflict() -> None:
+def test_capitalised_interest_is_interest_cost_not_capex() -> None:
     hit = classify_description("Capitalised interest charge — Q4 2025")
     assert hit.status == "CLASSIFIED"
-    assert hit.category is MetricCategory.CAPEX
+    assert hit.category is MetricCategory.INTEREST_EXPENSE
 
 
 def test_rent_credit_is_not_customer_revenue() -> None:
@@ -31,10 +31,22 @@ def test_genuine_customer_revenue() -> None:
     assert hit.category is MetricCategory.REVENUE
 
 
-def test_ad_campaign_is_opex_not_revenue() -> None:
+def test_ad_campaign_is_generic_expense_not_statement_opex() -> None:
     hit = classify_description("Product launch ad campaign — Q1")
     assert hit.status == "CLASSIFIED"
+    assert hit.category is MetricCategory.OTHER_EXPENSE
+
+
+def test_direct_industrial_servicing_is_statement_opex() -> None:
+    hit = classify_description("Catalyst regeneration servicing contract")
+    assert hit.status == "CLASSIFIED"
     assert hit.category is MetricCategory.OPEX
+
+
+def test_generic_consulting_is_other_expense_not_statement_opex() -> None:
+    hit = classify_description("Freight arbitration consulting settlement")
+    assert hit.status == "CLASSIFIED"
+    assert hit.category is MetricCategory.OTHER_EXPENSE
 
 
 def test_payroll_rebate_is_labor_credit() -> None:
@@ -43,10 +55,10 @@ def test_payroll_rebate_is_labor_credit() -> None:
     assert hit.category is MetricCategory.LABOR
 
 
-def test_telecom_leased_line_is_lease() -> None:
+def test_telecom_leased_line_is_utility_not_property_lease() -> None:
     hit = classify_description("Telecom leased line — site office")
     assert hit.status == "CLASSIFIED"
-    assert hit.category is MetricCategory.LEASE_PAYMENTS
+    assert hit.category is MetricCategory.UTILITIES
 
 
 def test_lease_vs_rent_collision_when_both_expense() -> None:
