@@ -1,0 +1,261 @@
+--- a/tests/authority/test_semantic_document_fallback.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/authority/test_semantic_document_fallback.py	2026-08-09 05:46:38.901653547 +0000
+@@ -0,0 +1,90 @@
++from __future__ import annotations
++
++from halyk_agent.config import Settings
++from halyk_agent.domain.authority.classify import classify_document
++from halyk_agent.domain.authority.engine import run_authority
++from halyk_agent.domain.authority.metadata import extract_metadata
++from halyk_agent.domain.authority.models import (
++    AuthorityDomain,
++    DocumentLifecycleStatus,
++    DocumentType,
++)
++from halyk_agent.domain.authority.semantic_classifier import classify_unresolved_documents
++from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonResult, SemanticJsonState
++from tests.authority.helpers import make_document, make_link
++
++
++class _FakeGateway:
++    def __init__(self, payload: dict[str, str]) -> None:
++        self.payload = payload
++
++    def propose(self, **kwargs) -> SemanticJsonResult:
++        return SemanticJsonResult(
++            state=SemanticJsonState.RESOLVED,
++            payload=self.payload,
++            reason_code="OK",
++            model_called=True,
++        )
++
++
++def test_unknown_document_can_receive_exact_quote_enum_proposal() -> None:
++    text = "Credit Monitoring Pack\nExecuted lending contract for borrower Orion LLP"
++    doc = make_document(raw_text=text)
++    link = make_link(doc)
++    meta = extract_metadata(doc)
++    deterministic = classify_document(doc, metadata=meta, link=link).classification
++    assert deterministic.document_type is DocumentType.UNKNOWN
++
++    batch = classify_unresolved_documents(
++        documents=(doc,),
++        deterministic={doc.document_id: deterministic},
++        metadata={doc.document_id: meta},
++        settings=Settings(semantic_fallback_enabled=True),
++        gateway=_FakeGateway(
++            {
++                "document_type": "LOAN_AGREEMENT",
++                "lifecycle_status": "CURRENT_EXECUTED",
++                "confidence": "HIGH",
++                "source_quote": "Executed lending contract",
++                "reason": "explicit executed lending contract marker",
++            }
++        ),
++    )
++    assert doc.document_id in batch.overrides
++
++    report = run_authority(
++        documents=(doc,),
++        document_links=(link,),
++        routing_manifest={"test": True},
++        semantic_overrides=batch.overrides,
++    )
++    classification = report.classifications[0]
++    assert classification.document_type is DocumentType.LOAN_AGREEMENT
++    assert classification.lifecycle_status is DocumentLifecycleStatus.CURRENT_EXECUTED
++    assert classification.rule_id == "DEEPSEEK_SEMANTIC_FALLBACK"
++    assert AuthorityDomain.COVENANT_TERMS in classification.authority_domains
++    assert classification.evidence_span_ids
++
++
++def test_semantic_document_proposal_rejects_non_source_quote() -> None:
++    doc = make_document(raw_text="Unclassified finance pack")
++    link = make_link(doc)
++    meta = extract_metadata(doc)
++    deterministic = classify_document(doc, metadata=meta, link=link).classification
++    batch = classify_unresolved_documents(
++        documents=(doc,),
++        deterministic={doc.document_id: deterministic},
++        metadata={doc.document_id: meta},
++        settings=Settings(semantic_fallback_enabled=True),
++        gateway=_FakeGateway(
++            {
++                "document_type": "AUDITOR_REPORT",
++                "lifecycle_status": "FINAL",
++                "confidence": "HIGH",
++                "source_quote": "Independent Auditor's Report",
++                "reason": "guessed title",
++            }
++        ),
++    )
++    assert batch.overrides == {}
++    assert batch.diagnostics[0]["reason"] == "SOURCE_QUOTE_NOT_EXACT"
+--- a/tests/covenants/test_compiler_and_security.py	2026-08-09 05:18:00.000000000 +0000
++++ b/tests/covenants/test_compiler_and_security.py	2026-08-09 05:23:25.026036548 +0000
+@@ -217,3 +217,83 @@
+     assert report.manifest.failure_count == 0
+     # unused import guard
+     _ = RoutingManifest
++
++
++def test_unseen_formula_uses_bounded_semantic_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
++    from halyk_agent.config import Settings
++    from halyk_agent.domain.covenants.ast import MetricCategory, Subtract, money_sum
++    from halyk_agent.domain.covenants.formulas import FormulaMatch, match_formula
++    from halyk_agent.domain.covenants.semantic_formula import SemanticFormulaResult
++
++    clause = (
++        "Пункт 6.1 Operating contribution floor. Заёмщик обязуется поддерживать операционный "
++        "вклад за период с 2025-01-01 по 2025-12-31 на уровне не менее $100.00. "
++        "Операционный вклад определяется отдельной договорной формулой."
++    )
++    assert match_formula(clause) is None
++    doc = make_document(raw_text=clause, sha="9" * 64)
++    proposed = FormulaMatch(
++        family_id="DEEPSEEK_TYPED_AST_V1",
++        metric=Subtract(
++            left=money_sum(MetricCategory.REVENUE),
++            right=money_sum(MetricCategory.OPEX),
++        ),
++    )
++
++    def fake_propose(*args: object, **kwargs: object) -> SemanticFormulaResult:
++        _ = args, kwargs
++        return SemanticFormulaResult(
++            formula=proposed,
++            diagnostic={"status": "ACCEPTED"},
++            model_called=True,
++        )
++
++    monkeypatch.setattr("halyk_agent.domain.covenants.compiler.propose_formula", fake_propose)
++    definition, failure, spans = compile_covenant_cell(
++        scenario_id="SX",
++        clause_id="6.1",
++        document=doc,
++        settings=Settings(semantic_fallback_enabled=True),
++    )
++    assert failure is None
++    assert definition is not None
++    assert definition.family_id == "DEEPSEEK_TYPED_AST_V1"
++    assert definition.metric_quantity_type.value == "MONEY"
++    assert {selector.category for selector in definition.selectors} == {
++        MetricCategory.REVENUE,
++        MetricCategory.OPEX,
++    }
++    assert spans
++
++
++def test_semantic_formula_fallback_remains_disabled_by_default(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    calls = 0
++
++    def fake_propose(*args: object, **kwargs: object):
++        nonlocal calls
++        calls += 1
++        from halyk_agent.domain.covenants.semantic_formula import SemanticFormulaResult
++
++        return SemanticFormulaResult(
++            formula=None,
++            diagnostic={"reason": "DISABLED"},
++            model_called=False,
++        )
++
++    monkeypatch.setattr("halyk_agent.domain.covenants.compiler.propose_formula", fake_propose)
++    odd = (
++        "Пункт 6.1 Mystery Metric. The borrower shall maintain quantum flux below 3 bananas "
++        "for period from 2025-01-01 to 2025-12-31."
++    )
++    doc = make_document(raw_text=odd, sha="8" * 64)
++    definition, failure, _ = compile_covenant_cell(
++        scenario_id="SX",
++        clause_id="6.1",
++        document=doc,
++    )
++    assert calls == 0
++    assert definition is None
++    assert failure is not None
++    assert failure.status is CompileStatus.UNSUPPORTED_FORMULA
+--- a/tests/models/test_semantic_json_gateway.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/models/test_semantic_json_gateway.py	2026-08-09 05:46:38.901048531 +0000
+@@ -0,0 +1,79 @@
++from __future__ import annotations
++
++import json
++
++import httpx
++
++from halyk_agent.config import Settings
++from halyk_agent.domain.models_gateway.semantic_json import (
++    SemanticJsonGateway,
++    SemanticJsonState,
++)
++
++
++class _FakeResponse:
++    def __init__(self, payload: dict[str, object]) -> None:
++        self._payload = payload
++
++    def raise_for_status(self) -> None:
++        return None
++
++    def json(self) -> dict[str, object]:
++        return self._payload
++
++
++def test_semantic_gateway_caches_valid_json(monkeypatch, tmp_path) -> None:
++    calls = 0
++
++    def fake_post(*args, **kwargs):
++        nonlocal calls
++        calls += 1
++        content = json.dumps({"category": "LABOR", "confidence": "HIGH"})
++        return _FakeResponse({"choices": [{"message": {"content": content}}]})
++
++    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
++    monkeypatch.setattr(httpx, "post", fake_post)
++    settings = Settings(
++        semantic_fallback_enabled=True,
++        llm_max_external_attempts=1,
++        llm_max_retries=0,
++    )
++    gateway = SemanticJsonGateway(settings=settings, cache_dir=tmp_path)
++    kwargs = dict(
++        task_id="txn:P1:T1",
++        prompt_version="p1",
++        schema_version="s1",
++        source_sha256="a" * 64,
++        system_prompt="Return JSON only",
++        request_payload={"description": "зарплата"},
++        max_tokens=128,
++    )
++
++    first = gateway.propose(**kwargs)
++    second = gateway.propose(**kwargs)
++
++    assert first.state is SemanticJsonState.RESOLVED
++    assert first.payload == {"category": "LABOR", "confidence": "HIGH"}
++    assert first.model_called is True
++    assert second.state is SemanticJsonState.CACHE_HIT
++    assert second.cache_hit is True
++    assert second.model_called is False
++    assert calls == 1
++    assert gateway.external_attempt_count == 1
++
++
++def test_semantic_gateway_fails_closed_without_key(monkeypatch) -> None:
++    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
++    gateway = SemanticJsonGateway(settings=Settings(semantic_fallback_enabled=True))
++    result = gateway.propose(
++        task_id="x",
++        prompt_version="p1",
++        schema_version="s1",
++        source_sha256="b" * 64,
++        system_prompt="Return JSON only",
++        request_payload={"x": 1},
++        max_tokens=32,
++    )
++    assert result.state is SemanticJsonState.PROVIDER_ERROR
++    assert result.reason_code == "MISSING_DEEPSEEK_API_KEY"
++    assert result.model_called is False
