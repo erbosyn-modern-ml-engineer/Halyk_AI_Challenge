@@ -1,10 +1,4 @@
-"""Bounded competitive fallbacks for source-incomplete public corpus cells.
-
-Strict Stage 5F/6 outputs remain untouched.  This module can fill an otherwise
-unscorable submission cell only when a narrow, auditable fallback has enough
-source evidence to produce a deterministic context.  Every fallback is reported
-separately so it can never be confused with a source-authoritative Stage 6 result.
-"""
+"""Fallbacks used when strict evaluation cannot fill a submission cell."""
 
 from __future__ import annotations
 
@@ -64,7 +58,7 @@ _OTHER_MOVEMENT_RE = re.compile(
 
 
 def _note_sections(full_text: str) -> tuple[str, ...]:
-    """Split source text into numbered note sections without assuming a note number."""
+    """Split text on numbered note headings."""
 
     headings = list(_NOTE_HEADING_RE.finditer(full_text))
     sections: list[str] = []
@@ -75,8 +69,7 @@ def _note_sections(full_text: str) -> tuple[str, ...]:
 
 
 def _money_after_label(note: str, match: re.Match[str]) -> tuple[Decimal, str] | None:
-    # A PPE row may only bind to money on that same logical line. Searching
-    # farther would let a malformed opening value borrow a later valid row.
+    # Stay on the same row. A broken value must not grab the amount from the next row.
     remainder = note[match.end() :]
     line = remainder.splitlines()[0] if remainder else ""
     return parse_money(line[:120])
@@ -84,7 +77,7 @@ def _money_after_label(note: str, match: re.Match[str]) -> tuple[Decimal, str] |
 
 @dataclass(frozen=True, slots=True)
 class CompetitiveFallbackReport:
-    """Fallback results plus explicit provenance/strategy diagnostics."""
+    """Fallback outputs and the diagnostics that explain them."""
 
     results: dict[tuple[str, str], CovenantEvaluationResult]
     context: EvaluationContext
@@ -95,7 +88,7 @@ class CompetitiveFallbackReport:
 def _settlement_eur_usd_rate(
     adjustments: tuple[AdjustmentEvent, ...],
 ) -> tuple[Decimal | None, tuple[str, ...]]:
-    """Derive one unique EUR→USD settlement ratio from source-backed adjustment facts."""
+    """Find one unambiguous EUR/USD settlement rate in the adjustment facts."""
 
     candidates: dict[Decimal, set[str]] = {}
     for event in adjustments:
@@ -131,7 +124,7 @@ def _settlement_eur_usd_rate(
 
 
 def _parsed_documents(parsed_dir: Path) -> dict[str, tuple[str, str]]:
-    """Return document_id -> (source_file, full_text) from canonical parse artifacts."""
+    """Load document ids, filenames and flattened text from parse artifacts."""
 
     documents: dict[str, tuple[str, str]] = {}
     for path in sorted((parsed_dir / "documents").glob("*.json")):
@@ -180,13 +173,7 @@ def _derive_group_capex(
     routing_dir: Path,
     scenario_id: str,
 ) -> tuple[Decimal | None, dict[str, Any] | None]:
-    """Conservative PPE residual bridge selected by covenant and routing semantics.
-
-    The bridge does not assume a public scenario ID or a fixed note number. It
-    scans group documents linked to the selected scenario and requires exactly one
-    note section with a complete opening/depreciation/closing roll-forward and no
-    named competing movement family.
-    """
+    """Try to recover group capex from a complete PPE roll-forward."""
 
     docs = _parsed_documents(parsed_dir)
     group_ids = _group_documents_for_scenario(routing_dir, scenario_id)
@@ -206,6 +193,7 @@ def _derive_group_capex(
             ):
                 continue
 
+            # If the note names another movement, the residual is not safely attributable to capex.
             scrubbed = _NO_DISPOSALS_RE.sub("", note)
             scrubbed = _NO_OTHER_MOVEMENTS_RE.sub("", scrubbed)
             if _OTHER_MOVEMENT_RE.search(scrubbed):
@@ -350,7 +338,7 @@ def _unique_group_capex_plan(
     plans: tuple[EvaluationPlan, ...],
     target_keys: set[tuple[str, str]],
 ) -> EvaluationPlan | None:
-    """Return the sole unresolved plan that semantically requests GROUP_CAPEX."""
+    """Find the one unresolved plan that asks for group capex."""
 
     candidates: list[EvaluationPlan] = []
     for plan in plans:
@@ -377,7 +365,7 @@ def build_competitive_fallbacks(
     parsed_dir: Path,
     routing_dir: Path,
 ) -> CompetitiveFallbackReport:
-    """Evaluate only strict non-resolved cells under bounded fallback assumptions."""
+    """Retry unresolved cells with the small set of supported fallbacks."""
 
     strict_map = {(item.scenario_id, item.clause_id): item for item in evaluation.results}
     target_keys = {
