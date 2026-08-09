@@ -1,0 +1,229 @@
+name: private-hardening-batch2
+
+on:
+  push:
+    branches:
+      - stage-11/private-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          ref: stage-11/private-hardening
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Apply source transformations
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{path}: expected one match, got {count}: {old[:90]!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+
+          # Lint-only simplification from the first integrity batch.
+          replace_once(
+              'src/halyk_agent/domain/fact_extraction/validators.py',
+              '''            if ledger_txn_scenarios is not None and scenario_id is not None:\n                if ledger_txn_scenarios.get(transaction_id) != scenario_id:\n                    return (\n                        FactValidatorStatus.REJECTED_SEMANTIC,\n                        "FACT_TXN_SCENARIO_MISMATCH",\n                    )\n''',
+              '''            if (\n                ledger_txn_scenarios is not None\n                and scenario_id is not None\n                and ledger_txn_scenarios.get(transaction_id) != scenario_id\n            ):\n                return (\n                    FactValidatorStatus.REJECTED_SEMANTIC,\n                    "FACT_TXN_SCENARIO_MISMATCH",\n                )\n''',
+          )
+
+          # Published status and evidence must describe the same verdict.
+          replace_once(
+              'src/halyk_agent/solver/submission/final.py',
+              '''            evidence = select_causal_evidence(\n                plan=plan,\n                result=result,\n                context=evidence_context,\n                adjustments=adjustments,\n                classified=classified,\n            )\n''',
+              '''            evidence = None\n            if verdict is strict_verdict:\n                evidence = select_causal_evidence(\n                    plan=plan,\n                    result=result,\n                    context=evidence_context,\n                    adjustments=adjustments,\n                    classified=classified,\n                )\n''',
+          )
+
+          # Do not hide out-of-universe Stage 5F inputs before Stage 6 validation.
+          replace_once(
+              'src/halyk_agent/app/evaluation.py',
+              '''    plan_scenarios = {plan.scenario_id for plan in plans}\n    execution_inputs = tuple(\n        item for item in calculation_inputs if item.scenario_id in plan_scenarios\n    )\n''',
+              '''    plan_scenarios = {plan.scenario_id for plan in plans}\n    extra_scenarios = sorted(\n        {item.scenario_id for item in calculation_inputs if item.scenario_id not in plan_scenarios}\n    )\n    if extra_scenarios:\n        raise EvaluationServiceError(\n            f"Stage 5F contains calculation inputs outside the plan universe: {extra_scenarios}",\n            code="SCENARIO_UNIVERSE_MISMATCH",\n        )\n    execution_inputs = calculation_inputs\n''',
+          )
+
+          # Document type is not lifecycle evidence.
+          replace_once(
+              'src/halyk_agent/domain/authority/classify.py',
+              '''        # Engagement packaging without draft markers → FINAL for auditor reports.\n        if doc_type is DocumentType.AUDITOR_REPORT:\n            audit_finalish = require_span_or_none(\n                document,\n                patterns=(\n                    "АУДИТОРСКОЕ ДЕЛО",\n                    "Независимый аудитор",\n                    "Independent Auditor",\n                    "independent auditor",\n                ),\n            )\n            if audit_finalish is not None:\n                return DocumentLifecycleStatus.FINAL, audit_finalish, "AUDITOR_ENGAGEMENT_FINAL"\n        return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"\n''',
+              '''        return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"\n''',
+          )
+          replace_once(
+              'src/halyk_agent/domain/authority/classify.py',
+              '''        return DocumentLifecycleStatus.CURRENT, None, "KYC_DEFAULT_CURRENT"\n''',
+              '''        return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"\n''',
+          )
+
+          # FULL now describes the actual local runtime instead of nonexistent Redis/Postgres wiring.
+          replace_once(
+              'src/halyk_agent/profiles/full.py',
+              '''    storage_backend=StorageBackend.POSTGRES,\n    job_backend=JobBackend.REDIS_LEASE,\n    parser_mode=ParserMode.QUALITY,\n    retrieval_mode=RetrievalMode.POSTGRES_HYBRID,\n''',
+              '''    storage_backend=StorageBackend.LOCAL,\n    job_backend=JobBackend.ASYNCIO,\n    parser_mode=ParserMode.QUALITY,\n    retrieval_mode=RetrievalMode.LOCAL,\n''',
+          )
+          replace_once(
+              'src/halyk_agent/config.py',
+              '''    stage: int = Field(default=5, ge=1)\n''',
+              '',
+          )
+
+          # A competition install should not drag in retrieval/Postgres/GPU dependencies.
+          replace_once(
+              'pyproject.toml',
+              '''[project.optional-dependencies]\nfull = [\n    "docling==2.118.0",\n]\n''',
+              '''[project.optional-dependencies]\ncompetition = [\n    "docling==2.118.0",\n]\nfull = [\n    "docling==2.118.0",\n]\n''',
+          )
+
+          # Fallback FX may use only explicit source rates and only in the same scenario.
+          path = Path('src/halyk_agent/solver/fallbacks.py')
+          text = path.read_text(encoding='utf-8')
+          start = text.index('def _settlement_eur_usd_rate(')
+          end = text.index('\ndef _parsed_documents', start)
+          text = text[:start] + '''def _explicit_eur_usd_rate(\n    adjustments: tuple[AdjustmentEvent, ...],\n    *,\n    scenario_id: str,\n) -> tuple[Decimal | None, tuple[str, ...]]:\n    """Return one explicit source-backed EUR/USD rate for this scenario."""\n\n    candidates: dict[Decimal, set[str]] = {}\n    for event in adjustments:\n        if (\n            event.event_type is not AdjustmentEventType.FX_SETTLEMENT_REFERENCE\n            or event.scenario_id != scenario_id\n            or event.after.get("rate_source") != "EXPLICIT"\n        ):\n            continue\n        raw_rate = event.after.get("explicit_rate")\n        from_currency = event.after.get("from_currency")\n        to_currency = event.after.get("to_currency")\n        if raw_rate in {None, ""}:\n            continue\n        try:\n            rate = Decimal(str(raw_rate))\n        except Exception:\n            continue\n        if rate <= 0:\n            continue\n        if from_currency == "EUR" and to_currency == "USD":\n            eur_usd = rate\n        elif from_currency == "USD" and to_currency == "EUR":\n            eur_usd = Decimal("1") / rate\n        else:\n            continue\n        candidates.setdefault(eur_usd, set()).update(event.evidence_span_ids)\n    if len(candidates) != 1:\n        return None, ()\n    rate, evidence = next(iter(candidates.items()))\n    return rate, tuple(sorted(evidence))\n\n''' + text[end+1:]
+
+          text = text.replace(
+              '''def _convert_eur_inputs(\n    inputs: tuple[CalculationInput, ...],\n    *,\n    rate: Decimal,\n) -> tuple[CalculationInput, ...]:\n''',
+              '''def _convert_eur_inputs(\n    inputs: tuple[CalculationInput, ...],\n    *,\n    rate: Decimal,\n    scenario_id: str,\n) -> tuple[CalculationInput, ...]:\n''',
+              1,
+          )
+          text = text.replace(
+              '''        if item.currency != "EUR":\n''',
+              '''        if item.scenario_id != scenario_id or item.currency != "EUR":\n''',
+              1,
+          )
+          text = text.replace(
+              '''    start = plan.period.start_date or date(2025, 1, 1)\n    end = plan.period.end_date or date(2025, 12, 31)\n    return CalculationInput(\n''',
+              '''    start = plan.period.start_date\n    end = plan.period.end_date\n    if start is None or end is None:\n        return None\n    return CalculationInput(\n''',
+              1,
+          )
+          text = text.replace(
+              ''') -> CalculationInput:\n    semantics, sign_rule = sign_contract_for_category(MetricCategory.GROUP_CAPEX)\n''',
+              ''') -> CalculationInput | None:\n    semantics, sign_rule = sign_contract_for_category(MetricCategory.GROUP_CAPEX)\n''',
+              1,
+          )
+          text = text.replace(
+              '''                len(opening_matches) == len(dep_matches) == len(closing_matches) == 1\n                and _NO_DISPOSALS_RE.search(note)\n''',
+              '''                len(opening_matches) == len(dep_matches) == len(closing_matches) == 1\n                and _NO_DISPOSALS_RE.search(note)\n                and _NO_OTHER_MOVEMENTS_RE.search(note)\n''',
+              1,
+          )
+
+          old_fx = '''    diagnostics: list[dict[str, Any]] = []\n    rate, rate_evidence = _settlement_eur_usd_rate(adjustments)\n    working_inputs = context.calculation_inputs\n    if rate is not None:\n        working_inputs = _convert_eur_inputs(working_inputs, rate=rate)\n        diagnostics.append(\n            {\n                "strategy": "EUR_USD_SETTLEMENT_RATE_COMPETITIVE_FALLBACK",\n                "rate": str(rate),\n                "source_evidence_span_ids": list(rate_evidence),\n                "scope": "all unresolved USD-denominated covenant calculations",\n                "assumption": (\n                    "competition-only cross-scenario reuse of the sole source-backed EUR/USD "\n                    "settlement ratio; strict Stage 6 intentionally does not trust this as FX"\n                ),\n            }\n        )\n\n'''
+          new_fx = '''    diagnostics: list[dict[str, Any]] = []\n    working_inputs = context.calculation_inputs\n    used_rates: list[Decimal] = []\n    for scenario_id in sorted({scenario for scenario, _clause in target_keys}):\n        rate, rate_evidence = _explicit_eur_usd_rate(adjustments, scenario_id=scenario_id)\n        if rate is None:\n            continue\n        working_inputs = _convert_eur_inputs(\n            working_inputs, rate=rate, scenario_id=scenario_id\n        )\n        used_rates.append(rate)\n        diagnostics.append(\n            {\n                "strategy": "EXPLICIT_EUR_USD_RATE_FALLBACK",\n                "scenario_id": scenario_id,\n                "rate": str(rate),\n                "source_evidence_span_ids": list(rate_evidence),\n                "scope": "same-scenario unresolved EUR inputs only",\n            }\n        )\n\n'''
+          if old_fx not in text:
+              raise RuntimeError('fallback FX block not found')
+          text = text.replace(old_fx, new_fx, 1)
+          text = text.replace(
+              '''                    _group_capex_input(\n                        group_capex_amount,\n                        plan=group_capex_plan,\n                        source_file=group_capex_diagnostic["source_file"],\n                    ),\n''',
+              '''                    group_capex_input,\n''',
+              1,
+          )
+          anchor = '''        if group_capex_amount is not None and group_capex_diagnostic is not None:\n            working_inputs = tuple(\n'''
+          replacement = '''        if group_capex_amount is not None and group_capex_diagnostic is not None:\n            group_capex_input = _group_capex_input(\n                group_capex_amount,\n                plan=group_capex_plan,\n                source_file=group_capex_diagnostic["source_file"],\n            )\n            if group_capex_input is None:\n                group_capex_diagnostic = None\n            else:\n                working_inputs = tuple(\n'''
+          if anchor not in text:
+              raise RuntimeError('group capex block anchor missing')
+          text = text.replace(anchor, replacement, 1)
+          # The original following block is now one indentation level short. Rebuild this small section.
+          section_start = text.index('        if group_capex_amount is not None and group_capex_diagnostic is not None:')
+          section_end = text.index('\n    fallback_context = context.model_copy(', section_start)
+          new_section = '''        if group_capex_amount is not None and group_capex_diagnostic is not None:\n            group_capex_input = _group_capex_input(\n                group_capex_amount,\n                plan=group_capex_plan,\n                source_file=group_capex_diagnostic["source_file"],\n            )\n            if group_capex_input is not None:\n                working_inputs = (*working_inputs, group_capex_input)\n                coverage, readiness = _enable_group_capex_selector(\n                    coverage,\n                    readiness,\n                    definition_id=group_capex_plan.definition_id,\n                )\n                diagnostics.append(group_capex_diagnostic)\n'''
+          text = text[:section_start] + new_section + text[section_end:]
+          text = text.replace(
+              '''        eur_usd_rate=rate,\n''',
+              '''        eur_usd_rate=(used_rates[0] if len(set(used_rates)) == 1 and used_rates else None),\n''',
+              1,
+          )
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          # Solver: source-strict truly means Stage 6 only. Bounded fallbacks are opt-in.
+          path = Path('src/halyk_agent/solver/solve.py')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace(
+              '''    opener: FileOpener | None = None,\n) -> dict[str, str]:\n    """Stage 7 real solver''',
+              '''    opener: FileOpener | None = None,\n    require_complete: bool = False,\n) -> dict[str, str]:\n    """Stage 7 real solver''',
+              1,
+          )
+          old_import = '''        from halyk_agent.solver.fallbacks import build_competitive_fallbacks\n\n        fallback = build_competitive_fallbacks(\n            evaluation=pipeline.evaluation,\n            context=pipeline.context,\n            adjustments=pipeline.taxonomy.adjustments,\n            parsed_dir=pipeline.parsed_dir,\n            routing_dir=pipeline.routing_dir,\n        )\n'''
+          new_import = '''        from halyk_agent.domain.ids import sha256_text\n        from halyk_agent.solver.fallbacks import (\n            CompetitiveFallbackReport,\n            build_competitive_fallbacks,\n        )\n        from halyk_agent.solver.mode import (\n            CompetitionSolveMode,\n            configured_competition_solve_mode,\n            solve_mode_manifest,\n        )\n        from halyk_agent.solver.submission.status_policy import (\n            configured_submission_status_policy,\n            status_policy_manifest,\n        )\n\n        solve_mode = configured_competition_solve_mode()\n        status_policy = configured_submission_status_policy()\n        solve_mode_payload = solve_mode_manifest(solve_mode)\n        status_policy_payload = status_policy_manifest(status_policy)\n        if solve_mode is CompetitionSolveMode.COMPETITIVE_BOUNDED_V1:\n            fallback = build_competitive_fallbacks(\n                evaluation=pipeline.evaluation,\n                context=pipeline.context,\n                adjustments=pipeline.taxonomy.adjustments,\n                parsed_dir=pipeline.parsed_dir,\n                routing_dir=pipeline.routing_dir,\n            )\n        else:\n            fallback = CompetitiveFallbackReport(\n                results={},\n                context=pipeline.context,\n                diagnostics=(),\n                eur_usd_rate=None,\n            )\n'''
+          if old_import not in text:
+              raise RuntimeError('solver fallback block missing')
+          text = text.replace(old_import, new_import, 1)
+          text = text.replace(
+              '''        written = write_final_submission(\n''',
+              '''        if require_complete and unresolved:\n            raise DatasetAdapterError(\n                f"submission has {len(unresolved)} unresolved cells; refusing upload-ready package"\n            )\n        written = write_final_submission(\n''',
+              1,
+          )
+          text = text.replace(
+              '''            "fallback_eur_usd_rate": (\n                str(fallback.eur_usd_rate) if fallback.eur_usd_rate is not None else None\n            ),\n''',
+              '''            "fallback_eur_usd_rate": (\n                str(fallback.eur_usd_rate) if fallback.eur_usd_rate is not None else None\n            ),\n            "solve_mode": solve_mode_payload,\n            "solve_mode_sha256": sha256_text(\n                json.dumps(solve_mode_payload, sort_keys=True, separators=(",", ":"))\n            ),\n            "submission_policy": status_policy_payload,\n            "submission_policy_sha256": sha256_text(\n                json.dumps(status_policy_payload, sort_keys=True, separators=(",", ":"))\n            ),\n''',
+              1,
+          )
+          text = text.replace(
+              '''            "ground_truth_access": "none",\n        }\n''',
+              '''            "ground_truth_access": "none",\n            "solve_mode": solve_mode_payload,\n            "submission_policy": status_policy_payload,\n        }\n''',
+              1,
+          )
+          text = text.replace(
+              '''            f"- fallback_cells: {len(fallback.results)}",\n''',
+              '''            f"- fallback_cells: {len(fallback.results)}",\n            f"- solve_mode: {solve_mode.value}",\n            f"- submission_policy: {status_policy.value}",\n''',
+              1,
+          )
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          # Application composition exposes upload-readiness without changing math.
+          path = Path('src/halyk_agent/app/solve.py')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace(
+              '''    model_name: str | None = None,\n) -> dict[str, str]:\n    """Invoke competition solver''',
+              '''    model_name: str | None = None,\n    require_complete: bool = False,\n) -> dict[str, str]:\n    """Invoke competition solver''',
+              1,
+          )
+          text = text.replace(
+              '''        model_name=model_name,\n    )\n\n\ndef run_solve(\n''',
+              '''        model_name=model_name,\n        require_complete=require_complete,\n    )\n\n\ndef run_solve(\n''',
+              1,
+          )
+          text = text.replace(
+              '''    model_name: str | None = None,\n) -> dict[str, str]:\n    """Compatibility composition root''',
+              '''    model_name: str | None = None,\n    require_complete: bool = False,\n) -> dict[str, str]:\n    """Compatibility composition root''',
+              1,
+          )
+          text = text.replace(
+              '''            model_name=model_name,\n        )\n''',
+              '''            model_name=model_name,\n            require_complete=require_complete,\n        )\n''',
+              1,
+          )
+          path.write_text(text, encoding='utf-8', newline='\n')
+
+          # Remove stale stage config; FULL profile is now honest local quality mode.
+          print('batch2 transforms complete')
+          PY
+      - name: Install formatting tools
+        run: python -m pip install --disable-pip-version-check ruff==0.16.1
+      - name: Format and autofix safe lint
+        run: |
+          ruff check --fix src tests || true
+          ruff format src tests
+      - name: Syntax check
+        run: python -m compileall -q src
+      - name: Commit batch
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests pyproject.toml
+          git commit -m "fix: harden fallback, lifecycle, and solver semantics"
+          git push origin HEAD:stage-11/private-hardening
