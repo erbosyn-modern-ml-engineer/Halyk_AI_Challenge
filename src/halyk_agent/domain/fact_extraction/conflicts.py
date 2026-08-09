@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from typing import Any
 
 from halyk_agent.domain.fact_extraction.models import (
+    AmountCorrectionPayload,
     FactConflict,
     FactKind,
     FactRecord,
     FactValidatorStatus,
+    FxRatePayload,
+    GroupCapexPayload,
     OwnershipPayload,
+    RelatedPartyThresholdPayload,
+    SubsidiaryStatusPayload,
+    TransactionPeriodPayload,
     TransactionReclassificationPayload,
+    TransactionTreatmentPayload,
 )
 from halyk_agent.domain.ids import deterministic_id, sha256_text
+from halyk_agent.domain.routing.normalize import normalize_legal_name_keys
 
 
 def content_fact_id(record: FactRecord) -> str:
@@ -35,7 +44,7 @@ def content_fact_id(record: FactRecord) -> str:
 
 
 def dedupe_facts(facts: tuple[FactRecord, ...]) -> tuple[FactRecord, ...]:
-    """Collapse equivalent facts by content-addressed fact_id (first wins)."""
+    """Collapse byte-equivalent facts by content id."""
     seen: set[str] = set()
     out: list[FactRecord] = []
     for fact in facts:
@@ -43,7 +52,6 @@ def dedupe_facts(facts: tuple[FactRecord, ...]) -> tuple[FactRecord, ...]:
         if fid in seen:
             continue
         seen.add(fid)
-        # Normalize id to content address for stability.
         if fact.fact_id != fid:
             fact = fact.model_copy(update={"fact_id": fid})
         out.append(fact)
@@ -53,87 +61,149 @@ def dedupe_facts(facts: tuple[FactRecord, ...]) -> tuple[FactRecord, ...]:
 def _money_key(amount_value: Decimal | None, currency: str | None) -> str:
     if amount_value is None:
         return "none"
-    return f"{amount_value}:{currency or ''}"
+    return f"{amount_value}:{(currency or '').upper()}"
+
+
+def _entity_key(value: str) -> str:
+    keys = normalize_legal_name_keys(value)
+    return keys.identity_key or value.strip().casefold()
+
+
+def _stable_value(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _conflict_identity_and_value(fact: FactRecord) -> tuple[str, str] | None:
+    """Return the semantic assertion key and value for fact kinds that must be unique."""
+    payload = fact.payload
+
+    if isinstance(payload, TransactionReclassificationPayload):
+        if payload.transaction_id is None:
+            return None
+        identity = f"txn:{payload.transaction_id}"
+        value = {
+            "disposition": payload.disposition.value,
+            "from": (payload.from_category or "").strip().casefold() or None,
+            "to": (payload.to_category or "").strip().casefold() or None,
+            "amount": (
+                _money_key(payload.amount.value, payload.amount.currency)
+                if payload.amount is not None
+                else None
+            ),
+        }
+        return identity, _stable_value(value)
+
+    if isinstance(payload, TransactionPeriodPayload):
+        identity = f"txn:{payload.transaction_id}"
+        value = {
+            "disposition": payload.disposition.value,
+            "period_label": (payload.period_label or "").strip().casefold() or None,
+            "service_start": payload.service_start,
+            "service_end": payload.service_end,
+        }
+        return identity, _stable_value(value)
+
+    if isinstance(payload, AmountCorrectionPayload):
+        if payload.transaction_id is None:
+            return None
+        return (
+            f"txn:{payload.transaction_id}",
+            _money_key(payload.amount.value, payload.amount.currency),
+        )
+
+    if isinstance(payload, OwnershipPayload):
+        identity = f"entity:{_entity_key(payload.entity_name)}:{payload.holder_label.casefold()}"
+        value = {
+            "ownership_percent": payload.ownership_percent,
+            "voting_rights": payload.voting_rights,
+        }
+        return identity, _stable_value(value)
+
+    if isinstance(payload, RelatedPartyThresholdPayload):
+        return (
+            f"holder:{payload.holder_label.casefold()}",
+            _stable_value(payload.threshold_percent),
+        )
+
+    if isinstance(payload, SubsidiaryStatusPayload):
+        return f"entity:{_entity_key(payload.entity_name)}", payload.status.value
+
+    if isinstance(payload, FxRatePayload):
+        # A scenario may legitimately contain several FX observations. Only facts tied to
+        # the same ledger transaction are required to agree with each other.
+        if payload.transaction_id is None:
+            return None
+        value = {
+            "from": payload.from_currency.upper(),
+            "to": payload.to_currency.upper(),
+            "explicit_rate": payload.explicit_rate,
+            "rate_source": payload.rate_source.value,
+            "source_amount": (
+                _money_key(payload.source_amount.value, payload.source_amount.currency)
+                if payload.source_amount is not None
+                else None
+            ),
+            "settlement_amount": (
+                _money_key(payload.settlement_amount.value, payload.settlement_amount.currency)
+                if payload.settlement_amount is not None
+                else None
+            ),
+            "as_of_date": payload.as_of_date,
+        }
+        return f"txn:{payload.transaction_id}", _stable_value(value)
+
+    if isinstance(payload, GroupCapexPayload):
+        value = {
+            "amount": _money_key(payload.amount.value, payload.amount.currency),
+            "period_label": (payload.period_label or "").strip().casefold() or None,
+        }
+        return "group-capex", _stable_value(value)
+
+    if isinstance(payload, TransactionTreatmentPayload):
+        return f"txn:{payload.transaction_id}", payload.disposition.value
+
+    # OFF_LEDGER_AMOUNT and ONE_TIME_ADD_BACK are additive assertions. Equal labels do
+    # not imply that they refer to the same economic item, so they are not collapsed
+    # into a uniqueness conflict here.
+    return None
 
 
 def detect_conflicts(facts: tuple[FactRecord, ...]) -> tuple[FactConflict, ...]:
-    """
-    Detect conflicting accepted facts.
+    """Mark incompatible assertions about the same semantic object as conflicts."""
+    accepted = [fact for fact in facts if fact.validator_status is FactValidatorStatus.ACCEPTED]
+    groups: dict[tuple[FactKind, str, str], list[tuple[FactRecord, str]]] = {}
 
-    - Same txn two different amounts (reclassification)
-    - Same entity two different ownership percentages
-    """
-    accepted = [f for f in facts if f.validator_status is FactValidatorStatus.ACCEPTED]
+    for fact in accepted:
+        semantic = _conflict_identity_and_value(fact)
+        if semantic is None:
+            continue
+        identity, value = semantic
+        key = (fact.fact_kind, fact.scenario_id, identity)
+        groups.setdefault(key, []).append((fact, value))
+
     conflicts: list[FactConflict] = []
-
-    # Reclass / amount by transaction_id
-    by_txn: dict[tuple[str, str], list[FactRecord]] = {}
-    for fact in accepted:
-        if fact.fact_kind is not FactKind.TRANSACTION_RECLASSIFICATION:
+    for (kind, scenario_id, identity), group in sorted(
+        groups.items(), key=lambda item: (item[0][0].value, item[0][1], item[0][2])
+    ):
+        values = {value for _fact, value in group}
+        if len(values) <= 1:
             continue
-        payload = fact.payload
-        if not isinstance(payload, TransactionReclassificationPayload):
-            continue
-        if payload.transaction_id is None or payload.amount is None:
-            continue
-        key = (fact.scenario_id, payload.transaction_id)
-        by_txn.setdefault(key, []).append(fact)
-
-    for (scenario_id, txn_id), group in sorted(by_txn.items()):
-        amounts = {
-            _money_key(
-                f.payload.amount.value
-                if isinstance(f.payload, TransactionReclassificationPayload) and f.payload.amount
-                else None,
-                f.payload.amount.currency
-                if isinstance(f.payload, TransactionReclassificationPayload) and f.payload.amount
-                else None,
+        fact_ids = tuple(sorted(content_fact_id(fact) for fact, _value in group))
+        conflicts.append(
+            FactConflict(
+                conflict_id=deterministic_id(
+                    "fact-conflict",
+                    kind.value,
+                    scenario_id,
+                    identity,
+                    *fact_ids,
+                ),
+                scenario_id=scenario_id,
+                fact_kind=kind,
+                fact_ids=fact_ids,
+                reason=f"conflicting {kind.value} assertions for {identity}",
             )
-            for f in group
-        }
-        if len(amounts) > 1:
-            fact_ids = tuple(sorted(content_fact_id(f) for f in group))
-            conflicts.append(
-                FactConflict(
-                    conflict_id=deterministic_id("fact-conflict", scenario_id, txn_id, *fact_ids),
-                    scenario_id=scenario_id,
-                    fact_kind=FactKind.TRANSACTION_RECLASSIFICATION,
-                    fact_ids=fact_ids,
-                    reason=f"conflicting amounts for {txn_id}",
-                )
-            )
-
-    # Ownership by entity
-    by_entity: dict[tuple[str, str], list[FactRecord]] = {}
-    for fact in accepted:
-        if fact.fact_kind is not FactKind.OWNERSHIP:
-            continue
-        payload = fact.payload
-        if not isinstance(payload, OwnershipPayload):
-            continue
-        key = (fact.scenario_id, payload.entity_name.casefold())
-        by_entity.setdefault(key, []).append(fact)
-
-    for (scenario_id, entity_key), group in sorted(by_entity.items()):
-        percents = {
-            f.payload.ownership_percent for f in group if isinstance(f.payload, OwnershipPayload)
-        }
-        if len(percents) > 1:
-            fact_ids = tuple(sorted(content_fact_id(f) for f in group))
-            conflicts.append(
-                FactConflict(
-                    conflict_id=deterministic_id(
-                        "fact-conflict-own",
-                        scenario_id,
-                        entity_key,
-                        *fact_ids,
-                    ),
-                    scenario_id=scenario_id,
-                    fact_kind=FactKind.OWNERSHIP,
-                    fact_ids=fact_ids,
-                    reason=f"conflicting ownership for {entity_key}",
-                )
-            )
+        )
 
     conflicts.sort(key=lambda item: item.conflict_id)
     return tuple(conflicts)
