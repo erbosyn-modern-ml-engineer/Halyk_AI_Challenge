@@ -307,7 +307,9 @@ def find_quote_in_document(
     page_cursor = next(cursor for cursor in cursors if cursor.page_number == page_number)
     page_limit = page_cursor.page_start + len(page_cursor.page_text)
     page_end_global = local + len(needle)
-    char_end = page_start + len(needle) if page_end_global <= page_limit else len(page_cursor.page_text)
+    char_end = (
+        page_start + len(needle) if page_end_global <= page_limit else len(page_cursor.page_text)
+    )
     if char_end <= page_start:
         return None
     return create_identity_span(

@@ -17,6 +17,7 @@ def run_solve_from_manifest(
     team: str | None = None,
     contact_email: str | None = None,
     model_name: str | None = None,
+    require_complete: bool = False,
 ) -> dict[str, str]:
     """Invoke competition solver with a sanitized manifest only (no raw root)."""
     resolved = (
@@ -30,6 +31,7 @@ def run_solve_from_manifest(
         team=team,
         contact_email=contact_email,
         model_name=model_name,
+        require_complete=require_complete,
     )
 
 
@@ -40,6 +42,7 @@ def run_solve(
     team: str | None = None,
     contact_email: str | None = None,
     model_name: str | None = None,
+    require_complete: bool = False,
 ) -> dict[str, str]:
     """Compatibility composition root: preflight(raw) then solve(sanitized).
 
@@ -55,4 +58,5 @@ def run_solve(
             team=team,
             contact_email=contact_email,
             model_name=model_name,
+            require_complete=require_complete,
         )

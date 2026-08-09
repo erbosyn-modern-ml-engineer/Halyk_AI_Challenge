@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -85,38 +84,39 @@ class CompetitiveFallbackReport:
     eur_usd_rate: Decimal | None
 
 
-def _settlement_eur_usd_rate(
+def _explicit_eur_usd_rate(
     adjustments: tuple[AdjustmentEvent, ...],
+    *,
+    scenario_id: str,
 ) -> tuple[Decimal | None, tuple[str, ...]]:
-    """Find one unambiguous EUR/USD settlement rate in the adjustment facts."""
+    """Return one explicit source-backed EUR/USD rate for this scenario."""
 
     candidates: dict[Decimal, set[str]] = {}
     for event in adjustments:
-        if event.event_type is not AdjustmentEventType.FX_SETTLEMENT_REFERENCE:
+        if (
+            event.event_type is not AdjustmentEventType.FX_SETTLEMENT_REFERENCE
+            or event.scenario_id != scenario_id
+            or event.after.get("rate_source") != "EXPLICIT"
+        ):
             continue
-        after = event.after
-        source = after.get("source_amount")
-        settlement = after.get("settlement_amount")
-        if not isinstance(source, dict) or not isinstance(settlement, dict):
+        raw_rate = event.after.get("explicit_rate")
+        from_currency = event.after.get("from_currency")
+        to_currency = event.after.get("to_currency")
+        if raw_rate in {None, ""}:
             continue
-        source_currency = source.get("currency")
-        settlement_currency = settlement.get("currency")
         try:
-            source_value = Decimal(str(source.get("value")))
-            settlement_value = Decimal(str(settlement.get("value")))
+            rate = Decimal(str(raw_rate))
         except Exception:
             continue
-        if source_value <= 0 or settlement_value <= 0:
+        if rate <= 0:
             continue
-        if source_currency == "EUR" and settlement_currency == "USD":
-            rate = settlement_value / source_value
-        elif source_currency == "USD" and settlement_currency == "EUR":
-            rate = source_value / settlement_value
+        if from_currency == "EUR" and to_currency == "USD":
+            eur_usd = rate
+        elif from_currency == "USD" and to_currency == "EUR":
+            eur_usd = Decimal("1") / rate
         else:
             continue
-        if rate <= Decimal("0.5") or rate >= Decimal("2.0"):
-            continue
-        candidates.setdefault(rate, set()).update(event.evidence_span_ids)
+        candidates.setdefault(eur_usd, set()).update(event.evidence_span_ids)
     if len(candidates) != 1:
         return None, ()
     rate, evidence = next(iter(candidates.items()))
@@ -190,6 +190,7 @@ def _derive_group_capex(
             if not (
                 len(opening_matches) == len(dep_matches) == len(closing_matches) == 1
                 and _NO_DISPOSALS_RE.search(note)
+                and _NO_OTHER_MOVEMENTS_RE.search(note)
             ):
                 continue
 
@@ -242,10 +243,11 @@ def _convert_eur_inputs(
     inputs: tuple[CalculationInput, ...],
     *,
     rate: Decimal,
+    scenario_id: str,
 ) -> tuple[CalculationInput, ...]:
     converted: list[CalculationInput] = []
     for item in inputs:
-        if item.currency != "EUR":
+        if item.scenario_id != scenario_id or item.currency != "EUR":
             converted.append(item)
             continue
         update: dict[str, Any] = {
@@ -268,10 +270,12 @@ def _group_capex_input(
     *,
     plan: EvaluationPlan,
     source_file: str,
-) -> CalculationInput:
+) -> CalculationInput | None:
     semantics, sign_rule = sign_contract_for_category(MetricCategory.GROUP_CAPEX)
-    start = plan.period.start_date or date(2025, 1, 1)
-    end = plan.period.end_date or date(2025, 12, 31)
+    start = plan.period.start_date
+    end = plan.period.end_date
+    if start is None or end is None:
+        return None
     return CalculationInput(
         input_id=deterministic_id("stage8-fallback", plan.scenario_id, "GROUP_CAPEX", str(amount)),
         scenario_id=plan.scenario_id,
@@ -379,20 +383,21 @@ def build_competitive_fallbacks(
         )
 
     diagnostics: list[dict[str, Any]] = []
-    rate, rate_evidence = _settlement_eur_usd_rate(adjustments)
     working_inputs = context.calculation_inputs
-    if rate is not None:
-        working_inputs = _convert_eur_inputs(working_inputs, rate=rate)
+    used_rates: list[Decimal] = []
+    for scenario_id in sorted({scenario for scenario, _clause in target_keys}):
+        rate, rate_evidence = _explicit_eur_usd_rate(adjustments, scenario_id=scenario_id)
+        if rate is None:
+            continue
+        working_inputs = _convert_eur_inputs(working_inputs, rate=rate, scenario_id=scenario_id)
+        used_rates.append(rate)
         diagnostics.append(
             {
-                "strategy": "EUR_USD_SETTLEMENT_RATE_COMPETITIVE_FALLBACK",
+                "strategy": "EXPLICIT_EUR_USD_RATE_FALLBACK",
+                "scenario_id": scenario_id,
                 "rate": str(rate),
                 "source_evidence_span_ids": list(rate_evidence),
-                "scope": "all unresolved USD-denominated covenant calculations",
-                "assumption": (
-                    "competition-only cross-scenario reuse of the sole source-backed EUR/USD "
-                    "settlement ratio; strict Stage 6 intentionally does not trust this as FX"
-                ),
+                "scope": "same-scenario unresolved EUR inputs only",
             }
         )
 
@@ -406,22 +411,19 @@ def build_competitive_fallbacks(
             scenario_id=group_capex_plan.scenario_id,
         )
         if group_capex_amount is not None and group_capex_diagnostic is not None:
-            working_inputs = tuple(
-                (
-                    *working_inputs,
-                    _group_capex_input(
-                        group_capex_amount,
-                        plan=group_capex_plan,
-                        source_file=group_capex_diagnostic["source_file"],
-                    ),
+            group_capex_input = _group_capex_input(
+                group_capex_amount,
+                plan=group_capex_plan,
+                source_file=group_capex_diagnostic["source_file"],
+            )
+            if group_capex_input is not None:
+                working_inputs = (*working_inputs, group_capex_input)
+                coverage, readiness = _enable_group_capex_selector(
+                    coverage,
+                    readiness,
+                    definition_id=group_capex_plan.definition_id,
                 )
-            )
-            coverage, readiness = _enable_group_capex_selector(
-                coverage,
-                readiness,
-                definition_id=group_capex_plan.definition_id,
-            )
-            diagnostics.append(group_capex_diagnostic)
+                diagnostics.append(group_capex_diagnostic)
 
     fallback_context = context.model_copy(
         update={
@@ -458,5 +460,5 @@ def build_competitive_fallbacks(
         results=usable,
         context=fallback_context,
         diagnostics=tuple(diagnostics),
-        eur_usd_rate=rate,
+        eur_usd_rate=(used_rates[0] if len(set(used_rates)) == 1 and used_rates else None),
     )

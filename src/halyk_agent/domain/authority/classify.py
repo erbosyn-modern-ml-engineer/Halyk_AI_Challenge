@@ -182,19 +182,6 @@ def _lifecycle_from_markers(
             return DocumentLifecycleStatus.DRAFT, draft, "EXPLICIT_DRAFT"
         if strong_final is not None:
             return DocumentLifecycleStatus.FINAL, strong_final, "STRONG_FINAL_STATUS"
-        # Engagement packaging without draft markers → FINAL for auditor reports.
-        if doc_type is DocumentType.AUDITOR_REPORT:
-            audit_finalish = require_span_or_none(
-                document,
-                patterns=(
-                    "АУДИТОРСКОЕ ДЕЛО",
-                    "Независимый аудитор",
-                    "Independent Auditor",
-                    "independent auditor",
-                ),
-            )
-            if audit_finalish is not None:
-                return DocumentLifecycleStatus.FINAL, audit_finalish, "AUDITOR_ENGAGEMENT_FINAL"
         return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
 
     if doc_type is DocumentType.TREASURY_MEMO:
@@ -216,7 +203,7 @@ def _lifecycle_from_markers(
                 strong_executed or strong_final,
                 "KYC_CURRENT",
             )
-        return DocumentLifecycleStatus.CURRENT, None, "KYC_DEFAULT_CURRENT"
+        return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
 
     if working_doc is not None:
         return DocumentLifecycleStatus.WORKING_PAPER, working_doc, "EXPLICIT_WORKING_DOCUMENT"

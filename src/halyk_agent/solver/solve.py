@@ -229,6 +229,7 @@ def solve_competition_from_manifest(
     model_name: str | None = None,
     run_id: str | None = None,
     opener: FileOpener | None = None,
+    require_complete: bool = False,
 ) -> dict[str, str]:
     """Stage 7 real solver: sanitized sources -> deterministic pipeline -> submission.
 
@@ -264,15 +265,40 @@ def solve_competition_from_manifest(
         _assert_opens_allowlisted(file_opener, allowed=allowed, banned=banned)
         audit.assert_no_ground_truth()
 
-        from halyk_agent.solver.fallbacks import build_competitive_fallbacks
-
-        fallback = build_competitive_fallbacks(
-            evaluation=pipeline.evaluation,
-            context=pipeline.context,
-            adjustments=pipeline.taxonomy.adjustments,
-            parsed_dir=pipeline.parsed_dir,
-            routing_dir=pipeline.routing_dir,
+        from halyk_agent.domain.ids import sha256_text
+        from halyk_agent.solver.fallbacks import (
+            CompetitiveFallbackReport,
+            build_competitive_fallbacks,
         )
+        from halyk_agent.solver.mode import (
+            CompetitionSolveMode,
+            configured_competition_solve_mode,
+            solve_mode_manifest,
+        )
+        from halyk_agent.solver.submission.status_policy import (
+            configured_submission_status_policy,
+            status_policy_manifest,
+        )
+
+        solve_mode = configured_competition_solve_mode()
+        status_policy = configured_submission_status_policy()
+        solve_mode_payload = solve_mode_manifest(solve_mode)
+        status_policy_payload = status_policy_manifest(status_policy)
+        if solve_mode is CompetitionSolveMode.COMPETITIVE_BOUNDED_V1:
+            fallback = build_competitive_fallbacks(
+                evaluation=pipeline.evaluation,
+                context=pipeline.context,
+                adjustments=pipeline.taxonomy.adjustments,
+                parsed_dir=pipeline.parsed_dir,
+                routing_dir=pipeline.routing_dir,
+            )
+        else:
+            fallback = CompetitiveFallbackReport(
+                results={},
+                context=pipeline.context,
+                diagnostics=(),
+                eur_usd_rate=None,
+            )
         document, unresolved = build_final_submission(
             pipeline.materialized.template_payload,
             evaluation=pipeline.evaluation,
@@ -286,6 +312,10 @@ def solve_competition_from_manifest(
             fallback_context=fallback.context,
             compile_failures=pipeline.covenants.failures,
         )
+        if require_complete and unresolved:
+            raise DatasetAdapterError(
+                f"submission has {len(unresolved)} unresolved cells; refusing upload-ready package"
+            )
         written = write_final_submission(
             document,
             public_stage,
@@ -341,6 +371,14 @@ def solve_competition_from_manifest(
             "fallback_eur_usd_rate": (
                 str(fallback.eur_usd_rate) if fallback.eur_usd_rate is not None else None
             ),
+            "solve_mode": solve_mode_payload,
+            "solve_mode_sha256": sha256_text(
+                json.dumps(solve_mode_payload, sort_keys=True, separators=(",", ":"))
+            ),
+            "submission_policy": status_policy_payload,
+            "submission_policy_sha256": sha256_text(
+                json.dumps(status_policy_payload, sort_keys=True, separators=(",", ":"))
+            ),
         }
         (public_stage / "pipeline_manifest.json").write_text(
             json.dumps(pipeline_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -355,6 +393,8 @@ def solve_competition_from_manifest(
             "unresolved_cell_count": len(unresolved),
             "fallback_cell_count": len(fallback.results),
             "ground_truth_access": "none",
+            "solve_mode": solve_mode_payload,
+            "submission_policy": status_policy_payload,
         }
         (public_stage / "run_manifest.json").write_text(
             json.dumps(run_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -368,6 +408,8 @@ def solve_competition_from_manifest(
             f"- cells: {sum(len(cells) for cells in document.answers.values())}",
             f"- unresolved_cells: {len(unresolved)}",
             f"- fallback_cells: {len(fallback.results)}",
+            f"- solve_mode: {solve_mode.value}",
+            f"- submission_policy: {status_policy.value}",
             f"- evaluation_resolved: {pipeline.evaluation.manifest.resolved_count}",
             f"- evaluation_unresolved: {pipeline.evaluation.manifest.unresolved_count}",
             f"- evaluation_errors: {pipeline.evaluation.manifest.error_count}",

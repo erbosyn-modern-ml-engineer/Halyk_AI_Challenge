@@ -192,9 +192,15 @@ def evaluate_from_paths(
 
     plans = plan_definitions(definitions)
     plan_scenarios = {plan.scenario_id for plan in plans}
-    execution_inputs = tuple(
-        item for item in calculation_inputs if item.scenario_id in plan_scenarios
+    extra_scenarios = sorted(
+        {item.scenario_id for item in calculation_inputs if item.scenario_id not in plan_scenarios}
     )
+    if extra_scenarios:
+        raise EvaluationServiceError(
+            f"Stage 5F contains calculation inputs outside the plan universe: {extra_scenarios}",
+            code="SCENARIO_UNIVERSE_MISMATCH",
+        )
+    execution_inputs = calculation_inputs
     context = EvaluationContext(
         amount_contract_version=taxonomy_manifest.amount_contract_version,
         calculation_inputs=execution_inputs,

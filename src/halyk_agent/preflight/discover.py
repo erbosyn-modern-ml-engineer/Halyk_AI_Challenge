@@ -154,9 +154,7 @@ def _check_input_limits(root: Path, files: list[Path], settings: Settings) -> No
             raise DatasetAdapterError(f"dataset path exceeds limit: {relative}")
         size = path.stat().st_size
         if size > settings.max_single_file_bytes:
-            raise DatasetAdapterError(
-                f"dataset file exceeds size limit: {relative} ({size} bytes)"
-            )
+            raise DatasetAdapterError(f"dataset file exceeds size limit: {relative} ({size} bytes)")
         total += size
         if total > settings.max_total_uncompressed_bytes:
             raise DatasetAdapterError(
@@ -185,7 +183,9 @@ def discover_and_sanitize(
     quarantined: list[QuarantinedRef] = []
     documents_dir: Path | None = None
 
-    all_files = sorted((path for path in root.rglob("*") if path.is_file()), key=lambda p: p.as_posix())
+    all_files = sorted(
+        (path for path in root.rglob("*") if path.is_file()), key=lambda p: p.as_posix()
+    )
     _check_input_limits(root, all_files, resolved_settings)
 
     for path in all_files:

@@ -162,12 +162,15 @@ def semantic_validate(
         if transaction_id is not None and ledger_txn_ids is not None:
             if transaction_id not in ledger_txn_ids:
                 return FactValidatorStatus.REJECTED_SEMANTIC, "UNKNOWN_TXN"
-            if ledger_txn_scenarios is not None and scenario_id is not None:
-                if ledger_txn_scenarios.get(transaction_id) != scenario_id:
-                    return (
-                        FactValidatorStatus.REJECTED_SEMANTIC,
-                        "FACT_TXN_SCENARIO_MISMATCH",
-                    )
+            if (
+                ledger_txn_scenarios is not None
+                and scenario_id is not None
+                and ledger_txn_scenarios.get(transaction_id) != scenario_id
+            ):
+                return (
+                    FactValidatorStatus.REJECTED_SEMANTIC,
+                    "FACT_TXN_SCENARIO_MISMATCH",
+                )
 
         if isinstance(payload, OwnershipPayload):
             if payload.ownership_percent < 0 or payload.ownership_percent > Decimal("100"):

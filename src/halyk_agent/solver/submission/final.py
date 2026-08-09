@@ -185,13 +185,15 @@ def build_final_submission(
             evidence_context = (
                 fallback_context if used_fallback and fallback_context is not None else context
             )
-            evidence = select_causal_evidence(
-                plan=plan,
-                result=result,
-                context=evidence_context,
-                adjustments=adjustments,
-                classified=classified,
-            )
+            evidence = None
+            if verdict is strict_verdict:
+                evidence = select_causal_evidence(
+                    plan=plan,
+                    result=result,
+                    context=evidence_context,
+                    adjustments=adjustments,
+                    classified=classified,
+                )
             answers[scenario_id][clause_id] = CovenantCell(
                 status=verdict,
                 actual=_competition_actual(result.actual.value),
