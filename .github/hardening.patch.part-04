@@ -1,0 +1,285 @@
+LOWS,
+-        re.compile(r"получен\w*\s+(?:кредит|займ)|кредитн\w*\s+транш|қаржыландыру", re.IGNORECASE),
+-    ),
+-)
+-
+ _WEAK_OPEX = (
+     "OTHER_EXPENSE_WEAK",
+     MetricCategory.OTHER_EXPENSE,
+@@ -389,7 +324,7 @@
+             return credit_hit
+ 
+     strong_hits: list[tuple[str, MetricCategory]] = []
+-    for rule_id, category, pattern in (*_STRONG_RULES, *_MULTILINGUAL_RULES):
++    for rule_id, category, pattern in _STRONG_RULES:
+         if not pattern.search(text):
+             continue
+         if rule_id == "REVENUE" and (_CREDIT_MARKERS.search(text) or _INTEREST_INCOME.search(text)):
+--- a/src/halyk_agent/domain/transaction_taxonomy/engine.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/domain/transaction_taxonomy/engine.py	2026-08-09 05:33:47.929070666 +0000
+@@ -65,6 +65,7 @@
+     RelatedPartyBasis,
+     RelatedPartyStatus,
+     SelectorReadinessStatus,
++    SignRule,
+     SubsidiaryStatusKind,
+     TaxonomyConflict,
+     TaxonomyManifest,
+@@ -619,17 +620,27 @@
+         assert isinstance(payload, AmountCorrectionPayload)
+         state = classified_mutable[tid]
+         before = state["effective_amount"]
+-        # Preserve sign from ledger when original negative and correction positive magnitude.
++        # Amount-correction facts usually state a positive magnitude. When the ledger
++        # source sign exists, preserve it. If the source amount is missing, recover
++        # the signed-flow direction from the already-resolved category contract.
++        # This is deterministic bookkeeping semantics, not an LLM/heuristic guess.
+         corrected = payload.amount.value
+         if before is not None and before < 0 and corrected > 0:
+             corrected = -corrected
+         elif before is None and corrected > 0:
+-            state["unresolved_reasons"].append(UnresolvedReason.SIGN_DIRECTION_UNRESOLVED)
+-            for f in facts:
+-                _mark_fact(
+-                    f, "UNUSED", "positive correction has no source-backed debit/credit direction"
+-                )
+-            continue
++            category = state["effective_category"]
++            if category is None:
++                state["unresolved_reasons"].append(UnresolvedReason.SIGN_DIRECTION_UNRESOLVED)
++                for f in facts:
++                    _mark_fact(
++                        f,
++                        "UNUSED",
++                        "positive correction has no classified category for sign recovery",
++                    )
++                continue
++            _semantics, sign_rule = sign_contract_for_category(category)
++            if sign_rule is SignRule.EXPENSE_NEGATE_SOURCE:
++                corrected = -corrected
+         state["effective_amount"] = corrected
+         state["effective_currency"] = payload.amount.currency
+         state["evidence_refs"].extend(list(fact.evidence_span_ids))
+@@ -994,11 +1005,7 @@
+         assert isinstance(payload, OneTimeAddBackPayload)
+         # Prefer unique ledger attachment by amount+counterparty; else fact-derived.
+         ledger_matches: list[str] = []
+-        if (
+-            payload.counterparty
+-            and payload.period_start is not None
+-            and payload.period_end is not None
+-        ):
++        if payload.counterparty:
+             cp_key = normalize_legal_name_keys(payload.counterparty).identity_key
+             target_abs = abs(payload.amount.value)
+             for tid, state in classified_mutable.items():
+@@ -1008,9 +1015,19 @@
+                     continue
+                 amt = state["effective_amount"]
+                 txn_date = state["original_date"]
+-                if amt is None or txn_date is None:
++                if amt is None:
+                     continue
+-                if not (payload.period_start <= txn_date <= payload.period_end):
++                # A source-backed service period narrows attachment when present,
++                # but its absence must not prevent an otherwise unique exact
++                # counterparty+amount match.
++                if (
++                    payload.period_start is not None
++                    and payload.period_end is not None
++                    and (
++                        txn_date is None
++                        or not (payload.period_start <= txn_date <= payload.period_end)
++                    )
++                ):
+                     continue
+                 if abs(amt) == target_abs:
+                     ledger_matches.append(tid)
+--- a/src/halyk_agent/domain/transaction_taxonomy/semantic_classifier.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/domain/transaction_taxonomy/semantic_classifier.py	2026-08-09 05:43:26.889324477 +0000
+@@ -3,7 +3,6 @@
+ from __future__ import annotations
+ 
+ import json
+-import os
+ from dataclasses import dataclass
+ from typing import Any, Literal
+ 
+@@ -11,6 +10,8 @@
+ 
+ from halyk_agent.config import Settings
+ from halyk_agent.domain.covenants.ast import MetricCategory
++from halyk_agent.domain.ids import sha256_text
++from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway, SemanticJsonState
+ from halyk_agent.domain.routing.models import LedgerRow, TransactionEntityLink
+ from halyk_agent.domain.transaction_taxonomy.classify import classify_description
+ 
+@@ -45,17 +46,8 @@
+     *,
+     scenario_id: str,
+     settings: Settings,
+-) -> tuple[_CategoryCandidate | None, str]:
+-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+-    if not api_key:
+-        return None, "MISSING_DEEPSEEK_API_KEY"
+-    if settings.llm_primary_provider.casefold() != "deepseek":
+-        return None, "PRIMARY_PROVIDER_NOT_DEEPSEEK"
+-    try:
+-        import httpx
+-    except ImportError:
+-        return None, "HTTPX_MISSING"
+-
++    gateway: SemanticJsonGateway,
++) -> tuple[_CategoryCandidate | None, str, bool]:
+     categories = [item.value for item in MetricCategory]
+     payload = {
+         "transaction_id": row.txn_id,
+@@ -72,42 +64,33 @@
+             "reason": "short semantic classification reason",
+         },
+     }
+-    body = {
+-        "model": settings.llm_primary_model,
+-        "temperature": 0.0,
+-        "max_tokens": min(settings.llm_max_tokens, 512),
+-        "messages": [
+-            {"role": "system", "content": _SYSTEM},
+-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+-        ],
+-        "response_format": {"type": "json_object"},
+-        "thinking": {"type": "disabled"},
+-    }
++    response = gateway.propose(
++        task_id=f"transaction-category:{scenario_id}:{row.txn_id}",
++        prompt_version="transaction-semantic-category-v1",
++        schema_version="metric-category-v1",
++        source_sha256=sha256_text(row.description),
++        system_prompt=_SYSTEM,
++        request_payload=payload,
++        max_tokens=512,
++    )
++    if response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT} or response.payload is None:
++        return None, response.reason_code, response.model_called
+     try:
+-        response = httpx.post(
+-            "https://api.deepseek.com/chat/completions",
+-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+-            json=body,
+-            timeout=settings.llm_timeout_seconds,
+-        )
+-        response.raise_for_status()
+-        raw = response.json()
+-        content = raw["choices"][0]["message"]["content"]
+-        candidate = _CategoryCandidate.model_validate_json(content)
+-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+-        return None, f"PROVIDER_ERROR:{exc.__class__.__name__}"
++        candidate = _CategoryCandidate.model_validate(response.payload)
++    except ValidationError as exc:
++        return None, f"CANDIDATE_SCHEMA_INVALID:{exc.__class__.__name__}", response.model_called
+ 
+     if candidate.source_text != row.description:
+-        return None, "SOURCE_TEXT_MISMATCH"
++        return None, "SOURCE_TEXT_MISMATCH", response.model_called
+     if candidate.category == "UNKNOWN":
+-        return None, "MODEL_UNKNOWN"
++        return None, "MODEL_UNKNOWN", response.model_called
+     if candidate.confidence != "HIGH":
+-        return None, "MODEL_NOT_HIGH_CONFIDENCE"
++        return None, "MODEL_NOT_HIGH_CONFIDENCE", response.model_called
+     try:
+         category = MetricCategory(candidate.category)
+     except ValueError:
+-        return None, "CATEGORY_OUTSIDE_ENUM"
+-    return candidate.model_copy(update={"category": category.value}), "OK"
++        return None, "CATEGORY_OUTSIDE_ENUM", response.model_called
++    return candidate.model_copy(update={"category": category.value}), "OK", response.model_called
+ 
+ 
+ def classify_unresolved_rows(
+@@ -115,11 +98,14 @@
+     links: tuple[TransactionEntityLink, ...],
+     *,
+     settings: Settings,
++    gateway: SemanticJsonGateway | None = None,
+ ) -> SemanticClassificationBatch:
+     """Ask DeepSeek only about scenario-linked rows that deterministic rules left unresolved."""
+     if not settings.semantic_fallback_enabled:
+         return SemanticClassificationBatch(overrides={}, diagnostics=(), model_calls=0)
+ 
++    semantic_gateway = gateway or SemanticJsonGateway(settings=settings)
++
+     scenario_by_txn = {link.txn_id: link.scenario_id for link in links}
+     overrides: dict[str, MetricCategory] = {}
+     diagnostics: list[dict[str, Any]] = []
+@@ -131,13 +117,13 @@
+         deterministic = classify_description(row.description)
+         if deterministic.status != "UNRESOLVED":
+             continue
+-        if calls >= settings.llm_max_external_attempts:
+-            diagnostics.append(
+-                {"transaction_id": row.txn_id, "status": "SKIPPED", "reason": "BUDGET_EXHAUSTED"}
+-            )
+-            continue
+-        calls += 1
+-        candidate, reason = _request_candidate(row, scenario_id=scenario_id, settings=settings)
++        candidate, reason, model_called = _request_candidate(
++            row,
++            scenario_id=scenario_id,
++            settings=settings,
++            gateway=semantic_gateway,
++        )
++        calls += int(model_called)
+         if candidate is None:
+             diagnostics.append(
+                 {"transaction_id": row.txn_id, "status": "UNRESOLVED", "reason": reason}
+--- a/src/halyk_agent/solver/fallbacks.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/solver/fallbacks.py	2026-08-09 05:26:43.748798151 +0000
+@@ -84,6 +84,48 @@
+     eur_usd_rate: Decimal | None
+ 
+ 
++def _settlement_eur_usd_rate(
++    adjustments: tuple[AdjustmentEvent, ...],
++) -> tuple[Decimal | None, tuple[str, ...]]:
++    """Derive one unique source-backed EUR/USD settlement ratio across the corpus.
++
++    This is competition-only evidence recovery, never a strict Stage 6 FX fact.
++    Conflicting ratios fail closed.
++    """
++
++    candidates: dict[Decimal, set[str]] = {}
++    for event in adjustments:
++        if event.event_type is not AdjustmentEventType.FX_SETTLEMENT_REFERENCE:
++            continue
++        source = event.after.get("source_amount")
++        settlement = event.after.get("settlement_amount")
++        if not isinstance(source, dict) or not isinstance(settlement, dict):
++            continue
++        try:
++            source_value = Decimal(str(source.get("value")))
++            settlement_value = Decimal(str(settlement.get("value")))
++        except Exception:
++            continue
++        if source_value <= 0 or settlement_value <= 0:
++            continue
++        source_currency = source.get("currency")
++        settlement_currency = settlement.get("currency")
++        if source_currency == "EUR" and settlement_currency == "USD":
++            rate = settlement_value / source_value
++        elif source_currency == "USD" and settlement_currency == "EUR":
++            rate = source_value / settlement_value
++        else:
++            continue
++        # Broad sanity guard only; the source ratio itself remains trusted evidence.
++        if rate < Decimal("0.1") or rate > Decimal("10"):
++            continue
++        candidates.setdefault(rate, set()).update(event.evidence_span_ids)
++    if len(candidates) != 1:
++        return None, ()
++    rate, evidence = next(iter(candidates.items()))
++    return rate, tuple(sorted(evidence))
++
++
+ def _explicit_eur_usd_rate(
+     adjustments: tuple[AdjustmentEvent, ...],
+     *,
