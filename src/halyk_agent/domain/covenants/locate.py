@@ -31,6 +31,7 @@ class _DocCursor:
     page_text: str
 
 
+# These are intentionally semantic rather than dataset/year/currency specific.
 _KEYWORDS = (
     "обязуется",
     "не допускать",
@@ -41,18 +42,26 @@ _KEYWORDS = (
     "выруч",
     "капит",
     "связанн",
+    "ковенант",
     "ratio",
     "must",
-    "2025-",
-    "$",
-    "x",
-    "платеж",
+    "shall",
+    "covenant",
     "payment",
+    "платеж",
+    "revenue",
+    "ebitda",
+    "capex",
+)
+
+_HEADING_RE = re.compile(
+    r"(?im)^[ \t]*(?:Пункт|Clause|Article|Статья|Тармақ)\s+"
+    r"(?P<id>\d+(?:\.\d+)*)\b[^\n]*"
 )
 
 
 def join_document_text(document: CanonicalDocument) -> tuple[str, tuple[_DocCursor, ...]]:
-    """Join page texts with newlines; return (joined_text, page cursors)."""
+    """Join page texts with newlines; return text and page cursors."""
     parts: list[str] = []
     cursors: list[_DocCursor] = []
     offset = 0
@@ -64,7 +73,6 @@ def join_document_text(document: CanonicalDocument) -> tuple[str, tuple[_DocCurs
     return "\n".join(parts), tuple(cursors)
 
 
-# Back-compat alias for internal call sites.
 _join_document = join_document_text
 
 
@@ -82,7 +90,7 @@ def _is_ws(ch: str) -> bool:
 
 
 def build_ws_map(raw: str) -> tuple[str, list[int]]:
-    """Return whitespace-normalized text and map normalized index → raw index."""
+    """Return whitespace-normalized text and map normalized index to raw index."""
     norm_chars: list[str] = []
     raw_index_for_norm: list[int] = []
     i = 0
@@ -101,44 +109,60 @@ def build_ws_map(raw: str) -> tuple[str, list[int]]:
     return "".join(norm_chars), raw_index_for_norm
 
 
+def _candidate_score(text: str) -> int:
+    lowered = text.casefold()
+    score = sum(1 for keyword in _KEYWORDS if keyword in lowered)
+    if re.search(r"(?:<=|>=|≤|≥|<|>|\bне\s+(?:более|менее)\b|\bat\s+(?:most|least)\b)", text, re.I):
+        score += 1
+    if re.search(r"\d+(?:[.,]\d+)?\s*(?:%|x\b|[A-Z]{3}\b|₸|€|£|\$)", text):
+        score += 1
+    if len(text.strip()) < 40:
+        score -= 4
+    return score
+
+
 def locate_clause(
     document: CanonicalDocument,
     *,
     clause_id: str,
 ) -> LocatedClause | None:
-    """Locate body clause text across pages (Пункт 6.x)."""
+    """Locate an exact structural clause and stop at the next structural heading."""
     if not document.pages:
         return None
     joined, cursors = _join_document(document)
-    pat = re.compile(
-        rf"(?is)Пункт\s+{re.escape(clause_id)}\b|пункт\s+{re.escape(clause_id)}\b|"
-        rf"Clause\s+{re.escape(clause_id)}\b"
-    )
-    end_pat = re.compile(r"(?is)\n\s*Пункт\s+6\.\d|\n\s*Статья\s+\d+|\n\s*Article\s+\d+")
-    candidates: list[tuple[int, int, int, str]] = []
-    for match in pat.finditer(joined):
-        start = match.start()
-        rest = joined[start + 8 :]
-        end_m = end_pat.search(rest)
-        end = start + 8 + (end_m.start() if end_m else min(len(rest), 2200))
-        snip = joined[start:end].strip()
-        score = sum(1 for kw in _KEYWORDS if kw in snip.casefold())
-        if len(snip) < 80:
-            score -= 5
-        candidates.append((score, start, end, snip))
+    headings = list(_HEADING_RE.finditer(joined))
+    candidates: list[tuple[int, int, int]] = []
+    for index, heading in enumerate(headings):
+        if heading.group("id") != clause_id:
+            continue
+        start = heading.start()
+        structural_end = headings[index + 1].start() if index + 1 < len(headings) else len(joined)
+        # Long annexes sometimes have no recognizable next heading. Keep a bounded
+        # window rather than allowing one clause to consume the rest of a document.
+        end = min(structural_end, start + 5000)
+        candidates.append((_candidate_score(joined[start:end]), start, end))
+
+    # Some extracted PDFs lose the word before the clause number. Allow a bare
+    # heading only when it starts a line and still apply the same next-heading bound.
+    if not candidates:
+        bare = re.compile(rf"(?im)^[ \t]*{re.escape(clause_id)}\b[^\n]*")
+        for match in bare.finditer(joined):
+            next_heading = _HEADING_RE.search(joined, match.end())
+            end = min(next_heading.start() if next_heading else len(joined), match.start() + 5000)
+            candidates.append((_candidate_score(joined[match.start() : end]), match.start(), end))
+
     if not candidates:
         return None
     candidates.sort(key=lambda row: (-row[0], row[1]))
-    score, start, end, snip = candidates[0]
+    score, start, end = candidates[0]
     if score <= 0:
         return None
 
-    # Trim trailing whitespace from global end while keeping exact raw slice for snip.
     while end > start and _is_ws(joined[end - 1]):
         end -= 1
     clause_raw = joined[start:end]
     page_number, page_char_start = _map_global_to_page(cursors, start)
-    page_cursor = next(c for c in cursors if c.page_number == page_number)
+    page_cursor = next(cursor for cursor in cursors if cursor.page_number == page_number)
     head_end = min(page_char_start + min(180, len(clause_raw)), len(page_cursor.page_text))
     if head_end <= page_char_start:
         head_end = min(page_char_start + 1, len(page_cursor.page_text))
@@ -168,26 +192,18 @@ def find_in_clause(
     *,
     needle: str,
 ) -> EvidenceSpan | None:
-    """
-    Locate ``needle`` strictly inside the located covenant clause region.
-
-    Supports whitespace-normalized matching with exact raw quote recovery.
-    Never searches outside the clause.
-    """
+    """Locate a quote strictly inside the selected clause."""
     if not needle:
         return None
     clause_raw = located.joined_text[located.global_start : located.global_end]
-    # Exact raw match first.
     local = clause_raw.find(needle)
     if local < 0:
-        # Case-insensitive exact-length match on raw (same length only).
         low_clause = clause_raw.casefold()
         low_needle = needle.casefold()
         local = low_clause.find(low_needle)
         if local >= 0:
             needle = clause_raw[local : local + len(needle)]
     if local < 0:
-        # Whitespace-normalized match with offset map.
         norm_clause, idx_map = build_ws_map(clause_raw)
         norm_needle, _ = build_ws_map(needle)
         if not norm_needle:
@@ -196,32 +212,26 @@ def find_in_clause(
         if pos < 0:
             return None
         raw_start = idx_map[pos]
-        raw_end_idx = idx_map[pos + len(norm_needle) - 1]
-        # Extend raw_end to cover full last character.
-        raw_end = raw_end_idx + 1
+        raw_end = idx_map[pos + len(norm_needle) - 1] + 1
         local = raw_start
         needle = clause_raw[raw_start:raw_end]
     abs_global = located.global_start + local
     page_number, page_start = _map_global_to_page(located.cursors, abs_global)
     page_end_global = abs_global + len(needle)
-    # If the match stays on one page, emit one span; else emit first-page portion only
-    # for single-span callers (multi-page builders use page_spans_for_clause_range).
-    page_cursor = next(c for c in located.cursors if c.page_number == page_number)
+    page_cursor = next(cursor for cursor in located.cursors if cursor.page_number == page_number)
     page_limit = page_cursor.page_start + len(page_cursor.page_text)
     char_start = page_start
-    if page_end_global <= page_limit:
-        char_end = page_start + len(needle)
-    else:
-        char_end = len(page_cursor.page_text)
+    char_end = (
+        page_start + len(needle) if page_end_global <= page_limit else len(page_cursor.page_text)
+    )
     if char_end <= char_start:
         return None
-    result = create_identity_span(
+    return create_identity_span(
         document,
         page_number=page_number,
         char_start=char_start,
         char_end=char_end,
-    )
-    return result.span
+    ).span
 
 
 def page_spans_for_global_range(
@@ -231,10 +241,9 @@ def page_spans_for_global_range(
     global_start: int,
     global_end: int,
 ) -> tuple[EvidenceSpan, ...]:
-    """Emit one EvidenceSpan per page overlapping [global_start, global_end)."""
+    """Emit one EvidenceSpan per page overlapping a global range."""
     if global_end <= global_start:
         return ()
-    # Clamp to clause.
     global_start = max(global_start, located.global_start)
     global_end = min(global_end, located.global_end)
     out: list[EvidenceSpan] = []
@@ -244,13 +253,11 @@ def page_spans_for_global_range(
         overlap_end = min(global_end, page_end)
         if overlap_end <= overlap_start:
             continue
-        char_start = overlap_start - cursor.page_start
-        char_end = overlap_end - cursor.page_start
         result = create_identity_span(
             document,
             page_number=cursor.page_number,
-            char_start=char_start,
-            char_end=char_end,
+            char_start=overlap_start - cursor.page_start,
+            char_end=overlap_end - cursor.page_start,
         )
         if result.span is not None:
             out.append(result.span)
@@ -261,7 +268,7 @@ def formula_region_spans(
     document: CanonicalDocument,
     located: LocatedClause,
 ) -> tuple[EvidenceSpan, ...]:
-    """Evidence covering the full located clause body used for formula parsing."""
+    """Evidence covering the full clause body used for formula parsing."""
     return page_spans_for_global_range(
         document,
         located,
@@ -275,7 +282,7 @@ def find_quote_in_document(
     *,
     needle: str,
 ) -> EvidenceSpan | None:
-    """Locate ``needle`` anywhere in the document (first page hit wins)."""
+    """Locate a quote anywhere in the document; first page hit wins."""
     if not needle:
         return None
     joined, cursors = _join_document(document)
@@ -297,18 +304,15 @@ def find_quote_in_document(
         local = raw_start
         needle = joined[raw_start:raw_end]
     page_number, page_start = _map_global_to_page(cursors, local)
-    page_cursor = next(c for c in cursors if c.page_number == page_number)
+    page_cursor = next(cursor for cursor in cursors if cursor.page_number == page_number)
     page_limit = page_cursor.page_start + len(page_cursor.page_text)
     page_end_global = local + len(needle)
-    char_start = page_start
-    char_end = (
-        page_start + len(needle) if page_end_global <= page_limit else len(page_cursor.page_text)
-    )
-    if char_end <= char_start:
+    char_end = page_start + len(needle) if page_end_global <= page_limit else len(page_cursor.page_text)
+    if char_end <= page_start:
         return None
     return create_identity_span(
         document,
         page_number=page_number,
-        char_start=char_start,
+        char_start=page_start,
         char_end=char_end,
     ).span
