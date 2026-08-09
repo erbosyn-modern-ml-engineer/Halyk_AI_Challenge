@@ -28,6 +28,25 @@ from halyk_agent.domain.fact_extraction.models import (
     FactRequirement,
 )
 from halyk_agent.domain.ids import deterministic_id
+from halyk_agent.domain.routing.models import LedgerRow
+
+
+def make_ledger_row(txn_id: str, *, row_index: int = 0) -> LedgerRow:
+    return LedgerRow(
+        row_index=row_index,
+        txn_id=txn_id,
+        date="2025-01-01",
+        account_id="ACC-7001",
+        counterparty="Vendor",
+        description="",
+        amount="1",
+        currency="USD",
+        ledger_source_file="ledger.csv",
+    )
+
+
+def make_ledger_rows(*txn_ids: str) -> tuple[LedgerRow, ...]:
+    return tuple(make_ledger_row(txn_id, row_index=index) for index, txn_id in enumerate(txn_ids))
 
 
 def make_definition(

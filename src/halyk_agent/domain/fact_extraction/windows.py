@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from halyk_agent.domain.common import NonEmptyStr
 from halyk_agent.domain.fact_extraction.models import FactRequirement
 from halyk_agent.domain.fact_extraction.text_normalize import cue_corpus
+from halyk_agent.domain.fact_extraction.txn_identity import count_txn_id_mentions
 from halyk_agent.domain.ids import deterministic_id, sha256_text
 from halyk_agent.domain.parsing import CanonicalDocument
 
@@ -115,7 +117,12 @@ def _cue_hit(text: str, cues: tuple[str, ...]) -> bool:
     )
 
 
-def _answer_density(text: str, cues: tuple[str, ...]) -> int:
+def _answer_density(
+    text: str,
+    cues: tuple[str, ...],
+    *,
+    ledger_txn_ids: Collection[str] | None = None,
+) -> int:
     """Prefer paragraphs that themselves look answer-capable (tables, %, TXN)."""
     score = 0
     lowered = cue_corpus(text).casefold()
@@ -123,7 +130,7 @@ def _answer_density(text: str, cues: tuple[str, ...]) -> int:
         score += 2
     score += len(re.findall(r"\d+(?:[.,]\d+)?\s*%", text))
     score += 3 * len(re.findall(r"\b(?:LLP|JSC)\b", text))
-    score += 2 * len(re.findall(r"TXN-[A-Za-z0-9]+-\d+", text))
+    score += 2 * count_txn_id_mentions(text, ledger_txn_ids)
     return score
 
 
@@ -132,6 +139,7 @@ def select_windows(
     document: CanonicalDocument,
     *,
     max_fragments: int = 12,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> EvidenceWindow | None:
     """
     Build a bounded evidence window around paragraphs matching lexical cues.
@@ -154,7 +162,12 @@ def select_windows(
         return None
 
     # Rank hits so table pages beat boilerplate "структура владения" pages.
-    hit_indexes.sort(key=lambda i: (-_answer_density(all_paras[i].text, cues), i))
+    hit_indexes.sort(
+        key=lambda i: (
+            -_answer_density(all_paras[i].text, cues, ledger_txn_ids=ledger_txn_ids),
+            i,
+        )
+    )
     primary = hit_indexes[0]
     selected: dict[int, _Paragraph] = {}
     lo = max(0, primary - _NEIGHBOR_PARAS)
@@ -166,7 +179,7 @@ def select_windows(
     for idx in hit_indexes[1:]:
         if all_paras[idx].page_number != primary_page:
             continue
-        if _answer_density(all_paras[idx].text, cues) <= 0:
+        if _answer_density(all_paras[idx].text, cues, ledger_txn_ids=ledger_txn_ids) <= 0:
             continue
         selected[idx] = all_paras[idx]
 

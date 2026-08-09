@@ -33,6 +33,10 @@ class FactKind(StrEnum):
     ONE_TIME_ADD_BACK = "ONE_TIME_ADD_BACK"
     GROUP_CAPEX = "GROUP_CAPEX"
     TRANSACTION_TREATMENT = "TRANSACTION_TREATMENT"
+    # Private high-value document facts (Stage 5E side; covenant DSL integration separate).
+    GROUP_FINANCIAL_METRIC = "GROUP_FINANCIAL_METRIC"
+    CONTINGENT_OBLIGATION = "CONTINGENT_OBLIGATION"
+    SCHEDULED_PRINCIPAL = "SCHEDULED_PRINCIPAL"
 
 
 class SubsidiaryDerivationType(StrEnum):
@@ -43,6 +47,25 @@ class SubsidiaryDerivationType(StrEnum):
 class GroupCapexDerivationType(StrEnum):
     EXPLICIT = "EXPLICIT"
     PPE_ROLL_FORWARD = "PPE_ROLL_FORWARD"
+
+
+class GroupMetricKind(StrEnum):
+    CAPEX = "CAPEX"
+    DEBT = "DEBT"
+    EBITDA = "EBITDA"
+    REVENUE = "REVENUE"
+
+
+class FinancialScopeKind(StrEnum):
+    GROUP = "GROUP"
+    BORROWER = "BORROWER"
+
+
+class ContingentObligationType(StrEnum):
+    GUARANTEE = "GUARANTEE"
+    INDEMNITY = "INDEMNITY"
+    CONTINGENT_LIABILITY = "CONTINGENT_LIABILITY"
+    OTHER = "OTHER"
 
 
 class DerivationKind(StrEnum):
@@ -306,6 +329,52 @@ class TransactionTreatmentPayload(BaseModel):
     reason: NonEmptyStr | None = None
 
 
+class GroupFinancialMetricPayload(BaseModel):
+    """Group/borrower-scoped financial metric stated in authoritative documents."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal[FactKind.GROUP_FINANCIAL_METRIC] = FactKind.GROUP_FINANCIAL_METRIC
+    metric: GroupMetricKind
+    scope: FinancialScopeKind = FinancialScopeKind.GROUP
+    amount: MoneyAmount
+    period_label: NonEmptyStr | None = None
+    as_of_date: date | None = None
+    reporting_period_start: date | None = None
+    reporting_period_end: date | None = None
+
+
+class ContingentObligationPayload(BaseModel):
+    """Guarantee / indemnity / contingent liability amount from authoritative source."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal[FactKind.CONTINGENT_OBLIGATION] = FactKind.CONTINGENT_OBLIGATION
+    obligation_type: ContingentObligationType
+    amount: MoneyAmount
+    scope: FinancialScopeKind = FinancialScopeKind.BORROWER
+    counterparty: NonEmptyStr | None = None
+    as_of_date: date | None = None
+    period_label: NonEmptyStr | None = None
+    description: NonEmptyStr | None = None
+
+
+class ScheduledPrincipalPayload(BaseModel):
+    """Scheduled principal repayment amount (not financing inflow)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal[FactKind.SCHEDULED_PRINCIPAL] = FactKind.SCHEDULED_PRINCIPAL
+    amount: MoneyAmount
+    scope: FinancialScopeKind = FinancialScopeKind.BORROWER
+    period_label: NonEmptyStr | None = None
+    period_start: date | None = None
+    period_end: date | None = None
+    as_of_date: date | None = None
+    transaction_id: NonEmptyStr | None = None
+    description: NonEmptyStr | None = None
+
+
 FactPayload = Annotated[
     TransactionReclassificationPayload
     | TransactionPeriodPayload
@@ -317,7 +386,10 @@ FactPayload = Annotated[
     | FxRatePayload
     | OneTimeAddBackPayload
     | GroupCapexPayload
-    | TransactionTreatmentPayload,
+    | TransactionTreatmentPayload
+    | GroupFinancialMetricPayload
+    | ContingentObligationPayload
+    | ScheduledPrincipalPayload,
     Field(discriminator="kind"),
 ]
 

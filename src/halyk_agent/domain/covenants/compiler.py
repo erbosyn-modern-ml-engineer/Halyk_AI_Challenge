@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from halyk_agent.config import Settings, get_settings
-from halyk_agent.domain.covenants.ast import infer_quantity_type
+from halyk_agent.domain.covenants.ast import (
+    BoolExpr,
+    Compare,
+    Constant,
+    infer_quantity_type,
+)
 from halyk_agent.domain.covenants.formulas import collect_selectors, match_formula
 from halyk_agent.domain.covenants.locate import (
+    LocatedClause,
     find_in_clause,
     formula_region_spans,
     locate_clause,
@@ -17,6 +23,7 @@ from halyk_agent.domain.covenants.models import (
     CovenantDefinition,
     CovenantEvidenceRefs,
     CovenantModifier,
+    CovenantPlan,
     ScopeProvenance,
 )
 from halyk_agent.domain.covenants.modifiers import extract_modifier_matches
@@ -29,13 +36,132 @@ from halyk_agent.domain.covenants.parse import (
     parse_threshold,
     resolve_scope,
 )
+from halyk_agent.domain.covenants.plans import (
+    derive_primary_comparison,
+    plan_selectors,
+    simple_plan,
+)
 from halyk_agent.domain.covenants.quantity import CovenantTypeError, QuantityType
 from halyk_agent.domain.covenants.render import render_covenant_definition
 from halyk_agent.domain.covenants.semantic_formula import propose_formula
+from halyk_agent.domain.covenants.semantic_plan import propose_plan
+from halyk_agent.domain.covenants.structure import match_structure
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.ids import deterministic_id
 from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 from halyk_agent.domain.parsing import CanonicalDocument
+
+
+def _definition_from_plan(
+    *,
+    scenario_id: str,
+    clause_id: str,
+    document: CanonicalDocument,
+    located: LocatedClause,
+    spans: list[EvidenceSpan],
+    plan: CovenantPlan,
+    family_id: str,
+    parse_method: str,
+) -> tuple[CovenantDefinition | None, CovenantCompileFailure | None, tuple[EvidenceSpan, ...]]:
+    """Build a CovenantDefinition whose authority is the typed plan."""
+    clause_span = located.span
+    assert clause_span is not None
+
+    def _fail(
+        status: CompileStatus, reason: str
+    ) -> tuple[None, CovenantCompileFailure, tuple[EvidenceSpan, ...]]:
+        return (
+            None,
+            CovenantCompileFailure(
+                failure_id=deterministic_id(
+                    "covenant-failure-v1", scenario_id, clause_id, status.value
+                ),
+                scenario_id=scenario_id,
+                clause_id=clause_id,
+                status=status,
+                reason=reason,
+                document_id=document.document_id,
+                evidence_span_ids=(clause_span.id,),
+            ),
+            tuple(spans),
+        )
+
+    period = parse_period(located.text)
+    if period is None:
+        return _fail(CompileStatus.UNRESOLVED_PERIOD, "measurement period could not be determined")
+
+    try:
+        metric_type = infer_quantity_type(plan.reported_actual)
+    except CovenantTypeError as exc:
+        return _fail(CompileStatus.TYPE_ERROR, exc.message)
+
+    selectors = plan_selectors(plan)
+    scope = resolve_scope(located.text, selectors=selectors)
+    primary = derive_primary_comparison(plan)
+
+    def _clause_span(matched: str | None) -> tuple[str, ...]:
+        if not matched:
+            return ()
+        span = find_in_clause(document, located, needle=matched)
+        if span is None:
+            return ()
+        spans.append(span)
+        return (span.id,)
+
+    formula_spans = formula_region_spans(document, located)
+    spans.extend(formula_spans)
+
+    modifier_spans: list[str] = []
+    enriched_mods: list[CovenantModifier] = []
+    for match in extract_modifier_matches(located.text):
+        ids: list[str] = []
+        for quote in match.quotes:
+            ids.extend(_clause_span(quote))
+        span_ids = tuple(dict.fromkeys(ids))
+        modifier_spans.extend(span_ids)
+        enriched_mods.append(
+            CovenantModifier(
+                kind=match.kind,
+                detail=match.detail,
+                evidence_span_ids=span_ids,
+                threshold=match.threshold,
+                applies_to_category=match.applies_to_category,
+            )
+        )
+
+    evidence = CovenantEvidenceRefs(
+        clause_span_ids=(clause_span.id,),
+        formula_span_ids=tuple(span.id for span in formula_spans),
+        scope_span_ids=_clause_span(scope.matched_text),
+        modifier_span_ids=tuple(dict.fromkeys(modifier_spans)),
+    )
+
+    definition = CovenantDefinition(
+        definition_id=deterministic_id(
+            "covenant-definition-v1", scenario_id, clause_id, document.document_id, family_id
+        ),
+        scenario_id=scenario_id,
+        clause_id=clause_id,
+        document_id=document.document_id,
+        document_version_id=document.document_version_id,
+        source_file=document.source_file,
+        source_sha256=document.source_sha256 or ("0" * 64),
+        family_id=family_id,
+        metric=plan.reported_actual,
+        metric_quantity_type=metric_type,
+        comparator=primary[0] if primary else None,
+        threshold=primary[1] if primary else None,
+        period=period,
+        scope=scope,
+        selectors=selectors,
+        modifiers=tuple(enriched_mods),
+        plan=plan,
+        parse_method=parse_method,
+        evidence=evidence,
+        rendered="pending",
+    )
+    definition = definition.model_copy(update={"rendered": render_covenant_definition(definition)})
+    return definition, None, tuple(spans)
 
 
 def compile_covenant_cell(
@@ -50,6 +176,8 @@ def compile_covenant_cell(
     spans: list[EvidenceSpan] = []
     located = locate_clause(document, clause_id=clause_id)
     if located is None:
+        # Without clause text there is nothing to interpret, deterministically
+        # or semantically.
         return (
             None,
             CovenantCompileFailure(
@@ -82,9 +210,84 @@ def compile_covenant_cell(
     spans.append(located.span)
 
     formula = match_formula(located.text)
+    semantic_plan_attempted = False
+
+    def _semantic_plan_or(
+        failure: CovenantCompileFailure,
+    ) -> tuple[CovenantDefinition | None, CovenantCompileFailure | None, tuple[EvidenceSpan, ...]]:
+        """Try the bounded planner before giving up on a cell.
+
+        A family can match the wording yet still fail on threshold or type,
+        typically because the clause carries a basket, a proviso or a second
+        amount the legacy triple cannot hold. Those clauses are exactly the ones
+        the typed plan can express, so a legacy failure is a reason to escalate
+        rather than to stop.
+        """
+        nonlocal semantic_plan_attempted
+        resolved = settings or get_settings()
+        if semantic_plan_attempted or not resolved.semantic_fallback_enabled:
+            return None, failure, tuple(spans)
+        semantic_plan_attempted = True
+        proposal = propose_plan(
+            located.text,
+            scenario_id=scenario_id,
+            clause_id=clause_id,
+            settings=resolved,
+            gateway=semantic_gateway,
+        )
+        if proposal.plan is None:
+            return None, failure, tuple(spans)
+        return _definition_from_plan(
+            scenario_id=scenario_id,
+            clause_id=clause_id,
+            document=document,
+            located=located,
+            spans=spans,
+            plan=proposal.plan,
+            family_id="DEEPSEEK_TYPED_PLAN_V2",
+            parse_method="deepseek_plan",
+        )
+
+    # A structural plan is preferred over the legacy family triple: it can carry
+    # springing activation, compound breach logic, expression-valued thresholds,
+    # period extrema and accounting scope, none of which the triple can express.
+    structural = match_structure(located.text)
+    if structural is not None and (formula is None or structural.overrides_family):
+        return _definition_from_plan(
+            scenario_id=scenario_id,
+            clause_id=clause_id,
+            document=document,
+            located=located,
+            spans=spans,
+            plan=structural.plan,
+            family_id=structural.family_id,
+            parse_method="deterministic_structure",
+        )
+
     if formula is None:
         resolved_settings = settings or get_settings()
         if resolved_settings.semantic_fallback_enabled:
+            semantic_plan_attempted = True
+            semantic_plan = propose_plan(
+                located.text,
+                scenario_id=scenario_id,
+                clause_id=clause_id,
+                settings=resolved_settings,
+                gateway=semantic_gateway,
+            )
+            if semantic_plan.plan is not None:
+                return _definition_from_plan(
+                    scenario_id=scenario_id,
+                    clause_id=clause_id,
+                    document=document,
+                    located=located,
+                    spans=spans,
+                    plan=semantic_plan.plan,
+                    family_id="DEEPSEEK_TYPED_PLAN_V2",
+                    parse_method="deepseek_plan",
+                )
+            # Legacy metric-only recovery remains available for clauses whose
+            # only gap was the formula shape.
             semantic = propose_formula(
                 located.text,
                 scenario_id=scenario_id,
@@ -94,8 +297,7 @@ def compile_covenant_cell(
             )
             formula = semantic.formula
     if formula is None:
-        return (
-            None,
+        return _semantic_plan_or(
             CovenantCompileFailure(
                 failure_id=deterministic_id(
                     "covenant-failure-v1", scenario_id, clause_id, "unsupported"
@@ -106,8 +308,7 @@ def compile_covenant_cell(
                 reason="no supported formula family matched clause text",
                 document_id=document.document_id,
                 evidence_span_ids=(located.span.id,),
-            ),
-            tuple(spans),
+            )
         )
 
     comparator_parsed = parse_comparator(located.text)
@@ -153,6 +354,9 @@ def compile_covenant_cell(
         threshold = formula.threshold_override
         threshold_matched = None
     elif threshold_result.status == "malformed":
+        # A malformed number is a data-integrity failure, not a semantic gap.
+        # Asking a model to read it would invite it to invent a clean amount, so
+        # this one stays fail-closed and is never escalated.
         return (
             None,
             CovenantCompileFailure(
@@ -169,8 +373,7 @@ def compile_covenant_cell(
             tuple(spans),
         )
     elif threshold_result.status == "ambiguous":
-        return (
-            None,
+        return _semantic_plan_or(
             CovenantCompileFailure(
                 failure_id=deterministic_id(
                     "covenant-failure-v1", scenario_id, clause_id, "ambiguous-thr"
@@ -181,12 +384,10 @@ def compile_covenant_cell(
                 reason=threshold_result.reason or "ambiguous threshold",
                 document_id=document.document_id,
                 evidence_span_ids=(located.span.id,),
-            ),
-            tuple(spans),
+            )
         )
     elif threshold_result.status != "ok" or threshold_result.quantity is None:
-        return (
-            None,
+        return _semantic_plan_or(
             CovenantCompileFailure(
                 failure_id=deterministic_id(
                     "covenant-failure-v1", scenario_id, clause_id, "missing-thr"
@@ -197,8 +398,7 @@ def compile_covenant_cell(
                 reason=threshold_result.reason or "threshold quantity could not be determined",
                 document_id=document.document_id,
                 evidence_span_ids=(located.span.id,),
-            ),
-            tuple(spans),
+            )
         )
     else:
         threshold = threshold_result.quantity
@@ -228,8 +428,7 @@ def compile_covenant_cell(
     try:
         metric_type = infer_quantity_type(formula.metric)
     except CovenantTypeError as exc:
-        return (
-            None,
+        return _semantic_plan_or(
             CovenantCompileFailure(
                 failure_id=deterministic_id("covenant-failure-v1", scenario_id, clause_id, "type"),
                 scenario_id=scenario_id,
@@ -238,8 +437,7 @@ def compile_covenant_cell(
                 reason=exc.message,
                 document_id=document.document_id,
                 evidence_span_ids=(located.span.id,),
-            ),
-            tuple(spans),
+            )
         )
 
     thr_type = threshold.quantity_type
@@ -247,8 +445,7 @@ def compile_covenant_cell(
         thr_type = QuantityType.RATIO
         threshold = threshold.as_ratio()
     if metric_type is not thr_type:
-        return (
-            None,
+        return _semantic_plan_or(
             CovenantCompileFailure(
                 failure_id=deterministic_id(
                     "covenant-failure-v1", scenario_id, clause_id, "type-mismatch"
@@ -262,8 +459,7 @@ def compile_covenant_cell(
                 ),
                 document_id=document.document_id,
                 evidence_span_ids=(located.span.id,),
-            ),
-            tuple(spans),
+            )
         )
 
     def _clause_span(matched: str | None) -> tuple[str, ...]:
@@ -367,6 +563,26 @@ def compile_covenant_cell(
         modifier_span_ids=tuple(dict.fromkeys(modifier_spans)),
     )
 
+    # Every definition carries typed plan semantics, including the legacy
+    # families: a plain covenant is the degenerate plan (activation ALWAYS,
+    # breach = reported actual vs constant).
+    legacy_activation: BoolExpr | None = None
+    if activation is not None:
+        legacy_activation = Compare(
+            left=activation.metric,
+            comparator=activation.comparator,
+            right=Constant(quantity=activation.threshold),
+        )
+    try:
+        plan = simple_plan(
+            metric=formula.metric,
+            compliance_comparator=comparator,
+            threshold=threshold,
+            activation=legacy_activation,
+        )
+    except CovenantTypeError:
+        plan = None
+
     definition = CovenantDefinition(
         definition_id=deterministic_id(
             "covenant-definition-v1",
@@ -391,6 +607,12 @@ def compile_covenant_cell(
         selectors=selectors,
         modifiers=tuple(enriched_mods),
         activation_condition=activation,
+        plan=plan,
+        parse_method=(
+            "deepseek_formula"
+            if formula.family_id == "DEEPSEEK_TYPED_AST_V1"
+            else "deterministic_family"
+        ),
         evidence=evidence,
         rendered="pending",
     )

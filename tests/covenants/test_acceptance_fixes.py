@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 
+from halyk_agent.config import Settings
 from halyk_agent.domain.authority.models import (
     AuthorityDecision,
     AuthorityDomain,
@@ -153,7 +154,14 @@ def test_ambiguous_threshold_fails_closed() -> None:
         "и также обязуется не допускать превышения $2,500,000.00."
     )
     doc = make_document(raw_text=text, sha="f" * 64)
-    definition, failure, _ = compile_covenant_cell(scenario_id="SX", clause_id="6.1", document=doc)
+    # Deterministic parsing must fail closed on its own; the bounded planner is
+    # a separate escalation path and is disabled here on purpose.
+    definition, failure, _ = compile_covenant_cell(
+        scenario_id="SX",
+        clause_id="6.1",
+        document=doc,
+        settings=Settings(semantic_fallback_enabled=False),
+    )
     assert definition is None
     assert failure is not None
     assert failure.status is CompileStatus.AMBIGUOUS_THRESHOLD

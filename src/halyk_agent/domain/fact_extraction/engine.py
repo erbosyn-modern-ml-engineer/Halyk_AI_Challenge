@@ -54,6 +54,10 @@ from halyk_agent.domain.fact_extraction.models import (
 from halyk_agent.domain.fact_extraction.requirements import derive_fact_requirements
 from halyk_agent.domain.fact_extraction.text_locate import page_text_slices
 from halyk_agent.domain.fact_extraction.text_normalize import cue_corpus
+from halyk_agent.domain.fact_extraction.txn_identity import (
+    build_txn_id_vocabulary,
+    corpus_has_ledger_txn_id,
+)
 from halyk_agent.domain.fact_extraction.validators import validate_candidate
 from halyk_agent.domain.fact_extraction.windows import select_windows
 from halyk_agent.domain.ids import sha256_text
@@ -86,10 +90,10 @@ def _docs_by_id(documents: Sequence[CanonicalDocument]) -> dict[str, CanonicalDo
     return {doc.document_id: doc for doc in documents}
 
 
-def _ledger_txn_ids(ledger_rows: Sequence[LedgerRow] | None) -> set[str] | None:
+def _ledger_txn_ids(ledger_rows: Sequence[LedgerRow] | None) -> frozenset[str] | None:
     if ledger_rows is None:
         return None
-    return {row.txn_id for row in ledger_rows}
+    return build_txn_id_vocabulary(row.txn_id for row in ledger_rows)
 
 
 def hash_fact_models(models: Sequence[Any]) -> str:
@@ -280,7 +284,12 @@ def _doc_has_strong_cue(requirement: FactRequirement, document: CanonicalDocumen
     return False
 
 
-def _corpus_plausibly_answers(requirement: FactRequirement, corpus: str) -> bool:
+def _corpus_plausibly_answers(
+    requirement: FactRequirement,
+    corpus: str,
+    *,
+    ledger_txn_ids: frozenset[str] | None = None,
+) -> bool:
     """Stricter than cue presence: look for parse-shaped evidence per family."""
     repaired = cue_corpus(corpus)
     lowered = repaired.casefold()
@@ -305,7 +314,7 @@ def _corpus_plausibly_answers(requirement: FactRequirement, corpus: str) -> bool
         )
     if kind is FactKind.TRANSACTION_PERIOD:
         return bool(
-            re.search(r"TXN-[A-Za-z0-9]+-\d+", repaired)
+            corpus_has_ledger_txn_id(repaired, ledger_txn_ids)
             and any(
                 cue.casefold() in lowered
                 for cue in (
@@ -332,7 +341,7 @@ def _corpus_plausibly_answers(requirement: FactRequirement, corpus: str) -> bool
             )
         )
     if kind is FactKind.TRANSACTION_TREATMENT:
-        return bool(re.search(r"TXN-[A-Za-z0-9]+-\d+", repaired)) and any(
+        return bool(corpus_has_ledger_txn_id(repaired, ledger_txn_ids)) and any(
             cue in lowered for cue in ("расчёт", "расчет", "covenant calculation", "из расч")
         )
     if kind is FactKind.OWNERSHIP:
@@ -364,21 +373,25 @@ def _corpus_plausibly_answers(requirement: FactRequirement, corpus: str) -> bool
 def _source_plausibly_contains_answer(
     requirement: FactRequirement,
     document: CanonicalDocument,
+    *,
+    ledger_txn_ids: frozenset[str] | None = None,
 ) -> bool:
     corpus = "\n".join((p.raw_text or "") for p in document.pages)
-    return _corpus_plausibly_answers(requirement, corpus)
+    return _corpus_plausibly_answers(requirement, corpus, ledger_txn_ids=ledger_txn_ids)
 
 
 def _window_plausibly_answers(
     requirement: FactRequirement,
     window: object,
+    *,
+    ledger_txn_ids: frozenset[str] | None = None,
 ) -> bool:
     from halyk_agent.domain.fact_extraction.windows import EvidenceWindow
 
     if not isinstance(window, EvidenceWindow):
         return False
     corpus = "\n".join(f.text for f in window.fragments)
-    return _corpus_plausibly_answers(requirement, corpus)
+    return _corpus_plausibly_answers(requirement, corpus, ledger_txn_ids=ledger_txn_ids)
 
 
 def _winning_domains_and_docs(
@@ -443,6 +456,7 @@ def _evaluate_model_eligibility(
     docs: dict[str, CanonicalDocument],
     confirmed_none: bool,
     deterministic_resolved: bool,
+    ledger_txn_ids: frozenset[str] | None = None,
 ) -> tuple[bool, str]:
     """Return (eligible, reason). NEEDS_MODEL only when all gates pass."""
     if confirmed_none:
@@ -465,12 +479,14 @@ def _evaluate_model_eligibility(
                 continue
             if not _doc_has_strong_cue(requirement, document):
                 continue
-            if not _source_plausibly_contains_answer(requirement, document):
+            if not _source_plausibly_contains_answer(
+                requirement, document, ledger_txn_ids=ledger_txn_ids
+            ):
                 continue
-            window = select_windows(requirement, document)
+            window = select_windows(requirement, document, ledger_txn_ids=ledger_txn_ids)
             if window is None:
                 continue
-            if not _window_plausibly_answers(requirement, window):
+            if not _window_plausibly_answers(requirement, window, ledger_txn_ids=ledger_txn_ids):
                 continue
             _ = domain
             return True, "MODEL_ELIGIBLE"
@@ -499,10 +515,12 @@ def run_fact_extraction(
     Optional model gateway is fail-closed unless allow_network_models + gateway,
     and only for requirements that pass strict model-eligibility gates.
     """
-    requirements = derive_fact_requirements(definitions, decisions, documents)
+    txn_ids = _ledger_txn_ids(ledger_rows)
+    requirements = derive_fact_requirements(
+        definitions, decisions, documents, ledger_txn_ids=txn_ids
+    )
     auth_map = _authoritative_docs(decisions)
     docs = _docs_by_id(documents)
-    txn_ids = _ledger_txn_ids(ledger_rows)
 
     candidates: list[FactCandidate] = []
     accepted: list[FactRecord] = []
@@ -535,7 +553,12 @@ def run_fact_extraction(
                 document = docs.get(doc_id)
                 if document is None:
                     continue
-                for cand in extract_candidates(requirement, document, authority_domain=domain):
+                for cand in extract_candidates(
+                    requirement,
+                    document,
+                    authority_domain=domain,
+                    ledger_txn_ids=txn_ids,
+                ):
                     candidates.append(cand)
                     status, span, reason = validate_candidate(
                         cand,
@@ -606,6 +629,7 @@ def run_fact_extraction(
             docs=docs,
             confirmed_none=requirement.requirement_id in confirmed_none_ids,
             deterministic_resolved=requirement.requirement_id in resolved_req_ids,
+            ledger_txn_ids=txn_ids,
         )
         model_eligible_flags[requirement.requirement_id] = eligible
         eligibility_reasons[requirement.requirement_id] = elig_reason
@@ -632,12 +656,14 @@ def run_fact_extraction(
                         continue
                     if not _doc_has_strong_cue(requirement, document):
                         continue
-                    if not _source_plausibly_contains_answer(requirement, document):
+                    if not _source_plausibly_contains_answer(
+                        requirement, document, ledger_txn_ids=txn_ids
+                    ):
                         continue
-                    window = select_windows(requirement, document)
+                    window = select_windows(requirement, document, ledger_txn_ids=txn_ids)
                     if window is None:
                         continue
-                    if not _window_plausibly_answers(requirement, window):
+                    if not _window_plausibly_answers(requirement, window, ledger_txn_ids=txn_ids):
                         continue
 
                     request = StructuredExtractionRequest(
@@ -1061,6 +1087,50 @@ def _dummy_payload(kind: FactKind) -> FactPayload:
     if kind is FactKind.ONE_TIME_ADD_BACK:
         return OneTimeAddBackPayload(
             label="x", amount=MoneyAmount(value=Decimal("1"), currency="USD")
+        )
+    if kind is FactKind.GROUP_CAPEX:
+        from halyk_agent.domain.fact_extraction.models import (
+            GroupCapexDerivationType,
+            GroupCapexPayload,
+        )
+
+        return GroupCapexPayload(
+            amount=MoneyAmount(value=Decimal("1"), currency="USD"),
+            derivation_type=GroupCapexDerivationType.EXPLICIT,
+        )
+    if kind is FactKind.GROUP_FINANCIAL_METRIC:
+        from halyk_agent.domain.fact_extraction.models import (
+            FinancialScopeKind,
+            GroupFinancialMetricPayload,
+            GroupMetricKind,
+        )
+
+        return GroupFinancialMetricPayload(
+            metric=GroupMetricKind.EBITDA,
+            scope=FinancialScopeKind.GROUP,
+            amount=MoneyAmount(value=Decimal("1"), currency="USD"),
+        )
+    if kind is FactKind.CONTINGENT_OBLIGATION:
+        from halyk_agent.domain.fact_extraction.models import (
+            ContingentObligationPayload,
+            ContingentObligationType,
+            FinancialScopeKind,
+        )
+
+        return ContingentObligationPayload(
+            obligation_type=ContingentObligationType.GUARANTEE,
+            amount=MoneyAmount(value=Decimal("1"), currency="USD"),
+            scope=FinancialScopeKind.BORROWER,
+        )
+    if kind is FactKind.SCHEDULED_PRINCIPAL:
+        from halyk_agent.domain.fact_extraction.models import (
+            FinancialScopeKind,
+            ScheduledPrincipalPayload,
+        )
+
+        return ScheduledPrincipalPayload(
+            amount=MoneyAmount(value=Decimal("1"), currency="USD"),
+            scope=FinancialScopeKind.BORROWER,
         )
     return TransactionTreatmentPayload(
         transaction_id="TXN-X-0", disposition=TreatmentDisposition.EXCLUDE

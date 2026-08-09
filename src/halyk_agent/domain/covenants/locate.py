@@ -56,8 +56,10 @@ _KEYWORDS = (
     "capex",
 )
 
+# Clause heading vocabulary. Agreements in the corpus number covenants under
+# several equivalent heading words across languages and drafting styles.
 _HEADING_RE = re.compile(
-    r"(?im)^[ \t]*(?:Пункт|Clause|Article|Статья|Тармақ)\s+"
+    r"(?im)^[ \t]*(?:Пункт|Клауза|Раздел|Статья|Clause|Article|Section|Тармақ|Бап|Бөлім|§)\s*"
     r"(?P<id>\d+(?:\.\d+)*)\b[^\n]*"
 )
 

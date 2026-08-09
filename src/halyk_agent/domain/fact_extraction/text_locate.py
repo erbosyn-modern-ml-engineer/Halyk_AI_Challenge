@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from decimal import Decimal, InvalidOperation
 
 from halyk_agent.domain.covenants.parse import scan_money_quantities
+from halyk_agent.domain.fact_extraction.txn_identity import find_txn_ids as locate_ledger_txn_ids
 from halyk_agent.domain.parsing import CanonicalDocument
-
-TXN_ID_RE = re.compile(r"\bTXN-[A-Za-z0-9]+-\d+\b")
 
 # $1,234.56 | €918.00 | USD 1,234.56 | 1 234,56 USD (common RU/EN forms)
 _MONEY_RE = re.compile(
@@ -119,17 +119,16 @@ def parse_percentage(text: str) -> Decimal | None:
         return None
 
 
-def find_txn_ids(text: str) -> tuple[str, ...]:
-    """Return all TXN-… identifiers in document order (deduped, stable)."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for match in TXN_ID_RE.finditer(text):
-        value = match.group(0)
-        if value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return tuple(out)
+def find_txn_ids(
+    text: str,
+    vocabulary: Collection[str] | None = None,
+) -> tuple[str, ...]:
+    """Return trusted ledger txn IDs found in ``text`` (deduped, document order).
+
+    Identity comes only from the trusted ledger vocabulary — never from a
+    permissive ``TXN-*`` shape guess.
+    """
+    return locate_ledger_txn_ids(text, vocabulary)
 
 
 def page_text_slices(

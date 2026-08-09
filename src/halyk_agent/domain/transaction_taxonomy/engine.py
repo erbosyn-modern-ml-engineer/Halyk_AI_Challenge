@@ -13,15 +13,20 @@ from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.models import CovenantDefinition
 from halyk_agent.domain.fact_extraction.models import (
     AmountCorrectionPayload,
+    ContingentObligationPayload,
     FactKind,
     FactRecord,
     FactRequirementResult,
+    FinancialScopeKind,
     FxRatePayload,
     GroupCapexPayload,
+    GroupFinancialMetricPayload,
+    GroupMetricKind,
     OffLedgerAmountPayload,
     OneTimeAddBackPayload,
     PeriodDisposition,
     ReclassificationDisposition,
+    ScheduledPrincipalPayload,
     SubsidiaryKind,
     SubsidiaryStatusPayload,
     TransactionPeriodPayload,
@@ -36,7 +41,11 @@ from halyk_agent.domain.transaction_taxonomy.amounts import (
     metric_amount_from_source,
     sign_contract_for_category,
 )
-from halyk_agent.domain.transaction_taxonomy.category_labels import map_category_label
+from halyk_agent.domain.transaction_taxonomy.category_labels import (
+    expense_flag_from_label,
+    expense_flag_from_rule,
+    map_category_label,
+)
 from halyk_agent.domain.transaction_taxonomy.classify import classify_description
 from halyk_agent.domain.transaction_taxonomy.constants import (
     TAXONOMY_ALGORITHM_VERSION,
@@ -384,6 +393,11 @@ def run_transaction_taxonomy(
             "conflict_ids": conflict_ids,
             "flags": [],
         }
+        flag = expense_flag_from_rule(hit.rule)
+        if flag is None:
+            flag = expense_flag_from_label(row.description)
+        if flag is not None:
+            classified_mutable[row.txn_id]["flags"].append(flag)
 
     adjustments: list[AdjustmentEvent] = []
     fact_consumption: dict[str, FactConsumptionEntry] = {}
@@ -539,6 +553,10 @@ def run_transaction_taxonomy(
             assert isinstance(payload, TransactionReclassificationPayload)
             state["applied_fact_ids"].append(fact.fact_id)
             state["evidence_refs"].extend(list(fact.evidence_span_ids))
+            for label in (payload.to_category, payload.from_category):
+                flag = expense_flag_from_label(label)
+                if flag and flag not in state["flags"]:
+                    state["flags"].append(flag)
             adjustments.append(
                 AdjustmentEvent(
                     event_id=deterministic_id(
@@ -755,6 +773,10 @@ def run_transaction_taxonomy(
                 if payload.service_end is not None:
                     state["effective_period_end"] = payload.service_end
                 event_type = AdjustmentEventType.PERIOD_ASSIGNMENT
+            if payload.period_label:
+                period_flag = f"ACCOUNTING_PERIOD:{payload.period_label}"
+                if period_flag not in state["flags"]:
+                    state["flags"].append(period_flag)
             state["applied_fact_ids"].append(fact.fact_id)
             state["evidence_refs"].extend(list(fact.evidence_span_ids))
             adjustments.append(
@@ -1117,6 +1139,163 @@ def run_transaction_taxonomy(
         )
         _mark_fact(fact, "CONSUMED", "group CAPEX fact emitted as group-level derived input")
 
+    for fact in _facts_by_kind(accepted_facts, FactKind.GROUP_FINANCIAL_METRIC):
+        payload = fact.payload
+        assert isinstance(payload, GroupFinancialMetricPayload)
+        scope = (
+            EntityScopeKind.GROUP
+            if payload.scope is FinancialScopeKind.GROUP
+            else EntityScopeKind.BORROWER
+        )
+        flags: list[str] = ["GROUP_FINANCIAL_METRIC", f"METRIC:{payload.metric.value}"]
+        if payload.scope is FinancialScopeKind.GROUP:
+            flags.append("GROUP_LEVEL_SOURCE")
+        if payload.metric is GroupMetricKind.CAPEX and payload.scope is FinancialScopeKind.GROUP:
+            category = MetricCategory.GROUP_CAPEX
+            flags.append("GROUP_CAPEX")
+        elif payload.metric is GroupMetricKind.DEBT:
+            category = MetricCategory.OTHER_EXPENSE
+            flags.append("GROUP_DEBT" if scope is EntityScopeKind.GROUP else "BORROWER_DEBT")
+        elif payload.metric is GroupMetricKind.EBITDA:
+            category = MetricCategory.OTHER_EXPENSE
+            flags.append("GROUP_EBITDA" if scope is EntityScopeKind.GROUP else "BORROWER_EBITDA")
+        elif payload.metric is GroupMetricKind.REVENUE:
+            category = MetricCategory.REVENUE
+            if scope is EntityScopeKind.GROUP:
+                flags.append("GROUP_REVENUE")
+        else:
+            category = MetricCategory.CAPEX
+            flags.append("BORROWER_CAPEX")
+        period_semantics = (
+            InputPeriodSemantics.AS_OF
+            if payload.as_of_date is not None and payload.reporting_period_start is None
+            else InputPeriodSemantics.FLOW
+        )
+        flow_start = payload.reporting_period_start
+        flow_end = payload.reporting_period_end
+        needs_bounds = flow_start is None or flow_end is None
+        if period_semantics is InputPeriodSemantics.FLOW and needs_bounds:
+            bound_start, bound_end = _flow_period_for_category(
+                definitions,
+                scenario_id=fact.scenario_id,
+                category=category,
+            )
+            flow_start = flow_start or bound_start
+            flow_end = flow_end or bound_end
+        label = f"{payload.scope.value}_{payload.metric.value}"
+        if payload.period_label:
+            label = f"{label}:{payload.period_label}"
+            flags.append(f"ACCOUNTING_PERIOD:{payload.period_label}")
+        input_id = deterministic_id("derived", fact.fact_id, label)
+        derived_inputs.append(
+            DerivedCalculationInput(
+                input_id=input_id,
+                scenario_id=fact.scenario_id,
+                fact_id=fact.fact_id,
+                fact_kind=fact.fact_kind.value,
+                category=category,
+                amount=payload.amount.value,
+                currency=payload.amount.currency,
+                period_semantics=period_semantics,
+                as_of_date=payload.as_of_date,
+                period_start=flow_start,
+                period_end=flow_end,
+                label=label,
+                entity_scope=scope,
+                evidence_span_ids=fact.evidence_span_ids,
+                flags=tuple(sorted(set(flags))),
+            )
+        )
+        _mark_fact(fact, "CONSUMED", "group/borrower financial metric emitted as derived input")
+
+    for fact in _facts_by_kind(accepted_facts, FactKind.CONTINGENT_OBLIGATION):
+        payload = fact.payload
+        assert isinstance(payload, ContingentObligationPayload)
+        scope = (
+            EntityScopeKind.GROUP
+            if payload.scope is FinancialScopeKind.GROUP
+            else EntityScopeKind.BORROWER
+        )
+        flags = [
+            "CONTINGENT_OBLIGATION",
+            payload.obligation_type.value,
+            "OFF_LEDGER_DEBT_ADJUSTMENT",
+        ]
+        if scope is EntityScopeKind.GROUP:
+            flags.append("GROUP_LEVEL_SOURCE")
+        label = payload.description or payload.obligation_type.value.lower()
+        input_id = deterministic_id("derived", fact.fact_id, label)
+        derived_inputs.append(
+            DerivedCalculationInput(
+                input_id=input_id,
+                scenario_id=fact.scenario_id,
+                fact_id=fact.fact_id,
+                fact_kind=fact.fact_kind.value,
+                category=MetricCategory.OTHER_EXPENSE,
+                amount=payload.amount.value,
+                currency=payload.amount.currency,
+                period_semantics=InputPeriodSemantics.AS_OF
+                if payload.as_of_date is not None
+                else InputPeriodSemantics.FLOW,
+                as_of_date=payload.as_of_date,
+                label=label,
+                entity_scope=scope,
+                evidence_span_ids=fact.evidence_span_ids,
+                flags=tuple(sorted(set(flags))),
+            )
+        )
+        _mark_fact(fact, "CONSUMED", "contingent obligation emitted as off-ledger debt input")
+
+    for fact in _facts_by_kind(accepted_facts, FactKind.SCHEDULED_PRINCIPAL):
+        payload = fact.payload
+        assert isinstance(payload, ScheduledPrincipalPayload)
+        if payload.transaction_id and payload.transaction_id in classified_mutable:
+            state = classified_mutable[payload.transaction_id]
+            if state["scenario_id"] == fact.scenario_id:
+                if "SCHEDULED_PRINCIPAL" not in state["flags"]:
+                    state["flags"].append("SCHEDULED_PRINCIPAL")
+                state["applied_fact_ids"].append(fact.fact_id)
+                state["evidence_refs"].extend(list(fact.evidence_span_ids))
+                _mark_fact(fact, "CONSUMED", "scheduled principal flagged on ledger row")
+                continue
+        scope = (
+            EntityScopeKind.GROUP
+            if payload.scope is FinancialScopeKind.GROUP
+            else EntityScopeKind.BORROWER
+        )
+        flags = ["SCHEDULED_PRINCIPAL", "DEBT_SERVICE"]
+        if scope is EntityScopeKind.GROUP:
+            flags.append("GROUP_LEVEL_SOURCE")
+        if payload.period_label:
+            flags.append(f"ACCOUNTING_PERIOD:{payload.period_label}")
+        flow_start = payload.period_start
+        flow_end = payload.period_end
+        label = payload.description or "scheduled_principal_repayment"
+        input_id = deterministic_id("derived", fact.fact_id, label)
+        derived_inputs.append(
+            DerivedCalculationInput(
+                input_id=input_id,
+                scenario_id=fact.scenario_id,
+                fact_id=fact.fact_id,
+                fact_kind=fact.fact_kind.value,
+                # Not FINANCING_INFLOWS — principal service is a separate universe.
+                category=MetricCategory.OTHER_EXPENSE,
+                amount=payload.amount.value,
+                currency=payload.amount.currency,
+                period_semantics=InputPeriodSemantics.AS_OF
+                if payload.as_of_date is not None and flow_start is None
+                else InputPeriodSemantics.FLOW,
+                as_of_date=payload.as_of_date,
+                period_start=flow_start,
+                period_end=flow_end,
+                label=label,
+                entity_scope=scope,
+                evidence_span_ids=fact.evidence_span_ids,
+                flags=tuple(sorted(set(flags))),
+            )
+        )
+        _mark_fact(fact, "CONSUMED", "scheduled principal emitted as debt-service derived input")
+
     # --- Ownership / threshold consumption accounting ---
     for fact in accepted_facts:
         if fact.fact_id in fact_consumption:
@@ -1404,8 +1583,10 @@ def run_transaction_taxonomy(
             category=derived.category,
             positive_magnitude=positive_magnitude,
         )
-        derived_flags: list[str] = ["OFF_LEDGER"]
+        derived_flags: list[str] = ["OFF_LEDGER", *derived.flags]
         if derived.category is MetricCategory.GROUP_CAPEX:
+            derived_flags.append("GROUP_LEVEL_SOURCE")
+        if derived.entity_scope is EntityScopeKind.GROUP:
             derived_flags.append("GROUP_LEVEL_SOURCE")
         if derived.period_semantics is InputPeriodSemantics.AS_OF:
             txn_date = derived.as_of_date

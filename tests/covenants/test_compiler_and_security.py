@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from halyk_agent.config import Settings
 from halyk_agent.domain.authority.models import (
     AuthorityDecision,
     AuthorityDomain,
@@ -282,16 +283,27 @@ def test_semantic_formula_fallback_remains_disabled_by_default(
             model_called=False,
         )
 
+    def fake_plan(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        from halyk_agent.domain.covenants.semantic_plan import SemanticPlanResult
+
+        return SemanticPlanResult(plan=None, diagnostic={"reason": "DISABLED"}, model_called=False)
+
     monkeypatch.setattr("halyk_agent.domain.covenants.compiler.propose_formula", fake_propose)
+    monkeypatch.setattr("halyk_agent.domain.covenants.compiler.propose_plan", fake_plan)
     odd = (
         "Пункт 6.1 Mystery Metric. The borrower shall maintain quantum flux below 3 bananas "
         "for period from 2025-01-01 to 2025-12-31."
     )
     doc = make_document(raw_text=odd, sha="8" * 64)
+    # Assert the contract explicitly rather than relying on the ambient
+    # environment: a disabled fallback must reach no semantic entry point.
     definition, failure, _ = compile_covenant_cell(
         scenario_id="SX",
         clause_id="6.1",
         document=doc,
+        settings=Settings(semantic_fallback_enabled=False),
     )
     assert calls == 0
     assert definition is None

@@ -255,6 +255,8 @@ class DerivedCalculationInput(BaseModel):
     related_party_status: RelatedPartyStatus = RelatedPartyStatus.UNKNOWN
     entity_scope: EntityScopeKind = EntityScopeKind.BORROWER
     evidence_span_ids: tuple[NonEmptyStr, ...] = ()
+    # Composable overlays for covenant inputs not yet first-class MetricCategory values.
+    flags: tuple[NonEmptyStr, ...] = ()
 
     @field_validator("amount", mode="before")
     @classmethod

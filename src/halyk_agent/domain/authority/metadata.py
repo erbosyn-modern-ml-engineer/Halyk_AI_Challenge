@@ -8,7 +8,8 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
-from halyk_agent.domain.authority.evidence import find_first_span
+from halyk_agent.domain.authority.constants import SUPERSESSION_BANNER_PATTERNS
+from halyk_agent.domain.authority.evidence import find_first_span, find_status_banner_span
 from halyk_agent.domain.authority.models import DocumentMetadata
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.parsing import CanonicalDocument
@@ -163,11 +164,15 @@ def extract_metadata_bundle(document: CanonicalDocument) -> MetadataBundle:
 
     draft_final_marker: str | None = None
     superseded_marker: str | None = None
+    # Supersession is a document-status banner, never running covenant prose.
+    for marker in SUPERSESSION_BANNER_PATTERNS:
+        span = find_status_banner_span(document, patterns=(marker,))
+        if span is None:
+            continue
+        _remember(span)
+        superseded_marker = span.quote
+        break
     for marker in (
-        "НЕДЕЙСТВУЮЩАЯ РЕДАКЦИЯ",
-        "НЕ ПРИМЕНЯЕТСЯ",
-        "superseded",
-        "obsolete",
         "FINAL",
         "окончательн",
         "DRAFT",
@@ -182,10 +187,7 @@ def extract_metadata_bundle(document: CanonicalDocument) -> MetadataBundle:
         if hit.span is None:
             continue
         _remember(hit.span)
-        low = marker.casefold()
-        if any(x in low for x in ("недействующ", "не применя", "supersed", "obsolete")):
-            superseded_marker = hit.span.quote
-        elif draft_final_marker is None:
+        if draft_final_marker is None:
             draft_final_marker = hit.span.quote
 
     period_covered: str | None = None

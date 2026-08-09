@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -151,7 +151,7 @@ def _payload_transaction_id(payload: FactPayload) -> str | None:
 
 def semantic_validate(
     payload: FactPayload,
-    ledger_txn_ids: set[str] | None = None,
+    ledger_txn_ids: Collection[str] | None = None,
     *,
     scenario_id: str | None = None,
     ledger_txn_scenarios: Mapping[str, str | None] | None = None,
@@ -217,7 +217,7 @@ def validate_candidate(
     *,
     authoritative_doc_ids: set[str],
     requirement: FactRequirement | None = None,
-    ledger_txn_ids: set[str] | None = None,
+    ledger_txn_ids: Collection[str] | None = None,
     ledger_txn_scenarios: Mapping[str, str | None] | None = None,
     window: EvidenceWindow | None = None,
 ) -> tuple[FactValidatorStatus, EvidenceSpan | None, str]:

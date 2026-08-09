@@ -132,12 +132,21 @@ class SemanticJsonGateway:
                 reason_code="HTTPX_MISSING",
             )
 
+        # The provider rejects response_format=json_object unless the prompt
+        # itself mentions JSON. Enforce it here so no caller can silently lose
+        # every request to a 400.
+        effective_system = system_prompt
+        if "json" not in effective_system.casefold():
+            effective_system = (
+                f"{effective_system}\n\nReturn a single valid JSON object and nothing else."
+            )
+
         body = {
             "model": self.settings.llm_primary_model,
             "temperature": 0.0,
             "max_tokens": min(max_tokens, self.settings.llm_max_tokens),
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": effective_system},
                 {
                     "role": "user",
                     "content": json.dumps(request_payload, ensure_ascii=False, sort_keys=True),

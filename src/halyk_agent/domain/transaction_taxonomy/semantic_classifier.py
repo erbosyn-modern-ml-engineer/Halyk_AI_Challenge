@@ -36,6 +36,9 @@ _SYSTEM = (
     "already failed. Choose exactly one category from the supplied enum or UNKNOWN. "
     "Do not change transaction ids, amounts, currencies, dates, counterparties, or scenario. "
     "Do not calculate anything. If the description is genuinely ambiguous, choose UNKNOWN. "
+    "Marketing/advertising/sponsorship → OTHER_EXPENSE (not generic OPEX). "
+    "Consulting/advisory/professional fees → OTHER_EXPENSE (not LABOR). "
+    "Scheduled principal repayment → OTHER_EXPENSE (never FINANCING_INFLOWS). "
     "Return one JSON object only. source_text must exactly equal the supplied description."
 )
 
@@ -65,7 +68,7 @@ def _request_candidate(
     }
     response = gateway.propose(
         task_id=f"transaction-category:{scenario_id}:{row.txn_id}",
-        prompt_version="transaction-semantic-category-v1",
+        prompt_version="transaction-semantic-category-v2",
         schema_version="metric-category-v1",
         source_sha256=sha256_text(row.description),
         system_prompt=_SYSTEM,

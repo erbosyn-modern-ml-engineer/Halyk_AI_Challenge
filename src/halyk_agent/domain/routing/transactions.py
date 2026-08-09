@@ -33,6 +33,41 @@ class TransactionRoutingBundle:
     unresolved_transaction_count: int
     txn_id_linked_count: int = 0
     account_fallback_count: int = 0
+    # Every account identifier observed in the ledger, normalized. This is the
+    # trusted account-identifier vocabulary for document extraction — account IDs
+    # are opaque, so no syntactic schema may stand in for observed evidence.
+    observed_account_ids: frozenset[str] = frozenset()
+
+
+def _extract_scenario_token(
+    txn_id: str,
+    *,
+    pattern: re.Pattern[str],
+    separator: str,
+) -> str | None:
+    """Return the scenario token only when it is a complete delimited segment.
+
+    Guards against a pattern that would otherwise capture a partial token: a
+    scenario token must start at the beginning of a segment and end at the end of
+    one, so ``KC`` can never be recovered from ``TXN-KC2-CAP-29``.
+    """
+    match = pattern.match(txn_id)
+    if match is None:
+        return None
+    try:
+        token = match.group("scenario")
+    except IndexError:  # pragma: no cover - guarded by config validation
+        return None
+    if not token:
+        return None
+    start, end = match.span("scenario")
+    if separator in token:
+        return None
+    if start != 0 and not txn_id[:start].endswith(separator):
+        return None
+    if end != len(txn_id) and not txn_id[end:].startswith(separator):
+        return None
+    return token
 
 
 def route_transactions(
@@ -47,10 +82,16 @@ def route_transactions(
     1) Strong TXN_ID_PREFIX observations build scenario↔account anchors.
     2) Malformed/unknown txn-id rows fall back to ACCOUNT_ID_FALLBACK when the
        exact account belongs to exactly one anchored scenario.
+
+    ``scenario_ids`` is the submission-template scenario universe and is the sole
+    authority on which parsed tokens may become target-scenario links. A token
+    outside that universe stays non-target regardless of how well-formed it looks.
     """
     config = parser_config or TxnIdParserConfig()
     pattern = re.compile(config.pattern)
+    separator = config.segment_separator
 
+    observed_accounts: set[str] = set()
     diagnostics: list[RoutingDiagnostic] = []
     conflicts: list[EntityResolutionConflict] = []
     scenario_accounts: dict[str, set[str]] = defaultdict(set)
@@ -64,6 +105,7 @@ def route_transactions(
     for row in rows:
         txn_id = row.txn_id.strip()
         account_norm = normalize_account_id(row.account_id)
+        observed_accounts.add(account_norm)
         if txn_id in seen_txn:
             duplicates.append(txn_id)
             diagnostics.append(
@@ -88,9 +130,8 @@ def route_transactions(
             continue
         seen_txn[txn_id] = row.row_index
 
-        match = pattern.match(txn_id)
-        if match is not None:
-            token = match.group("scenario")
+        token = _extract_scenario_token(txn_id, pattern=pattern, separator=separator)
+        if token is not None:
             if token in scenario_ids:
                 scenario_accounts[token].add(account_norm)
                 pending.append((row, account_norm, token, True))
@@ -322,4 +363,5 @@ def route_transactions(
         unresolved_transaction_count=unresolved_count,
         txn_id_linked_count=txn_id_linked,
         account_fallback_count=account_fallback,
+        observed_account_ids=frozenset(observed_accounts),
     )

@@ -350,11 +350,19 @@ class LedgerRow(BaseModel):
 
 
 class TxnIdParserConfig(BaseModel):
-    """Configurable txn-id scenario-token extractor."""
+    """Configurable txn-id scenario-token extractor.
+
+    The scenario token is a *complete* separator-delimited segment. Everything
+    after it is opaque: it may be a bare sequence number (``TXN-S1-001``) or one
+    or more semantic tag segments followed by a sequence (``TXN-KC-CAP-29``).
+    Formatting only helps locate the token; whether the token names a real
+    scenario is decided solely by the submission-template scenario universe.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    pattern: NonEmptyStr = r"^TXN-(?P<scenario>[A-Za-z0-9]+)-(?P<seq>\d+)$"
+    pattern: NonEmptyStr = r"^TXN-(?P<scenario>[^-]+)(?:-[^-]+)+$"
+    segment_separator: NonEmptyStr = "-"
 
     @field_validator("pattern")
     @classmethod

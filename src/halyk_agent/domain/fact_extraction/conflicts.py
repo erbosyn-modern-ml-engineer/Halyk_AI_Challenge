@@ -8,14 +8,17 @@ from typing import Any
 
 from halyk_agent.domain.fact_extraction.models import (
     AmountCorrectionPayload,
+    ContingentObligationPayload,
     FactConflict,
     FactKind,
     FactRecord,
     FactValidatorStatus,
     FxRatePayload,
     GroupCapexPayload,
+    GroupFinancialMetricPayload,
     OwnershipPayload,
     RelatedPartyThresholdPayload,
+    ScheduledPrincipalPayload,
     SubsidiaryStatusPayload,
     TransactionPeriodPayload,
     TransactionReclassificationPayload,
@@ -158,6 +161,40 @@ def _conflict_identity_and_value(fact: FactRecord) -> tuple[str, str] | None:
             "period_label": (payload.period_label or "").strip().casefold() or None,
         }
         return "group-capex", _stable_value(value)
+
+    if isinstance(payload, GroupFinancialMetricPayload):
+        value = {
+            "metric": payload.metric.value,
+            "scope": payload.scope.value,
+            "amount": _money_key(payload.amount.value, payload.amount.currency),
+            "period_label": (payload.period_label or "").strip().casefold() or None,
+            "as_of_date": payload.as_of_date,
+        }
+        return f"group-metric:{payload.metric.value}:{payload.scope.value}", _stable_value(value)
+
+    if isinstance(payload, ContingentObligationPayload):
+        # Same type+scope+as_of with different amounts is a conflict; otherwise additive.
+        if payload.as_of_date is None and payload.period_label is None:
+            return None
+        identity = (
+            f"contingent:{payload.obligation_type.value}:{payload.scope.value}:"
+            f"{payload.as_of_date or (payload.period_label or '').casefold()}"
+        )
+        return identity, _money_key(payload.amount.value, payload.amount.currency)
+
+    if isinstance(payload, ScheduledPrincipalPayload):
+        if payload.transaction_id:
+            return (
+                f"txn:{payload.transaction_id}",
+                _money_key(payload.amount.value, payload.amount.currency),
+            )
+        if payload.period_label or payload.as_of_date:
+            identity = (
+                f"scheduled-principal:{payload.scope.value}:"
+                f"{payload.as_of_date or (payload.period_label or '').casefold()}"
+            )
+            return identity, _money_key(payload.amount.value, payload.amount.currency)
+        return None
 
     if isinstance(payload, TransactionTreatmentPayload):
         return f"txn:{payload.transaction_id}", payload.disposition.value

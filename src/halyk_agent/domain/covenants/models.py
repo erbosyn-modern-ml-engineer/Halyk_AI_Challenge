@@ -10,11 +10,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from halyk_agent.domain.common import NonEmptyStr
 from halyk_agent.domain.covenants.ast import (
+    BOOL_EXPR_ADAPTER,
     EXPR_ADAPTER,
+    AccountingScope,
+    BoolExpr,
     Expr,
     MetricCategory,
+    PeriodBasis,
+    PeriodGrouping,
     TransactionSelector,
 )
+
+# Comparator lives with the AST so boolean nodes can reference it without a
+# circular import; re-exported here for the many existing callers.
+from halyk_agent.domain.covenants.ast import Comparator as Comparator
 from halyk_agent.domain.covenants.constants import (
     COVENANT_COMPILER_VERSION,
     COVENANT_RULE_VERSION,
@@ -22,14 +31,6 @@ from halyk_agent.domain.covenants.constants import (
 )
 from halyk_agent.domain.covenants.quantity import QuantityType, TypedQuantity
 from halyk_agent.domain.transactions import reject_float_amount
-
-
-class Comparator(StrEnum):
-    LT = "LT"
-    LTE = "LTE"
-    GT = "GT"
-    GTE = "GTE"
-    EQ = "EQ"
 
 
 class PeriodKind(StrEnum):
@@ -66,6 +67,60 @@ class CompileStatus(StrEnum):
     TYPE_ERROR = "TYPE_ERROR"
     MISSING_AUTHORITY = "MISSING_AUTHORITY"
     MISSING_CLAUSE = "MISSING_CLAUSE"
+
+
+class RequiredFactSource(StrEnum):
+    """Where a required fact must come from."""
+
+    LEDGER_CLASSIFICATION = "LEDGER_CLASSIFICATION"
+    DOCUMENT_DISCLOSURE = "DOCUMENT_DISCLOSURE"
+
+
+class RequiredFact(BaseModel):
+    """A typed fact the covenant needs but Stage 5D does not itself produce.
+
+    Emitting this is how a covenant asks downstream stages for a universe. It is
+    always preferable to silently borrowing an adjacent existing category.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    category: MetricCategory
+    scope: AccountingScope = AccountingScope.BORROWER
+    basis: PeriodBasis = PeriodBasis.CASH_DATE
+    grouping: PeriodGrouping | None = None
+    source: RequiredFactSource = RequiredFactSource.LEDGER_CLASSIFICATION
+    related_party_only: bool = False
+    detail: NonEmptyStr | None = None
+
+
+class CovenantPlan(BaseModel):
+    """Typed covenant semantics.
+
+    Separates the three things a covenant actually says, which the historical
+    ``metric / comparator / threshold`` triple conflated:
+
+    * ``reported_actual`` — the number the submission reports;
+    * ``activation_condition`` — whether the restriction applies at all;
+    * ``breach_condition`` — what makes it a breach once active.
+
+    A plain ``CAPEX <= 2m`` covenant is the degenerate case: activation is
+    ``Always`` and the breach condition compares the reported actual to a
+    constant. Evaluation is: inactive → COMPLIANT; active → evaluate breach.
+    ``reported_actual`` is computed independently of activation either way, so
+    an inactive covenant still reports a number.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reported_actual: Expr
+    reported_actual_quantity_type: QuantityType
+    activation_condition: BoolExpr
+    breach_condition: BoolExpr
+    period_basis: PeriodBasis = PeriodBasis.CASH_DATE
+    period_grouping: PeriodGrouping | None = None
+    required_facts: tuple[RequiredFact, ...] = ()
+    plan_version: NonEmptyStr = "halyk.covenant_plan.v2"
 
 
 class BoundaryInclusivity(StrEnum):
@@ -170,13 +225,22 @@ class CovenantDefinition(BaseModel):
     family_id: NonEmptyStr
     metric: Expr
     metric_quantity_type: QuantityType
-    comparator: Comparator
-    threshold: TypedQuantity
+    # Legacy primary comparison. Present whenever the covenant reduces to
+    # "reported actual <cmp> constant"; absent when the breach logic is compound
+    # or the threshold is itself an expression — read ``plan`` in that case.
+    comparator: Comparator | None = None
+    threshold: TypedQuantity | None = None
     period: PeriodDefinition
     scope: ScopeDefinition
     selectors: tuple[TransactionSelector, ...] = ()
     modifiers: tuple[CovenantModifier, ...] = ()
     activation_condition: ActivationCondition | None = None
+    # Authoritative typed semantics (DSL v2). When present it supersedes the
+    # legacy triple; the triple is kept in sync for backward compatibility.
+    plan: CovenantPlan | None = None
+    # How the plan/triple was obtained: deterministic_family,
+    # deterministic_structure, or deepseek_plan.
+    parse_method: NonEmptyStr = "deterministic_family"
     evidence: CovenantEvidenceRefs
     rendered: NonEmptyStr
     rule_version: NonEmptyStr = COVENANT_RULE_VERSION
@@ -237,3 +301,9 @@ def parse_expr(payload: dict[str, Any] | Expr) -> Expr:
     if isinstance(payload, BaseModel):
         return payload
     return EXPR_ADAPTER.validate_python(payload)
+
+
+def parse_bool_expr(payload: dict[str, Any] | BoolExpr) -> BoolExpr:
+    if isinstance(payload, BaseModel):
+        return payload
+    return BOOL_EXPR_ADAPTER.validate_python(payload)

@@ -63,6 +63,7 @@ def test_period_exclude_and_amount_missing_ledger() -> None:
     period = extract_candidates(
         make_requirement(FactKind.TRANSACTION_PERIOD, "TXN-"),
         doc,
+        ledger_txn_ids={"TXN-B4-0026"},
     )
     assert period
     assert isinstance(period[0].payload, TransactionPeriodPayload)
@@ -78,6 +79,7 @@ def test_period_exclude_and_amount_missing_ledger() -> None:
     amounts = extract_candidates(
         make_requirement(FactKind.AMOUNT_CORRECTION, "TXN-"),
         doc2,
+        ledger_txn_ids={"TXN-P8-0031"},
     )
     assert amounts
     assert isinstance(amounts[0].payload, AmountCorrectionPayload)
@@ -94,7 +96,11 @@ def test_period_preserves_service_dates() -> None:
         "Операция TXN-B4-0001 относится к услугам, оказанным в период с 2026-01-15 по 2026-03-20."
     )
     doc = make_document(raw_text=text)
-    cands = extract_candidates(make_requirement(FactKind.TRANSACTION_PERIOD, "TXN-"), doc)
+    cands = extract_candidates(
+        make_requirement(FactKind.TRANSACTION_PERIOD, "TXN-"),
+        doc,
+        ledger_txn_ids={"TXN-B4-0001"},
+    )
     assert cands
     payload = cands[0].payload
     assert isinstance(payload, TransactionPeriodPayload)

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.parsing import CanonicalDocument
-from halyk_agent.domain.routing.accounts import ACCOUNT_TOKEN_RE
+from halyk_agent.domain.routing.accounts import AccountVocabulary, find_account_tokens
 from halyk_agent.domain.routing.evidence import create_identity_span
 from halyk_agent.domain.routing.models import BorrowerIdentity
 from halyk_agent.domain.routing.normalize import (
@@ -77,20 +77,28 @@ class BorrowerExtractionBundle:
     spans: tuple[EvidenceSpan, ...]
 
 
-def _nearby_account(text: str, start: int, end: int) -> str | None:
+def _nearby_account(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    vocabulary: AccountVocabulary | None = None,
+) -> str | None:
     window_start = max(0, start - 240)
     window_end = min(len(text), end + 240)
     window = text[window_start:window_end]
-    matches = list(ACCOUNT_TOKEN_RE.finditer(window))
+    matches = find_account_tokens(window, vocabulary=vocabulary)
     if not matches:
         return None
-    primary = [m for m in matches if m.group(1).count("-") == 1]
+    primary = [item for item in matches if item[2].count("-") == 1]
     chosen = primary[0] if primary else matches[0]
-    return normalize_account_id(chosen.group(1))
+    return normalize_account_id(chosen[2])
 
 
 def extract_borrower_declarations(
     document: CanonicalDocument,
+    *,
+    vocabulary: AccountVocabulary | None = None,
 ) -> BorrowerExtractionBundle:
     """Extract explicit borrower declarations with evidence (no authority selection)."""
     borrowers: list[BorrowerIdentity] = []
@@ -134,7 +142,12 @@ def extract_borrower_declarations(
                         document_version_id=document.document_version_id,
                         page_number=page.page_number,
                         evidence_span_id=span.id,
-                        account_id_normalized=_nearby_account(text, match.start(), match.end()),
+                        account_id_normalized=_nearby_account(
+                            text,
+                            match.start(),
+                            match.end(),
+                            vocabulary=vocabulary,
+                        ),
                         scenario_id=None,
                         anchored=False,
                     )

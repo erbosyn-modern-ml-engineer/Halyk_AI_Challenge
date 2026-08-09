@@ -70,14 +70,17 @@ def render_summary_markdown(report: CovenantReport) -> str:
     family_counts: dict[str, int] = {}
     comparator_counts: dict[str, int] = {}
     quantity_counts: dict[str, int] = {}
+    parse_method_counts: dict[str, int] = {}
     for item in report.definitions:
         family_counts[item.family_id] = family_counts.get(item.family_id, 0) + 1
-        comparator_counts[item.comparator.value] = (
-            comparator_counts.get(item.comparator.value, 0) + 1
-        )
+        # Compound / expression-threshold covenants have no single legacy
+        # comparator; their semantics live in the typed plan.
+        comparator_key = item.comparator.value if item.comparator is not None else "PLAN_ONLY"
+        comparator_counts[comparator_key] = comparator_counts.get(comparator_key, 0) + 1
         quantity_counts[item.metric_quantity_type.value] = (
             quantity_counts.get(item.metric_quantity_type.value, 0) + 1
         )
+        parse_method_counts[item.parse_method] = parse_method_counts.get(item.parse_method, 0) + 1
     lines = [
         "# Covenant compile summary (Stage 5D)",
         "",
@@ -101,6 +104,9 @@ def render_summary_markdown(report: CovenantReport) -> str:
         lines.append(f"- {key}: {count}")
     lines.extend(["", "## Quantity types", ""])
     for key, count in sorted(quantity_counts.items()):
+        lines.append(f"- {key}: {count}")
+    lines.extend(["", "## Parse methods", ""])
+    for key, count in sorted(parse_method_counts.items()):
         lines.append(f"- {key}: {count}")
     if report.failures:
         lines.extend(["", "## Failures", ""])

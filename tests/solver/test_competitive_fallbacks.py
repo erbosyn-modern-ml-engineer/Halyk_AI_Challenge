@@ -10,7 +10,12 @@ import pytest
 from tests.covenant_evaluation._helpers import _definition, _selector
 
 from halyk_agent.domain.covenant_evaluation import plan_definition
-from halyk_agent.domain.covenants.ast import MetricCategory, Sum, TransactionSet
+from halyk_agent.domain.covenants.ast import (
+    AccountingScope,
+    MetricCategory,
+    Sum,
+    TransactionSet,
+)
 from halyk_agent.domain.transaction_taxonomy.models import AdjustmentEvent, AdjustmentEventType
 from halyk_agent.solver.fallbacks import (
     _derive_group_capex,
@@ -223,7 +228,10 @@ Net book value at the end of the year $5,600,000
 
 
 def _group_plan(definition_id: str, scenario_id: str):
-    selector = _selector(MetricCategory.GROUP_CAPEX).model_copy(update={"group_level": True})
+    # Scope is part of metric identity, so a group metric declares both.
+    selector = _selector(MetricCategory.GROUP_CAPEX).model_copy(
+        update={"group_level": True, "scope": AccountingScope.GROUP}
+    )
     definition = _definition(
         Sum(of=TransactionSet(selector=selector)),
         definition_id=definition_id,

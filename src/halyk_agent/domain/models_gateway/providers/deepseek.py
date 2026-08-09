@@ -54,6 +54,26 @@ _FACT_CONTRACTS: dict[str, str] = {
     "TRANSACTION_TREATMENT": (
         "payload fields: transaction_id, disposition (INCLUDE|EXCLUDE), reason?."
     ),
+    "GROUP_FINANCIAL_METRIC": (
+        "payload fields: metric (CAPEX|DEBT|EBITDA|REVENUE), scope (GROUP|BORROWER), "
+        "amount {value,currency}, period_label?, as_of_date?, reporting_period_start?, "
+        "reporting_period_end?. Never invent group totals from borrower ledger rows."
+    ),
+    "CONTINGENT_OBLIGATION": (
+        "payload fields: obligation_type (GUARANTEE|INDEMNITY|CONTINGENT_LIABILITY|OTHER), "
+        "amount {value,currency}, scope (GROUP|BORROWER), counterparty?, as_of_date?, "
+        "period_label?, description?. Extract only explicitly stated amounts."
+    ),
+    "SCHEDULED_PRINCIPAL": (
+        "payload fields: amount {value,currency}, scope (GROUP|BORROWER), period_label?, "
+        "period_start?, period_end?, as_of_date?, transaction_id?, description?. "
+        "This is NOT financing inflow. Only extract scheduled principal repayment amounts."
+    ),
+    "GROUP_CAPEX": (
+        "payload fields: amount {value,currency}, scope=GROUP, derivation_type "
+        "(EXPLICIT|PPE_ROLL_FORWARD), period_label?, formula?, "
+        "other_movements_proven_zero?. Never use borrower CAPEX as group CAPEX."
+    ),
 }
 
 _FACT_JSON_EXAMPLES: dict[str, dict[str, Any]] = {
@@ -203,6 +223,52 @@ _FACT_JSON_EXAMPLES: dict[str, dict[str, Any]] = {
         "page_number": 1,
         "char_start": 0,
         "char_end": 40,
+        "reason_code": "OK",
+    },
+    "GROUP_FINANCIAL_METRIC": {
+        "state": "RESOLVED",
+        "payload": {
+            "kind": "GROUP_FINANCIAL_METRIC",
+            "metric": "EBITDA",
+            "scope": "GROUP",
+            "amount": {"value": "1000000.00", "currency": "USD"},
+            "period_label": "2025",
+        },
+        "evidence_fragment_ids": ["F001"],
+        "quote": "Group EBITDA for 2025 was $1,000,000.00",
+        "page_number": 1,
+        "char_start": 0,
+        "char_end": 40,
+        "reason_code": "OK",
+    },
+    "CONTINGENT_OBLIGATION": {
+        "state": "RESOLVED",
+        "payload": {
+            "kind": "CONTINGENT_OBLIGATION",
+            "obligation_type": "GUARANTEE",
+            "amount": {"value": "250000.00", "currency": "USD"},
+            "scope": "BORROWER",
+        },
+        "evidence_fragment_ids": ["F001"],
+        "quote": "guarantee outstanding of $250,000.00",
+        "page_number": 1,
+        "char_start": 0,
+        "char_end": 36,
+        "reason_code": "OK",
+    },
+    "SCHEDULED_PRINCIPAL": {
+        "state": "RESOLVED",
+        "payload": {
+            "kind": "SCHEDULED_PRINCIPAL",
+            "amount": {"value": "500000.00", "currency": "USD"},
+            "scope": "BORROWER",
+            "period_label": "2025",
+        },
+        "evidence_fragment_ids": ["F001"],
+        "quote": "scheduled principal repayments of $500,000.00",
+        "page_number": 1,
+        "char_start": 0,
+        "char_end": 45,
         "reason_code": "OK",
     },
 }

@@ -10,7 +10,10 @@ from typing import Any
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.ids import deterministic_id, sha256_text
 from halyk_agent.domain.parsing import CanonicalDocument
-from halyk_agent.domain.routing.accounts import extract_account_identities
+from halyk_agent.domain.routing.accounts import (
+    build_account_vocabulary,
+    extract_account_identities,
+)
 from halyk_agent.domain.routing.borrowers import extract_borrower_declarations
 from halyk_agent.domain.routing.counterparties import build_counterparty_identities
 from halyk_agent.domain.routing.documents import route_documents
@@ -378,17 +381,22 @@ def run_routing(
                 )
             )
 
+    # Account identifiers are opaque: the recognizable vocabulary comes from the
+    # ledger itself, so documents naming any observed identifier participate in
+    # routing regardless of its prefix shape.
+    account_vocabulary = build_account_vocabulary(txn_bundle.observed_account_ids)
+
     account_extractions: list[AccountIdentity] = []
     identity_spans: list[EvidenceSpan] = []
     all_borrowers: list[BorrowerIdentity] = []
     documents_by_id = {doc.document_id: doc for doc in documents}
     for document in sorted(documents, key=lambda d: d.document_id):
-        acc_bundle = extract_account_identities(document)
+        acc_bundle = extract_account_identities(document, vocabulary=account_vocabulary)
         account_extractions.extend(acc_bundle.accounts)
         identity_spans.extend(acc_bundle.spans)
         diagnostics.extend(acc_bundle.diagnostics)
         conflicts.extend(acc_bundle.conflicts)
-        borrow_bundle = extract_borrower_declarations(document)
+        borrow_bundle = extract_borrower_declarations(document, vocabulary=account_vocabulary)
         all_borrowers.extend(borrow_bundle.borrowers)
         identity_spans.extend(borrow_bundle.spans)
 

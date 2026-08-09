@@ -38,7 +38,13 @@ from halyk_agent.domain.models_gateway.types import (
     StructuredExtractionResult,
 )
 from tests.authority.helpers import make_document
-from tests.facts.helpers import make_decision, make_definition, make_requirement, reclass_modifier
+from tests.facts.helpers import (
+    make_decision,
+    make_definition,
+    make_ledger_rows,
+    make_requirement,
+    reclass_modifier,
+)
 
 
 def test_rejected_reclassification_ru_not_confirmed_none() -> None:
@@ -59,6 +65,7 @@ def test_rejected_reclassification_ru_not_confirmed_none() -> None:
             ),
         ),
         documents=(doc,),
+        ledger_rows=make_ledger_rows("TXN-X-0012"),
     )
     rejected = [
         f
@@ -98,6 +105,7 @@ def test_rejected_reclassification_en_fixture() -> None:
             domain=AuthorityDomain.FINANCIAL_ADJUSTMENTS,
         ),
         doc,
+        ledger_txn_ids={"TXN-X-0021"},
     )
     assert cands
     payload = cands[0].payload
@@ -154,6 +162,7 @@ def test_multi_fact_reclass_accepted_and_rejected() -> None:
             ),
         ),
         documents=(doc,),
+        ledger_rows=make_ledger_rows("TXN-X-0012", "TXN-X-0021"),
     )
     reclass = [
         f.payload
@@ -397,7 +406,11 @@ def test_period_evidence_covers_service_dates() -> None:
         "Операция TXN-B4-0001 относится к услугам, оказанным в период с 2026-01-15 по 2026-03-20."
     )
     doc = make_document(raw_text=text)
-    cands = extract_candidates(make_requirement(FactKind.TRANSACTION_PERIOD, "TXN-"), doc)
+    cands = extract_candidates(
+        make_requirement(FactKind.TRANSACTION_PERIOD, "TXN-"),
+        doc,
+        ledger_txn_ids={"TXN-B4-0001"},
+    )
     assert cands
     payload = cands[0].payload
     assert isinstance(payload, TransactionPeriodPayload)

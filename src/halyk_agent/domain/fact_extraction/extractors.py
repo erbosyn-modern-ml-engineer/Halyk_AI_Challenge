@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import date
 from decimal import Decimal
 
@@ -13,13 +13,18 @@ from halyk_agent.domain.authority.models import AuthorityDomain
 from halyk_agent.domain.fact_extraction.entity_quality import is_meaningful_entity_name
 from halyk_agent.domain.fact_extraction.models import (
     AmountCorrectionPayload,
+    ContingentObligationPayload,
+    ContingentObligationType,
     ExtractionMethod,
     FactCandidate,
     FactKind,
     FactRequirement,
+    FinancialScopeKind,
     FxRatePayload,
     GroupCapexDerivationType,
     GroupCapexPayload,
+    GroupFinancialMetricPayload,
+    GroupMetricKind,
     MoneyAmount,
     OffLedgerAmountPayload,
     OneTimeAddBackPayload,
@@ -28,6 +33,7 @@ from halyk_agent.domain.fact_extraction.models import (
     RateSource,
     ReclassificationDisposition,
     RelatedPartyThresholdPayload,
+    ScheduledPrincipalPayload,
     SubsidiaryDerivationType,
     SubsidiaryKind,
     SubsidiaryStatusPayload,
@@ -38,20 +44,33 @@ from halyk_agent.domain.fact_extraction.models import (
 )
 from halyk_agent.domain.fact_extraction.ownership_context import ownership_context_reason
 from halyk_agent.domain.fact_extraction.text_locate import (
-    TXN_ID_RE,
     find_txn_ids,
     page_text_slices,
     parse_money,
     parse_percentage,
 )
 from halyk_agent.domain.fact_extraction.text_normalize import cue_corpus
+from halyk_agent.domain.fact_extraction.txn_identity import txn_id_capture_pattern
 from halyk_agent.domain.ids import deterministic_id
 from halyk_agent.domain.parsing import CanonicalDocument
 
 ExtractorFn = Callable[
-    [FactRequirement, CanonicalDocument, AuthorityDomain],
+    [FactRequirement, CanonicalDocument, AuthorityDomain, Collection[str] | None],
     list[FactCandidate],
 ]
+
+
+def _compile_txn_pattern(
+    template: str,
+    vocabulary: Collection[str] | None,
+    *,
+    flags: int = re.IGNORECASE | re.DOTALL,
+) -> re.Pattern[str] | None:
+    """Compile an extractor template that embeds ``<<<TXN>>>`` as a txn capture."""
+    capture = txn_id_capture_pattern(vocabulary)
+    if capture is None:
+        return None
+    return re.compile(template.replace("<<<TXN>>>", capture), flags)
 
 
 def _parse_iso_date(raw: str | None) -> date | None:
@@ -141,9 +160,10 @@ _RECLASS_EN = re.compile(
 _REJECTED_MARKERS = ("отклон", "отверг", "rejected", "не принят", "непринят")
 
 # Specific proposal/review + rejection / original-remains (NOT generic "не требовалось").
-_REJECTED_RECLASS_RU = re.compile(
+# <<<TXN>>> is replaced at call time with the trusted-ledger capture fragment.
+_REJECTED_RECLASS_RU_TMPL = (
     r"(?P<body>"
-    r"(?:Операция\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+    r"(?:Операция\s+)?<<<TXN>>>"
     r"[^.\n]{0,220}?"
     r"(?:первоначально\s+учт[её]нн\w*\s+как\s+(?P<from>[^,(.\n]{2,80}?))?"
     r"(?:\s*\((?P<money>\$[\d,]+(?:\.\d{2})?)\))?"
@@ -162,13 +182,12 @@ _REJECTED_RECLASS_RU = re.compile(
     r"|предложен\w*.{0,40}?отклонен"
     r"|рассмотрен\w*.{0,40}?отклонен"
     r")"
-    r")",
-    re.IGNORECASE | re.DOTALL,
+    r")"
 )
 
-_REJECTED_RECLASS_RU_ADJ = re.compile(
+_REJECTED_RECLASS_RU_ADJ_TMPL = (
     r"(?P<body>"
-    r"(?:Операция\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+    r"(?:Операция\s+)?<<<TXN>>>"
     r"(?:\s*\((?P<money>\$[\d,]+(?:\.\d{2})?)[^)]*\))?"
     r"[^.\n]{0,200}?"
     r"(?:"
@@ -183,13 +202,12 @@ _REJECTED_RECLASS_RU_ADJ = re.compile(
     r"(?:первоначальн\w*\s+классификац\w*.{0,40}?сохраня"
     r"|корректировк\w*.{0,40}?(?:не\s+требуется|не\s+требует|не\s+производи))"
     r")?"
-    r")",
-    re.IGNORECASE | re.DOTALL,
+    r")"
 )
 
-_REJECTED_RECLASS_EN = re.compile(
+_REJECTED_RECLASS_EN_TMPL = (
     r"(?P<body>"
-    r"(?:Transaction\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+    r"(?:Transaction\s+)?<<<TXN>>>"
     r"[^.\n]{0,200}?"
     r"(?:\((?P<money>\$[\d,]+(?:\.\d{2})?)\))?"
     r"[^.\n]{0,160}?"
@@ -208,8 +226,7 @@ _REJECTED_RECLASS_EN = re.compile(
     r"|proposal\s+rejected"
     r"|considered\s+and\s+rejected"
     r")"
-    r")",
-    re.IGNORECASE | re.DOTALL,
+    r")"
 )
 
 
@@ -267,11 +284,30 @@ def extract_reclassification(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     seen_keys: set[str] = set()
     # Join pages so proposal/rejection sentences that cross page breaks still match.
     text, page_index = _joined_document_text(document)
+    rejected_patterns = [
+        (pattern, reason)
+        for pattern, reason in (
+            (
+                _compile_txn_pattern(_REJECTED_RECLASS_RU_TMPL, ledger_txn_ids),
+                "DET_RECLASS_REJECTED",
+            ),
+            (
+                _compile_txn_pattern(_REJECTED_RECLASS_RU_ADJ_TMPL, ledger_txn_ids),
+                "DET_RECLASS_REJECTED_ADJ",
+            ),
+            (
+                _compile_txn_pattern(_REJECTED_RECLASS_EN_TMPL, ledger_txn_ids),
+                "DET_RECLASS_REJECTED_EN",
+            ),
+        )
+        if pattern is not None
+    ]
 
     def _emit(
         match: re.Match[str],
@@ -381,7 +417,7 @@ def extract_reclassification(
                 if any(m in context for m in _REJECTED_MARKERS)
                 else ReclassificationDisposition.ACCEPTED
             )
-            txn_ids = find_txn_ids(match.group("body"))
+            txn_ids = find_txn_ids(match.group("body"), ledger_txn_ids)
             _emit(
                 match,
                 disposition=disposition,
@@ -393,11 +429,7 @@ def extract_reclassification(
                 counterparty=cp or None,
             )
 
-    for pattern, reason in (
-        (_REJECTED_RECLASS_RU, "DET_RECLASS_REJECTED"),
-        (_REJECTED_RECLASS_RU_ADJ, "DET_RECLASS_REJECTED_ADJ"),
-        (_REJECTED_RECLASS_EN, "DET_RECLASS_REJECTED_EN"),
-    ):
+    for pattern, reason in rejected_patterns:
         for match in pattern.finditer(text):
             groups = match.groupdict()
             txn_id = groups.get("txn")
@@ -438,22 +470,20 @@ def extract_reclassification(
     return out
 
 
-_PERIOD_EXCLUDE = re.compile(
-    r"(?P<body>(?:Операция\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+_PERIOD_EXCLUDE_TMPL = (
+    r"(?P<body>(?:Операция\s+)?<<<TXN>>>"
     r"[^.\n]{0,160}?"
     r"(?:исключен\w*\s+из\s+(?:ковенантн\w*\s+)?период\w*"
     r"|excluded\s+from\s+(?:the\s+)?(?:covenant\s+)?period)"
-    r"(?:\s+(?P<label>\d{4}\s*года|\d{4}|[^.\n]{2,40}))?)",
-    re.IGNORECASE | re.DOTALL,
+    r"(?:\s+(?P<label>\d{4}\s*года|\d{4}|[^.\n]{2,40}))?)"
 )
-_PERIOD_ASSIGN = re.compile(
-    r"(?P<body>(?:Операция\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+_PERIOD_ASSIGN_TMPL = (
+    r"(?P<body>(?:Операция\s+)?<<<TXN>>>"
     r"[^.\n]{0,160}?"
     r"(?:относит\w*\s+к\s+(?:услуг\w*|ковенантн\w*\s+период\w*|период\w*)"
     r"|assign(?:ed)?\s+to\s+(?:the\s+)?(?:covenant\s+)?period"
     r"|оказанн\w*\s+в\s+период)"
-    r"(?:\s+(?:с\s+)?(?P<label>[^.\n]{2,80}))?)",
-    re.IGNORECASE | re.DOTALL,
+    r"(?:\s+(?:с\s+)?(?P<label>[^.\n]{2,80}))?)"
 )
 _SERVICE_RANGE = re.compile(
     r"(?:с|from)\s+(?P<start>\d{4}-\d{2}-\d{2})\s+(?:по|to|until|-)\s+(?P<end>\d{4}-\d{2}-\d{2})",
@@ -492,11 +522,16 @@ def extract_period(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
+    period_exclude = _compile_txn_pattern(_PERIOD_EXCLUDE_TMPL, ledger_txn_ids)
+    period_assign = _compile_txn_pattern(_PERIOD_ASSIGN_TMPL, ledger_txn_ids)
+    if period_exclude is None or period_assign is None:
+        return []
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
-        for match in _PERIOD_EXCLUDE.finditer(text):
-            label = (match.group("label") or "").strip(" ,.;") or None
+        for match in period_exclude.finditer(text):
+            label = _normalize_period_label((match.group("label") or "").strip(" ,.;") or None)
             start, end = _period_dates(text, match.start(), match.end())
             quote, q0, q1 = _period_evidence_span(text, match, start, end)
             payload = TransactionPeriodPayload(
@@ -520,11 +555,13 @@ def extract_period(
                     reason_code="DET_PERIOD_EXCLUDE",
                 )
             )
-        for match in _PERIOD_ASSIGN.finditer(text):
-            label = (match.group("label") or "").strip(" ,.;") or None
+        for match in period_assign.finditer(text):
+            label = _normalize_period_label((match.group("label") or "").strip(" ,.;") or None)
             start, end = _period_dates(text, match.start(), match.end())
             if start and end and not label:
                 label = f"{start.isoformat()}..{end.isoformat()}"
+            else:
+                label = _normalize_period_label(label) or label
             quote, q0, q1 = _period_evidence_span(text, match, start, end)
             payload = TransactionPeriodPayload(
                 transaction_id=match.group("txn"),
@@ -590,11 +627,13 @@ def extract_ownership(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
     """
     Emit ownership rows only when local preceding table/section context is
     ownership/voting-rights (not pledged-assets / collateral tables).
     """
+    _ = ledger_txn_ids
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         for match in _OWNERSHIP_ROW.finditer(text):
@@ -654,7 +693,9 @@ def extract_related_party_threshold(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
+    _ = ledger_txn_ids
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         repaired = cue_corpus(text)
@@ -738,7 +779,9 @@ def extract_off_ledger(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
+    _ = ledger_txn_ids
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         for match in _SEVERANCE.finditer(text):
@@ -826,7 +869,9 @@ def extract_subsidiary_status(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
+    _ = ledger_txn_ids
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         for match in _SUBSIDIARY.finditer(text):
@@ -942,6 +987,7 @@ def extract_fx_rate(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
@@ -958,7 +1004,7 @@ def extract_fx_rate(
             if not from_c or not to_c:
                 continue
             body = match.group("body").strip()
-            txn = find_txn_ids(body)
+            txn = find_txn_ids(body, ledger_txn_ids)
             payload = FxRatePayload(
                 from_currency=from_c,
                 to_currency=to_c,
@@ -996,7 +1042,10 @@ def extract_fx_rate(
             if from_c == to_c:
                 continue
             body = match.group("body").strip()
-            txn = find_txn_ids(text[max(0, match.start() - 80) : match.end() + 40])
+            txn = find_txn_ids(
+                text[max(0, match.start() - 80) : match.end() + 40],
+                ledger_txn_ids,
+            )
             # Source-faithful: keep both amounts; do NOT calculate a rate.
             payload = FxRatePayload(
                 from_currency=from_c,
@@ -1053,7 +1102,9 @@ def extract_one_time_add_back(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
+    _ = ledger_txn_ids
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         for match in _ONE_TIME.finditer(text):
@@ -1223,12 +1274,14 @@ def extract_group_capex(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
     """
     Derive GROUP_CAPEX only from an explicit amount or a closed PPE roll-forward.
 
     Incomplete bridges (missing additions / unproven other movements) yield nothing.
     """
+    _ = ledger_txn_ids
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
         # Explicit additions line preferred.
@@ -1309,23 +1362,30 @@ def extract_group_capex(
     return out
 
 
-_AMOUNT_CORR = re.compile(
+_AMOUNT_CORR_TMPL = (
     r"(?P<body>(?:(?:уточн[её]нн\w*|исправленн\w*|correct(?:ed)?)\s+)?"
     r"(?:сумма|amount)\s+"
     r"(?:корректировк\w*|correction|adjusted\s+to|should\s+read|должна\s+составлять)?\s*"
     r"(?P<money>\$[\d,]+(?:\.\d{2})?)"
-    r"(?:[^.]{0,60}?(?P<txn>TXN-[A-Za-z0-9]+-\d+))?)",
-    re.IGNORECASE,
+    r"(?:[^.]{0,60}?<<<TXN>>>)?)"
 )
 
-_AMOUNT_MISSING_LEDGER = re.compile(
-    r"(?P<body>(?:Операция\s+)?(?P<txn>TXN-[A-Za-z0-9]+-\d+)"
+_AMOUNT_MISSING_LEDGER_TMPL = (
+    r"(?P<body>(?:Операция\s+)?<<<TXN>>>"
     r"[^.]{0,200}?"
     r"(?:сумма\s+не\s+отражен\w*|amount\s+(?:is\s+)?(?:missing|not\s+reflected)|не\s+отражена\s+в\s+выгрузке)"
     r"[^.]{0,160}?"
     r"(?:фактическ\w*\s+сумм\w*|actual\s+amount|составляет|is)\s*"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?))"
+)
+
+# Money-only amount correction (no txn attachment) when ledger vocabulary is absent.
+_AMOUNT_CORR_MONEY_ONLY = re.compile(
+    r"(?P<body>(?:(?:уточн[её]нн\w*|исправленн\w*|correct(?:ed)?)\s+)?"
+    r"(?:сумма|amount)\s+"
+    r"(?:корректировк\w*|correction|adjusted\s+to|should\s+read|должна\s+составлять)?\s*"
     r"(?P<money>\$[\d,]+(?:\.\d{2})?))",
-    re.IGNORECASE | re.DOTALL,
+    re.IGNORECASE,
 )
 
 
@@ -1333,13 +1393,21 @@ def extract_amount_correction(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
+    amount_corr = _compile_txn_pattern(_AMOUNT_CORR_TMPL, ledger_txn_ids, flags=re.IGNORECASE)
+    amount_missing = _compile_txn_pattern(_AMOUNT_MISSING_LEDGER_TMPL, ledger_txn_ids)
+    patterns: list[tuple[re.Pattern[str], str]] = []
+    if amount_corr is not None:
+        patterns.append((amount_corr, "DET_AMOUNT_CORR"))
+    else:
+        # No ledger vocabulary: still allow money-only corrections (no invented txn id).
+        patterns.append((_AMOUNT_CORR_MONEY_ONLY, "DET_AMOUNT_CORR"))
+    if amount_missing is not None:
+        patterns.append((amount_missing, "DET_AMOUNT_MISSING_LEDGER"))
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
-        for pattern, reason in (
-            (_AMOUNT_CORR, "DET_AMOUNT_CORR"),
-            (_AMOUNT_MISSING_LEDGER, "DET_AMOUNT_MISSING_LEDGER"),
-        ):
+        for pattern, reason in patterns:
             for match in pattern.finditer(text):
                 money = parse_money(match.group("money"))
                 if money is None:
@@ -1368,11 +1436,10 @@ def extract_amount_correction(
     return out
 
 
-_TREATMENT = re.compile(
-    r"(?P<body>(?P<txn>TXN-[A-Za-z0-9]+-\d+)\s+"
+_TREATMENT_TMPL = (
+    r"(?P<body><<<TXN>>>\s+"
     r"(?P<disp>исключа\w*|включа\w*|exclud\w*|includ\w+)"
-    r"[^.]{0,40}?(?:из\s+расчёта|в\s+расчёт|from\s+(?:the\s+)?covenant|in\s+(?:the\s+)?covenant)?)",
-    re.IGNORECASE,
+    r"[^.]{0,40}?(?:из\s+расчёта|в\s+расчёт|from\s+(?:the\s+)?covenant|in\s+(?:the\s+)?covenant)?)"
 )
 
 
@@ -1380,10 +1447,14 @@ def extract_treatment(
     requirement: FactRequirement,
     document: CanonicalDocument,
     authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
+    treatment = _compile_txn_pattern(_TREATMENT_TMPL, ledger_txn_ids, flags=re.IGNORECASE)
+    if treatment is None:
+        return []
     out: list[FactCandidate] = []
     for page_number, text in page_text_slices(document):
-        for match in _TREATMENT.finditer(text):
+        for match in treatment.finditer(text):
             disp_raw = match.group("disp").casefold()
             if disp_raw.startswith("исключ") or disp_raw.startswith("exclud"):
                 disposition = TreatmentDisposition.EXCLUDE
@@ -1413,6 +1484,197 @@ def extract_treatment(
     return out
 
 
+_GROUP_METRIC = re.compile(
+    r"(?P<body>"
+    r"(?:"
+    r"(?:group|consolidated|групп\w*)\s+"
+    r"(?P<metric>capex|capital\s+expenditure|debt|ebitda|revenue|выручк\w*|долг)"
+    r"|"
+    r"консолидированн\w*\s+(?:общ\w*\s+)?"
+    r"(?P<metric_ru>долг|ebitda|capex|выручк\w*)\s+групп\w*"
+    r")"
+    r"[^.\n]{0,80}?"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?|(?:USD|EUR|GBP|KZT)\s*[\d,]+(?:\.\d{2})?))",
+    re.IGNORECASE,
+)
+
+_CONTINGENT = re.compile(
+    r"(?P<body>(?P<otype>guarantee|guarantees|indemnit(?:y|ies)|contingent\s+liabilit(?:y|ies)|"
+    r"гарант\w*|индемнитет\w*|условн\w*\s+обязательств\w*)"
+    r"[^.\n]{0,120}?"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?|(?:USD|EUR|GBP|KZT)\s*[\d,]+(?:\.\d{2})?))",
+    re.IGNORECASE,
+)
+
+_SCHEDULED_PRINCIPAL = re.compile(
+    r"(?P<body>(?:scheduled\s+)?principal\s+repayment(?:s)?"
+    r"|погашени\w*\s+основн\w*\s+долг\w*"
+    r"|амортизац\w*\s+основн\w*\s+долг\w*)"
+    r"[^.\n]{0,120}?"
+    r"(?P<money>\$[\d,]+(?:\.\d{2})?|(?:USD|EUR|GBP|KZT)\s*[\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+
+_QUARTER_LABEL = re.compile(
+    r"\b(?P<q>Q[1-4]|[1-4]\s*квартал\w*|[1-4]\s*quarter)\b(?:\s*(?P<y>20\d{2}))?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_period_label(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    text = re.sub(r"\s+", " ", raw).strip(" ,.;")
+    if not text:
+        return None
+    match = _QUARTER_LABEL.search(text)
+    if match is None:
+        return text
+    token = match.group("q").casefold()
+    year = match.group("y")
+    if token.startswith("q"):
+        quarter = token[1]
+    else:
+        digit = re.search(r"[1-4]", token)
+        quarter = digit.group(0) if digit else None
+    if quarter is None:
+        return text
+    if year:
+        return f"{year}-Q{quarter}"
+    return f"Q{quarter}"
+
+
+def extract_group_financial_metric(
+    requirement: FactRequirement,
+    document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
+) -> list[FactCandidate]:
+    _ = ledger_txn_ids
+    out: list[FactCandidate] = []
+    for page_number, text in page_text_slices(document):
+        for match in _GROUP_METRIC.finditer(text):
+            money = parse_money(match.group("money"))
+            if money is None:
+                continue
+            metric_raw = (match.group("metric") or match.group("metric_ru") or "").casefold()
+            if "capex" in metric_raw or "capital" in metric_raw:
+                metric = GroupMetricKind.CAPEX
+            elif "debt" in metric_raw or "долг" in metric_raw:
+                metric = GroupMetricKind.DEBT
+            elif "ebitda" in metric_raw:
+                metric = GroupMetricKind.EBITDA
+            else:
+                metric = GroupMetricKind.REVENUE
+            body = match.group("body").strip()
+            payload = GroupFinancialMetricPayload(
+                metric=metric,
+                scope=FinancialScopeKind.GROUP,
+                amount=MoneyAmount(value=money[0], currency=money[1]),
+                period_label=_normalize_period_label(body),
+            )
+            out.append(
+                _candidate(
+                    requirement=requirement,
+                    document=document,
+                    authority_domain=authority_domain,
+                    kind=FactKind.GROUP_FINANCIAL_METRIC,
+                    payload=payload,
+                    quote=body[:400],
+                    page_number=page_number,
+                    char_start=match.start(),
+                    char_end=match.end(),
+                    reason_code="DET_GROUP_FINANCIAL_METRIC",
+                )
+            )
+    return out
+
+
+def extract_contingent_obligation(
+    requirement: FactRequirement,
+    document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
+) -> list[FactCandidate]:
+    _ = ledger_txn_ids
+    out: list[FactCandidate] = []
+    for page_number, text in page_text_slices(document):
+        for match in _CONTINGENT.finditer(text):
+            money = parse_money(match.group("money"))
+            if money is None:
+                continue
+            otype_raw = match.group("otype").casefold()
+            if "indemn" in otype_raw or "индемнитет" in otype_raw:
+                otype = ContingentObligationType.INDEMNITY
+            elif "contingent" in otype_raw or "условн" in otype_raw:
+                otype = ContingentObligationType.CONTINGENT_LIABILITY
+            elif "гарант" in otype_raw or "guarantee" in otype_raw:
+                otype = ContingentObligationType.GUARANTEE
+            else:
+                otype = ContingentObligationType.OTHER
+            # Skip boilerplate TOC headings without numeric substance already gated by money.
+            body = match.group("body").strip()
+            payload = ContingentObligationPayload(
+                obligation_type=otype,
+                amount=MoneyAmount(value=money[0], currency=money[1]),
+                scope=FinancialScopeKind.BORROWER,
+                description=otype.value.lower(),
+            )
+            out.append(
+                _candidate(
+                    requirement=requirement,
+                    document=document,
+                    authority_domain=authority_domain,
+                    kind=FactKind.CONTINGENT_OBLIGATION,
+                    payload=payload,
+                    quote=body[:400],
+                    page_number=page_number,
+                    char_start=match.start(),
+                    char_end=match.end(),
+                    reason_code="DET_CONTINGENT_OBLIGATION",
+                )
+            )
+    return out
+
+
+def extract_scheduled_principal(
+    requirement: FactRequirement,
+    document: CanonicalDocument,
+    authority_domain: AuthorityDomain,
+    ledger_txn_ids: Collection[str] | None = None,
+) -> list[FactCandidate]:
+    out: list[FactCandidate] = []
+    for page_number, text in page_text_slices(document):
+        for match in _SCHEDULED_PRINCIPAL.finditer(text):
+            money = parse_money(match.group("money"))
+            if money is None:
+                continue
+            body = match.group("body").strip()
+            txn = find_txn_ids(body, ledger_txn_ids)
+            payload = ScheduledPrincipalPayload(
+                amount=MoneyAmount(value=money[0], currency=money[1]),
+                scope=FinancialScopeKind.BORROWER,
+                period_label=_normalize_period_label(body),
+                transaction_id=txn[0] if txn else None,
+                description="scheduled_principal_repayment",
+            )
+            out.append(
+                _candidate(
+                    requirement=requirement,
+                    document=document,
+                    authority_domain=authority_domain,
+                    kind=FactKind.SCHEDULED_PRINCIPAL,
+                    payload=payload,
+                    quote=body[:400],
+                    page_number=page_number,
+                    char_start=match.start(),
+                    char_end=match.end(),
+                    reason_code="DET_SCHEDULED_PRINCIPAL",
+                )
+            )
+    return out
+
+
 _EXTRACTORS: dict[FactKind, ExtractorFn] = {
     FactKind.TRANSACTION_RECLASSIFICATION: extract_reclassification,
     FactKind.TRANSACTION_PERIOD: extract_period,
@@ -1425,6 +1687,9 @@ _EXTRACTORS: dict[FactKind, ExtractorFn] = {
     FactKind.GROUP_CAPEX: extract_group_capex,
     FactKind.AMOUNT_CORRECTION: extract_amount_correction,
     FactKind.TRANSACTION_TREATMENT: extract_treatment,
+    FactKind.GROUP_FINANCIAL_METRIC: extract_group_financial_metric,
+    FactKind.CONTINGENT_OBLIGATION: extract_contingent_obligation,
+    FactKind.SCHEDULED_PRINCIPAL: extract_scheduled_principal,
 }
 
 
@@ -1433,6 +1698,7 @@ def extract_candidates(
     document: CanonicalDocument,
     *,
     authority_domain: AuthorityDomain | None = None,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> list[FactCandidate]:
     """Run the deterministic extractor for the requirement's FactKind."""
     fn = _EXTRACTORS.get(requirement.fact_kind)
@@ -1443,8 +1709,4 @@ def extract_candidates(
         if requirement.allowed_authority_domains
         else AuthorityDomain.FINANCIAL_ADJUSTMENTS
     )
-    return fn(requirement, document, domain)
-
-
-# Silence unused import lint when TXN_ID_RE only used indirectly in some builds.
-_ = TXN_ID_RE
+    return fn(requirement, document, domain, ledger_txn_ids)

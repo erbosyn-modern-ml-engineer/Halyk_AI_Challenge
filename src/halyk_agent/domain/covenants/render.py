@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from halyk_agent.domain.covenants.ast import (
     Add,
+    Always,
+    And,
+    BoolExpr,
+    Compare,
     Constant,
     Count,
     Divide,
@@ -11,6 +15,9 @@ from halyk_agent.domain.covenants.ast import (
     Max,
     Min,
     Multiply,
+    Not,
+    Or,
+    PeriodAggregate,
     Subtract,
     Sum,
     TransactionSet,
@@ -54,10 +61,8 @@ def render_expr(expr: Expr) -> str:
         flags: list[str] = []
         if expr.selector.related_party_only:
             flags.append("related_party")
-        if expr.selector.group_level:
-            flags.append("GROUP")
-        else:
-            flags.append("BORROWER")
+        # Scope is part of metric identity, so it is always rendered.
+        flags.append(expr.selector.scope.value)
         suffix = f"[{','.join(flags)}]"
         return f"{expr.selector.category.value}{suffix}"
     if isinstance(expr, Sum):
@@ -76,6 +81,11 @@ def render_expr(expr: Expr) -> str:
         return f"({render_expr(expr.left)} * {render_expr(expr.right)})"
     if isinstance(expr, Divide):
         return f"({render_expr(expr.numerator)} / {render_expr(expr.denominator)})"
+    if isinstance(expr, PeriodAggregate):
+        return (
+            f"{expr.reducer.value}_OVER_{expr.grouping.value}"
+            f"({render_expr(expr.of)}, basis={expr.basis.value})"
+        )
     raise TypeError(f"unsupported expr: {type(expr)!r}")
 
 
@@ -124,17 +134,52 @@ def render_activation(condition: ActivationCondition) -> str:
     )
 
 
+def render_bool_expr(expr: BoolExpr) -> str:
+    """Canonical rendering of a typed covenant predicate."""
+    if isinstance(expr, Always):
+        return "ALWAYS"
+    if isinstance(expr, Not):
+        return f"NOT({render_bool_expr(expr.of)})"
+    if isinstance(expr, And):
+        return "AND(" + ", ".join(render_bool_expr(arg) for arg in expr.args) + ")"
+    if isinstance(expr, Or):
+        return "OR(" + ", ".join(render_bool_expr(arg) for arg in expr.args) + ")"
+    if isinstance(expr, Compare):
+        return (
+            f"{render_expr(expr.left)} "
+            f"{_COMPARATOR_RENDER[expr.comparator]} "
+            f"{render_expr(expr.right)}"
+        )
+    return "UNKNOWN_PREDICATE"
+
+
 def render_covenant_definition(definition: CovenantDefinition) -> str:
     """Canonical semantic rendering (not original legal text)."""
     parts = [
         f"{render_expr(definition.metric)} over {render_period(definition.period)}",
-        f"{_COMPARATOR_RENDER[definition.comparator]} {render_quantity(definition.threshold)}",
-        f"scope={render_scope(definition.scope)}",
-        f"family={definition.family_id}",
     ]
+    if definition.comparator is not None and definition.threshold is not None:
+        parts.append(
+            f"{_COMPARATOR_RENDER[definition.comparator]} {render_quantity(definition.threshold)}"
+        )
+    parts.extend(
+        [
+            f"scope={render_scope(definition.scope)}",
+            f"family={definition.family_id}",
+        ]
+    )
     if definition.modifiers:
         mods = ",".join(item.kind.value for item in definition.modifiers)
         parts.append(f"modifiers={mods}")
     if definition.activation_condition is not None:
         parts.append(render_activation(definition.activation_condition))
+    if definition.plan is not None:
+        parts.append(f"activation={render_bool_expr(definition.plan.activation_condition)}")
+        parts.append(f"breach={render_bool_expr(definition.plan.breach_condition)}")
+        if definition.plan.required_facts:
+            needed = ",".join(
+                f"{item.category.value}@{item.scope.value}"
+                for item in definition.plan.required_facts
+            )
+            parts.append(f"requires={needed}")
     return " | ".join(parts)

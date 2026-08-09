@@ -14,6 +14,8 @@ from halyk_agent.domain.covenants.ast import (
     MetricCategory,
     Min,
     Multiply,
+    PeriodAggregate,
+    PeriodGrouping,
     Subtract,
     Sum,
     TransactionSet,
@@ -123,6 +125,17 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                 f"unsupported covenant modifier: {modifier.kind.value}",
                 code="UNSUPPORTED_MODIFIER",
             )
+
+    # DSL v2 plans whose semantics do not reduce to "actual <cmp> constant"
+    # (compound breach logic, expression-valued thresholds, sub-period extrema)
+    # need the plan-aware executor. Fail closed with a specific code rather than
+    # silently evaluating a lossy approximation of the covenant.
+    if definition.comparator is None or definition.threshold is None:
+        raise EvaluationPlanningError(
+            "covenant semantics require the plan-aware evaluator "
+            "(compound logic or expression-valued threshold)",
+            code="PLAN_REQUIRES_V2_EVALUATOR",
+        )
 
     materiality = _materiality_modifier(definition)
     materiality_target = _materiality_target(definition, materiality)
@@ -287,6 +300,22 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                     dependencies=(numerator, denominator),
                     quantity_type=infer_quantity_type(expr),
                 )
+            )
+        elif isinstance(expr, PeriodAggregate):
+            if expr.grouping is PeriodGrouping.FULL_PERIOD:
+                # One bucket covering the whole measurement period: reducing it
+                # is the operand itself, so this is exact, not an approximation.
+                current = plan_expr(expr.of)
+                expression_cache[cache_key] = current
+                return current
+            # Genuine sub-period reduction needs per-transaction period
+            # assignment from Stage 5F. Name the blocker explicitly instead of
+            # collapsing the covenant into an annual total, which would be a
+            # different covenant.
+            raise EvaluationPlanningError(
+                f"period aggregation ({expr.reducer.value} over {expr.grouping.value}) "
+                "requires per-period calculation inputs",
+                code="PERIOD_INPUTS_REQUIRED",
             )
         else:
             raise EvaluationPlanningError(

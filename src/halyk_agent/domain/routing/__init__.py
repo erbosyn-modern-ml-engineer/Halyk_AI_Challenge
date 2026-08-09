@@ -1,5 +1,9 @@
 """Stage 5B scenario and entity routing domain package."""
 
+from halyk_agent.domain.routing.accounts import (
+    AccountVocabulary,
+    build_account_vocabulary,
+)
 from halyk_agent.domain.routing.engine import run_routing
 from halyk_agent.domain.routing.models import (
     AccountIdentity,
@@ -23,6 +27,7 @@ from halyk_agent.domain.routing.scenarios import discover_scenarios
 
 __all__ = [
     "AccountIdentity",
+    "AccountVocabulary",
     "BorrowerIdentity",
     "CompanyAlias",
     "CounterpartyIdentity",
@@ -37,6 +42,7 @@ __all__ = [
     "ScenarioRoutingRecord",
     "TransactionEntityLink",
     "TxnIdParserConfig",
+    "build_account_vocabulary",
     "discover_scenarios",
     "names_match_exact",
     "normalize_legal_name",

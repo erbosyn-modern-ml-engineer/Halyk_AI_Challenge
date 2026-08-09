@@ -92,9 +92,23 @@ class Settings(BaseSettings):
         return load_profile(self.profile)
 
 
+def _load_local_dotenv() -> None:
+    """Load `.env` into process env so non-HALYK secrets (e.g. DEEPSEEK_API_KEY) resolve.
+
+    pydantic-settings only maps HALYK_* fields; provider code reads DEEPSEEK_API_KEY
+    from ``os.environ``. Never log file contents.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(".env", override=False)
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached settings instance."""
+    _load_local_dotenv()
     return Settings()
 
 

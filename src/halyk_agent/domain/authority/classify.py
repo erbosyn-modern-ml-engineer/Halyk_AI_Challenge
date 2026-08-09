@@ -6,8 +6,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from halyk_agent.domain.authority.constants import SUPERSESSION_BANNER_PATTERNS
 from halyk_agent.domain.authority.evidence import (
     find_first_span_non_negated,
+    find_status_banner_span,
     require_span_or_none,
 )
 from halyk_agent.domain.authority.models import (
@@ -57,24 +59,20 @@ def _lifecycle_from_markers(
     Strong execution / strong final status markers are required to establish
     CURRENT_EXECUTED / FINAL.
     """
-    superseded = require_span_or_none(
+    # Supersession must be a document-status banner. The same words occur in
+    # ordinary covenant prose ("указанное ограничение … не применяется" is the
+    # ELSE branch of a springing covenant; "obsolete or worn assets" is a
+    # disposal carve-out), and reading those as lifecycle would retire the very
+    # agreement that is in force.
+    superseded = find_status_banner_span(
         document,
-        patterns=(
-            "НЕДЕЙСТВУЮЩАЯ РЕДАКЦИЯ",
-            "НЕ ПРИМЕНЯЕТСЯ",
-            "superseded",
-            "SUPERSEDED",
-            "obsolete",
-            "OBSOLETE",
-            "заменена окончательным",
-            "заменена и изложена",
-        ),
+        patterns=SUPERSESSION_BANNER_PATTERNS,
     )
     if superseded is not None:
         return DocumentLifecycleStatus.SUPERSEDED, superseded, "EXPLICIT_SUPERSEDED"
 
     if metadata.superseded_marker:
-        span = require_span_or_none(document, patterns=(metadata.superseded_marker,))
+        span = find_status_banner_span(document, patterns=(metadata.superseded_marker,))
         if span is not None:
             return DocumentLifecycleStatus.SUPERSEDED, span, "EXPLICIT_SUPERSEDED"
 
@@ -121,8 +119,16 @@ def _lifecycle_from_markers(
         patterns=(
             "ИСПОЛНИТЕЛЬНЫЙ ЭКЗЕМПЛЯР",
             "ДЕЙСТВУЮЩАЯ РЕДАКЦИЯ",
+            "ПОДПИСАННЫЙ ЭКЗЕМПЛЯР",
+            "ҚОЛ ҚОЙЫЛҒАН ДАНА",
             "EXECUTED COPY",
             "Executed Copy",
+            # An execution copy declares the same status whether the stamp is
+            # written as the participle or the noun.
+            "EXECUTION COPY",
+            "Execution Copy",
+            "CONFORMED COPY",
+            "Conformed Copy",
             "SIGNED AND EXECUTED",
             "Signed and Executed",
             "CURRENT_EXECUTED",

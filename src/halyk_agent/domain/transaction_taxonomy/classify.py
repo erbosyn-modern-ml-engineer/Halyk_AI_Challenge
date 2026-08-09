@@ -60,7 +60,12 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
         "CAPITAL_TRANSFER_SUBSIDIARY",
         MetricCategory.CAPITAL_ASSET_TRANSFER,
         re.compile(
-            r"(?:\btransfer(?:s|red)?\b|\btransfer\s+of\b).{0,80}\bsubsidiar",
+            r"(?:"
+            r"(?:\btransfer(?:s|red)?\b|\btransfer\s+of\b).{0,80}"
+            r"(?:\bsubsidiar|\bgroup\s+entity\b|\bintra-group\b)"
+            r"|"
+            r"\bintra-group\s+transfer\b"
+            r")",
             re.IGNORECASE,
         ),
     ),
@@ -79,7 +84,8 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
         MetricCategory.FINANCING_INFLOWS,
         re.compile(
             r"\bdrawdown\b|\bfinancing\s+inflow\b|\bequity\s+injection\b|"
-            r"\bcapital\s+contribution\b|\bloan\s+facility\s+draw",
+            r"\bcapital\s+contribution\b|\bloan\s+facility\s+draw|"
+            r"\bpromissory\s+note\s+proceeds\b",
             re.IGNORECASE,
         ),
     ),
@@ -89,7 +95,14 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
         re.compile(
             r"\bcapex\b|\bcapital\s+expenditure|\bequipment\s+purchase\b|"
             r"\bpurchase\s+of\b.{0,60}\bequipment\b|\bfixed\s+asset\b|"
-            r"\bcapitalis(?:ed|ed)\b|\bplant\s+machinery\b",
+            r"\bcapitalis(?:ed|ed)\b|\bplant\s+machinery\b|"
+            r"\b(?:machinery|equipment|silo|conveyor)\s+upgrade\b|"
+            r"\b(?:grain\s+silo|kiln\s+conveyor|rolling)\s+equipment\b|"
+            r"\b(?:grain\s+)?silo\b.{0,40}\bequipment\b|"
+            r"\baeration\s+equipment\b|"
+            r"\b(?:refrigeration|concentrator|rolling)?\s*machinery\s+instalment\b|"
+            r"\bmachinery\s+instalment\b|"
+            r"\bnon-recurring\b.{0,40}\b(?:refurbishment|network)\b",
             re.IGNORECASE,
         ),
     ),
@@ -145,7 +158,9 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
         MetricCategory.UTILITIES,
         re.compile(
             r"\butilities\b|\butility\b|\belectricity\b|\bdistrict\s+heating\b|"
-            r"\bwater\s+(?:supply|charge)\b|\bgas\s+supply\b|\bwaste\s+water\b|"
+            r"\bwater\s+(?:and\s+sewer\s+)?(?:supply|charge)s?\b|"
+            r"\bsewer\s+(?:discharge|charge|levy|fee)s?\b|"
+            r"\bgas\s+supply\b|\bwaste\s+water\b|"
             r"\btelecom\b",
             re.IGNORECASE,
         ),
@@ -176,14 +191,43 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
             re.IGNORECASE,
         ),
     ),
+    (
+        # Distinct from OPEX until MetricCategory.MARKETING exists (flag overlay).
+        "MARKETING",
+        MetricCategory.OTHER_EXPENSE,
+        re.compile(
+            r"\bmarketing\b|\bad\s+campaign\b|\badvertis(?:ing|ement)?\b|"
+            r"\bsponsorship\b|\bmedia\s+buy\b|\bbrand\s+relaunch\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # Distinct from OPEX until MetricCategory.CONSULTING exists (flag overlay).
+        "CONSULTING",
+        MetricCategory.OTHER_EXPENSE,
+        re.compile(
+            r"\bconsulting\b|\badvisory\b(?:\s+fees?\b|\s+engagement\b|\s+retainer\b)?|"
+            r"\bprofessional\s+(?:fees?|services?)\b|\blegal\s+and\s+consulting\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        # Never map to FINANCING_INFLOWS — principal service is a separate universe.
+        "SCHEDULED_PRINCIPAL",
+        MetricCategory.OTHER_EXPENSE,
+        re.compile(
+            r"\b(?:term\s+loan\s+)?principal\s+repayment\b|"
+            r"\bscheduled\s+principal\b|\bamortis(?:ation|ation)\s+of\s+principal\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 _WEAK_OPEX = (
     "OTHER_EXPENSE_WEAK",
     MetricCategory.OTHER_EXPENSE,
     re.compile(
-        r"\badvisory\b|\bretainer\b|\bconsulting\b|\bservicing\b|\bsupplies\b|"
-        r"\bmarketing\b|\bad\s+campaign\b|\badvertis|\bsponsorship\b|\bmedia\b|"
+        r"\bretainer\b|\bservicing\b|\bsupplies\b|"
         r"\bmaintenance\b|\brepair\b|\binspection\b|\bsurvey\b|\bmanagement\b|"
         r"\bbroker\b|\bcleaning\b|\bclearance\b",
         re.IGNORECASE,
@@ -357,6 +401,9 @@ def classify_description(description: str) -> ClassificationHit:
             r"\bleased\s+line\b", text, re.IGNORECASE
         ):
             strong_hits = [("TELECOM_LEASED_LINE", MetricCategory.UTILITIES)]
+        # Severance is more specific than generic payroll/labor wording.
+        elif rule_ids >= {"SEVERANCE", "LABOR"}:
+            strong_hits = [("SEVERANCE", MetricCategory.SEVERANCE_LIABILITY)]
 
     if len(strong_hits) > 1:
         categories = {c for _, c in strong_hits}

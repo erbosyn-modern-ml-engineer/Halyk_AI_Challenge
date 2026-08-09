@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 
 from halyk_agent.domain.authority.models import AuthorityDecision, AuthorityDomain, AuthorityStatus
 from halyk_agent.domain.covenants.ast import MetricCategory
 from halyk_agent.domain.covenants.models import CovenantDefinition, CovenantModifierKind
 from halyk_agent.domain.fact_extraction.constants import FACT_REQUIREMENT_VERSION
 from halyk_agent.domain.fact_extraction.models import DerivationKind, FactKind, FactRequirement
+from halyk_agent.domain.fact_extraction.txn_identity import txn_near_pattern
 from halyk_agent.domain.ids import deterministic_id
 from halyk_agent.domain.parsing import CanonicalDocument
 
@@ -35,14 +36,11 @@ _FX_EVENT_PATTERNS = (
         re.IGNORECASE | re.DOTALL,
     ),
     re.compile(
-        r"TXN-[A-Za-z0-9]+-\d+[^\n]{0,200}?(?:EUR|GBP)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
         r"(?:EUR|GBP)\s*[\d,]+\d.{0,100}?(?:урегулирован|settled|USD|\$)",
         re.IGNORECASE | re.DOTALL,
     ),
 )
+_FX_TXN_FOREIGN_TAIL = re.compile(r"(?:EUR|GBP)\b", re.IGNORECASE)
 
 _AMOUNT_STRONG = (
     "уточнённая сумма",
@@ -81,6 +79,42 @@ _TREATMENT_STRONG = (
     "для целей расчета ковенант",
     "exclude from covenant",
     "include in covenant",
+)
+
+_GROUP_METRIC_STRONG = (
+    "group capex",
+    "group debt",
+    "group ebitda",
+    "consolidated capex",
+    "consolidated debt",
+    "consolidated ebitda",
+    "групповой capex",
+    "долг группы",
+    "ebitda группы",
+    "консолидированную ebitda",
+    "консолидированная ebitda",
+    "консолидированный общий долг",
+    "консолидированный долг",
+    "общий долг группы",
+)
+
+_CONTINGENT_STRONG = (
+    "guarantee outstanding",
+    "guarantees of",
+    "indemnity of",
+    "contingent liability of",
+    "сумма гарантии",
+    "гарантийные обязательства",
+    "financial guarantee of",
+    "outstanding guarantee of",
+)
+
+_SCHEDULED_PRINCIPAL_STRONG = (
+    "scheduled principal",
+    "principal repayment",
+    "principal repayments",
+    "погашение основного долга",
+    "погашения основного долга",
 )
 
 _RECLASS_CUES = (
@@ -134,20 +168,37 @@ def _doc_corpus(
 
 
 def _has_strong_cues(
-    corpus: str, cues: Sequence[str], patterns: Sequence[re.Pattern[str]] = ()
+    corpus: str,
+    cues: Sequence[str],
+    patterns: Sequence[re.Pattern[str]] = (),
+    *,
+    ledger_txn_ids: Collection[str] | None = None,
+    allow_txn_foreign_fx: bool = False,
 ) -> bool:
     if not corpus.strip():
         return False
     lowered = corpus.casefold()
     if any(cue.casefold() in lowered for cue in cues if cue):
         return True
-    return any(p.search(corpus) for p in patterns)
+    if any(p.search(corpus) for p in patterns):
+        return True
+    return bool(
+        allow_txn_foreign_fx
+        and txn_near_pattern(
+            corpus,
+            ledger_txn_ids,
+            tail_pattern=_FX_TXN_FOREIGN_TAIL,
+            max_gap=200,
+        )
+    )
 
 
 def derive_fact_requirements(
     definitions: tuple[CovenantDefinition, ...],
     decisions: tuple[AuthorityDecision, ...],
     documents: tuple[CanonicalDocument, ...] | None = None,
+    *,
+    ledger_txn_ids: Collection[str] | None = None,
 ) -> tuple[FactRequirement, ...]:
     """
     Two-phase demand-driven requirements.
@@ -387,7 +438,13 @@ def derive_fact_requirements(
         )
         corpus = _doc_corpus(docs, fin_docs) if fin_docs else ""
 
-        if corpus and _has_strong_cues(corpus, _FX_EVENT_CUES, _FX_EVENT_PATTERNS):
+        if corpus and _has_strong_cues(
+            corpus,
+            _FX_EVENT_CUES,
+            _FX_EVENT_PATTERNS,
+            ledger_txn_ids=ledger_txn_ids,
+            allow_txn_foreign_fx=True,
+        ):
             add(
                 kind=FactKind.FX_RATE,
                 derivation=DerivationKind.SOURCE_TRIGGERED_CONDITIONAL,
@@ -431,6 +488,64 @@ def derive_fact_requirements(
                 cues=(*_TREATMENT_STRONG, "TXN-"),
                 strong=_TREATMENT_STRONG,
                 mods=reclass_mods,
+            )
+
+        group_docs = _authoritative_doc_ids(
+            decisions,
+            scenario_id=scenario_id,
+            domains=(
+                AuthorityDomain.GROUP_STRUCTURE,
+                AuthorityDomain.FINANCIAL_ADJUSTMENTS,
+            ),
+        )
+        group_corpus = _doc_corpus(docs, group_docs) if group_docs else ""
+        metric_corpus = group_corpus or corpus
+        if metric_corpus and _has_strong_cues(metric_corpus, _GROUP_METRIC_STRONG):
+            add(
+                kind=FactKind.GROUP_FINANCIAL_METRIC,
+                derivation=DerivationKind.SOURCE_TRIGGERED_CONDITIONAL,
+                domains=(AuthorityDomain.GROUP_STRUCTURE, AuthorityDomain.FINANCIAL_ADJUSTMENTS),
+                reason="SOURCE_GROUP_FINANCIAL_METRIC_CUE",
+                trigger="group_metric_cue_in_winning_doc",
+                cues=_GROUP_METRIC_STRONG,
+                strong=_GROUP_METRIC_STRONG,
+            )
+            if "group capex" in metric_corpus.casefold() or "consolidated capex" in (
+                metric_corpus.casefold()
+            ):
+                add(
+                    kind=FactKind.GROUP_CAPEX,
+                    derivation=DerivationKind.SOURCE_TRIGGERED_CONDITIONAL,
+                    domains=(
+                        AuthorityDomain.GROUP_STRUCTURE,
+                        AuthorityDomain.FINANCIAL_ADJUSTMENTS,
+                    ),
+                    reason="SOURCE_GROUP_CAPEX_CUE",
+                    trigger="group_capex_cue_in_winning_doc",
+                    cues=("group capex", "consolidated capex", "additions"),
+                    strong=("group capex", "consolidated capex"),
+                )
+
+        if corpus and _has_strong_cues(corpus, _CONTINGENT_STRONG):
+            add(
+                kind=FactKind.CONTINGENT_OBLIGATION,
+                derivation=DerivationKind.SOURCE_TRIGGERED_CONDITIONAL,
+                domains=(AuthorityDomain.FINANCIAL_ADJUSTMENTS, AuthorityDomain.TREASURY_FACTS),
+                reason="SOURCE_CONTINGENT_OBLIGATION_CUE",
+                trigger="guarantee_or_contingent_amount_cue",
+                cues=_CONTINGENT_STRONG,
+                strong=_CONTINGENT_STRONG,
+            )
+
+        if corpus and _has_strong_cues(corpus, _SCHEDULED_PRINCIPAL_STRONG):
+            add(
+                kind=FactKind.SCHEDULED_PRINCIPAL,
+                derivation=DerivationKind.SOURCE_TRIGGERED_CONDITIONAL,
+                domains=(AuthorityDomain.FINANCIAL_ADJUSTMENTS, AuthorityDomain.TREASURY_FACTS),
+                reason="SOURCE_SCHEDULED_PRINCIPAL_CUE",
+                trigger="scheduled_principal_cue_in_winning_doc",
+                cues=_SCHEDULED_PRINCIPAL_STRONG,
+                strong=_SCHEDULED_PRINCIPAL_STRONG,
             )
 
     requirements.sort(
