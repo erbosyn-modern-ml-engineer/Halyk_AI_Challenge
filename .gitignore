@@ -52,3 +52,12 @@ work/
 # Local competition dataset extracts (never commit)
 agentic-bank-public/
 __MACOSX/
+.env
+.env.*
+!.env.example
+agentic-bank-hidden/
+work/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
