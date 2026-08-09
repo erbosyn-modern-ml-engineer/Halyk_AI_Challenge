@@ -1,0 +1,35 @@
+name: private-hardening-apply
+
+on:
+  push:
+    branches:
+      - stage-11/private-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: stage-11/private-hardening
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply hardening transforms
+        run: python scripts/apply_private_hardening.py
+      - name: Commit transformed sources
+        run: |
+          if git diff --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src
+          git commit -m "fix: harden fact and transaction integrity"
+          git push origin HEAD:stage-11/private-hardening
