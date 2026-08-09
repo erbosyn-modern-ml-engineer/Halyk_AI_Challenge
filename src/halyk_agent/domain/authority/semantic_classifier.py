@@ -141,7 +141,10 @@ def classify_unresolved_documents(
             max_tokens=700,
         )
         model_calls += int(response.model_called)
-        if response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT} or response.payload is None:
+        if (
+            response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT}
+            or response.payload is None
+        ):
             diagnostics.append(
                 {
                     "document_id": document.document_id,
@@ -190,7 +193,12 @@ def classify_unresolved_documents(
                 }
             )
             continue
-        if needs_type and doc_type is DocumentType.UNKNOWN and needs_lifecycle and lifecycle is DocumentLifecycleStatus.UNKNOWN:
+        if (
+            needs_type
+            and doc_type is DocumentType.UNKNOWN
+            and needs_lifecycle
+            and lifecycle is DocumentLifecycleStatus.UNKNOWN
+        ):
             diagnostics.append(
                 {
                     "document_id": document.document_id,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -73,7 +72,10 @@ def _request_candidate(
         request_payload=payload,
         max_tokens=512,
     )
-    if response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT} or response.payload is None:
+    if (
+        response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT}
+        or response.payload is None
+    ):
         return None, response.reason_code, response.model_called
     try:
         candidate = _CategoryCandidate.model_validate(response.payload)

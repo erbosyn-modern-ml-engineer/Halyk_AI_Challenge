@@ -23,8 +23,8 @@ from halyk_agent.config import Settings, get_settings
 from halyk_agent.domain.authority.classify import classify_document
 from halyk_agent.domain.authority.engine import run_authority
 from halyk_agent.domain.authority.metadata import extract_metadata_bundle
-from halyk_agent.domain.authority.semantic_classifier import classify_unresolved_documents
 from halyk_agent.domain.authority.models import AuthorityReport, AuthorityStatus
+from halyk_agent.domain.authority.semantic_classifier import classify_unresolved_documents
 from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 
 

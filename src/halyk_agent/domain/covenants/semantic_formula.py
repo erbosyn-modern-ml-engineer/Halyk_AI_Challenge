@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -36,8 +35,10 @@ _SYSTEM = (
     "You are a bounded legal-financial semantic parser. The deterministic covenant parser "
     "could not represent the formula. Return only a candidate expression AST using the supplied "
     "node kinds and metric categories. Do not decide compliance, do not calculate actual values, "
-    "do not invent transaction data, FX, dates, thresholds, comparator semantics, or missing facts. "
-    "source_quote must be an exact contiguous quote copied from the clause that supports the metric. "
+    "do not invent transaction data, FX, dates, thresholds, comparator semantics, "
+    "or missing facts. "
+    "source_quote must be an exact contiguous quote copied from the clause that "
+    "supports the metric. "
     "If the metric cannot be represented exactly with the supplied DSL, return LOW confidence."
 )
 
@@ -99,7 +100,10 @@ def propose_formula(
         request_payload=request,
         max_tokens=1400,
     )
-    if response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT} or response.payload is None:
+    if (
+        response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT}
+        or response.payload is None
+    ):
         return SemanticFormulaResult(
             formula=None,
             diagnostic={

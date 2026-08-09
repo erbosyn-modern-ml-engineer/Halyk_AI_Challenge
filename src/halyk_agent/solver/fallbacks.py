@@ -429,9 +429,7 @@ def build_competitive_fallbacks(
     if rate is not None:
         target_scenarios = sorted({scenario for scenario, _clause in target_keys})
         for scenario_id in target_scenarios:
-            working_inputs = _convert_eur_inputs(
-                working_inputs, rate=rate, scenario_id=scenario_id
-            )
+            working_inputs = _convert_eur_inputs(working_inputs, rate=rate, scenario_id=scenario_id)
         diagnostics.append(
             {
                 "strategy": "EUR_USD_SETTLEMENT_RATE_COMPETITIVE_FALLBACK",

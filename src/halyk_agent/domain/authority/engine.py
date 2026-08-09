@@ -180,8 +180,7 @@ def run_authority(
             )
             type_safe = type_unresolved or override.document_type is classification.document_type
             lifecycle_safe = (
-                lifecycle_unresolved
-                or override.lifecycle_status is classification.lifecycle_status
+                lifecycle_unresolved or override.lifecycle_status is classification.lifecycle_status
             )
             if (type_unresolved or lifecycle_unresolved) and type_safe and lifecycle_safe:
                 evidence_ids = tuple(

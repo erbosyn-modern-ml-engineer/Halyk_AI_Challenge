@@ -183,7 +183,14 @@ class SemanticJsonGateway:
                 )
                 self._cache_put(key, result)
                 return result
-            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (
+                httpx.HTTPError,
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
                 last_reason = f"PROVIDER_OR_JSON_ERROR:{exc.__class__.__name__}"
 
         return SemanticJsonResult(
