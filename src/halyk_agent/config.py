@@ -69,6 +69,7 @@ class Settings(BaseSettings):
 
     # Stage 5E structured model gateway (prefix HALYK_)
     # Primary runtime: DeepSeek V4 Flash. xAI/Anthropic are experimental only.
+    semantic_fallback_enabled: bool = Field(default=False)
     llm_primary_provider: str = Field(default="deepseek")
     llm_primary_model: str = Field(default="deepseek-v4-flash")
     llm_escalation_provider: str = Field(default="deepseek")

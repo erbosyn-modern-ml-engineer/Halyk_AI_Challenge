@@ -485,6 +485,7 @@ def run_fact_extraction(
     decisions: tuple[AuthorityDecision, ...],
     documents: tuple[CanonicalDocument, ...],
     ledger_rows: tuple[LedgerRow, ...] | None = None,
+    ledger_txn_scenarios: Mapping[str, str | None] | None = None,
     allow_network_models: bool = False,
     model_gateway: StructuredModelGateway | None = None,
     authority_manifest_hash: str = "",
@@ -542,6 +543,7 @@ def run_fact_extraction(
                         authoritative_doc_ids=winning,
                         requirement=requirement,
                         ledger_txn_ids=txn_ids,
+                        ledger_txn_scenarios=ledger_txn_scenarios,
                     )
                     record = _candidate_to_record(
                         cand, status=status, span=span, reason_code=reason
@@ -730,6 +732,7 @@ def run_fact_extraction(
                         authoritative_doc_ids=winning,
                         requirement=requirement,
                         ledger_txn_ids=txn_ids,
+                        ledger_txn_scenarios=ledger_txn_scenarios,
                         window=window,
                     )
                     record = _candidate_to_record(
@@ -792,6 +795,7 @@ def run_fact_extraction(
                                         authoritative_doc_ids=winning,
                                         requirement=requirement,
                                         ledger_txn_ids=txn_ids,
+                                        ledger_txn_scenarios=ledger_txn_scenarios,
                                         window=window,
                                     )
                                     rec2 = _candidate_to_record(

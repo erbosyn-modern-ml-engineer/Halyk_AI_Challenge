@@ -18,6 +18,7 @@ from halyk_agent.adapters.facts.io import (
     write_fact_outputs,
 )
 from halyk_agent.adapters.routing.io import load_ledger_csv
+from halyk_agent.adapters.transactions.io import load_transaction_links
 from halyk_agent.app.ocr import load_parsed_documents
 from halyk_agent.config import Settings, get_settings
 from halyk_agent.domain.fact_extraction.engine import run_fact_extraction
@@ -123,6 +124,7 @@ def facts_from_paths(
     parsed_dir: Path,
     output_dir: Path,
     ledger_path: Path | None = None,
+    routing_dir: Path | None = None,
     overwrite: bool = False,
     allow_network_models: bool = False,
     settings: Settings | None = None,
@@ -172,11 +174,23 @@ def facts_from_paths(
         raise FactServiceError(str(exc), code="FACT_INPUT") from exc
 
     ledger_rows: tuple[LedgerRow, ...] | None = None
+    ledger_txn_scenarios: dict[str, str | None] | None = None
     if ledger_path is not None:
         ledger_path = ledger_path.resolve()
         if not ledger_path.is_file():
             raise FactServiceError(f"ledger missing: {ledger_path}", code="MISSING_LEDGER")
         ledger_rows = load_ledger_csv(ledger_path)
+
+    if routing_dir is not None:
+        routing_dir = routing_dir.resolve()
+        assert_no_gt_access(routing_dir)
+        links_path = routing_dir / "transaction_links.jsonl"
+        if not links_path.is_file():
+            raise FactServiceError(
+                f"transaction links missing: {links_path}", code="MISSING_ROUTING_LINKS"
+            )
+        links = load_transaction_links(links_path)
+        ledger_txn_scenarios = {link.txn_id: link.scenario_id for link in links}
 
     cache_dir = output_dir / ".model_cache" if allow_network_models else None
     gateway = _build_gateway(
@@ -190,6 +204,7 @@ def facts_from_paths(
         decisions=decisions,
         documents=tuple(documents),
         ledger_rows=ledger_rows,
+        ledger_txn_scenarios=ledger_txn_scenarios,
         allow_network_models=allow_network_models,
         model_gateway=gateway,
         authority_manifest_hash=authority_hash,

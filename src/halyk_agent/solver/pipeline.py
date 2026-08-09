@@ -358,8 +358,9 @@ def run_competition_pipeline(
             parsed_dir=parsed_dir,
             output_dir=facts_dir,
             ledger_path=materialized.ledger_path,
+            routing_dir=routing_dir,
             overwrite=False,
-            allow_network_models=False,
+            allow_network_models=resolved_settings.semantic_fallback_enabled,
             settings=resolved_settings,
         )
     except Exception as exc:

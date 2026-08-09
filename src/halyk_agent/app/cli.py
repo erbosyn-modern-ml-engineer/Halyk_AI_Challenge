@@ -287,6 +287,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional ledger CSV for TXN id semantic checks",
     )
+    facts_extract.add_argument(
+        "--routing",
+        type=Path,
+        default=None,
+        help="Stage 5B routing output for TXN-to-scenario validation",
+    )
     facts_extract.add_argument("--output", required=True, type=Path)
     facts_extract.add_argument("--overwrite", action="store_true")
     facts_extract.add_argument(
@@ -736,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
                     parsed_dir=args.parsed,
                     output_dir=args.output,
                     ledger_path=args.ledger,
+                    routing_dir=args.routing,
                     overwrite=bool(args.overwrite),
                     allow_network_models=bool(args.allow_network_models),
                     settings=get_settings(),

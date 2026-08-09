@@ -64,9 +64,16 @@ def _threshold_for_scenario(
     ]
     if not hits:
         return None, None
-    payload = hits[0].payload
-    assert isinstance(payload, RelatedPartyThresholdPayload)
-    return payload.threshold_percent, hits[0].fact_id
+    values = {
+        fact.payload.threshold_percent
+        for fact in hits
+        if isinstance(fact.payload, RelatedPartyThresholdPayload)
+    }
+    if len(values) != 1:
+        return None, None
+    value = next(iter(values))
+    fact_id = sorted(fact.fact_id for fact in hits)[0]
+    return value, fact_id
 
 
 def scenario_has_damaged_ownership(facts: tuple[FactRecord, ...], scenario_id: str) -> bool:
