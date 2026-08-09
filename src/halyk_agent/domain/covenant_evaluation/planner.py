@@ -39,6 +39,8 @@ class EvaluationPlanningError(ValueError):
         self.code = code
 
 
+_SET_NODE_KINDS = frozenset({EvaluationNodeKind.SELECT, EvaluationNodeKind.MATERIALITY_FILTER})
+
 _UPSTREAM_CONSUMED_MODIFIERS = {
     CovenantModifierKind.AUDITOR_RECLASSIFICATION_INCLUDE,
     CovenantModifierKind.AUDITOR_RECLASSIFICATION_EXCLUDE,
@@ -219,6 +221,9 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
 
         if isinstance(expr, Sum):
             dependency = plan_expr(expr.of)
+            # ``Sum(TransactionSet)`` and a bare ``TransactionSet`` in a numeric
+            # position denote the same money value; reuse the identical SUM node
+            # so the two spellings never plan to different graphs.
             current = add_node(
                 EvaluationNode(
                     node_id=node_id(EvaluationNodeKind.SUM, dependency),
@@ -238,7 +243,7 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                 )
             )
         elif isinstance(expr, Min):
-            dependencies = tuple(plan_expr(arg) for arg in expr.args)
+            dependencies = tuple(plan_numeric(arg) for arg in expr.args)
             current = add_node(
                 EvaluationNode(
                     node_id=node_id(EvaluationNodeKind.MIN, *dependencies),
@@ -248,7 +253,7 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                 )
             )
         elif isinstance(expr, Max):
-            dependencies = tuple(plan_expr(arg) for arg in expr.args)
+            dependencies = tuple(plan_numeric(arg) for arg in expr.args)
             current = add_node(
                 EvaluationNode(
                     node_id=node_id(EvaluationNodeKind.MAX, *dependencies),
@@ -258,8 +263,8 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                 )
             )
         elif isinstance(expr, Add):
-            left = plan_expr(expr.left)
-            right = plan_expr(expr.right)
+            left = plan_numeric(expr.left)
+            right = plan_numeric(expr.right)
             current = add_node(
                 EvaluationNode(
                     node_id=node_id(EvaluationNodeKind.ADD, left, right),
@@ -269,8 +274,8 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                 )
             )
         elif isinstance(expr, Subtract):
-            left = plan_expr(expr.left)
-            right = plan_expr(expr.right)
+            left = plan_numeric(expr.left)
+            right = plan_numeric(expr.right)
             current = add_node(
                 EvaluationNode(
                     node_id=node_id(EvaluationNodeKind.SUBTRACT, left, right),
@@ -280,8 +285,8 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                 )
             )
         elif isinstance(expr, Multiply):
-            left = plan_expr(expr.left)
-            right = plan_expr(expr.right)
+            left = plan_numeric(expr.left)
+            right = plan_numeric(expr.right)
             current = add_node(
                 EvaluationNode(
                     node_id=node_id(EvaluationNodeKind.MULTIPLY, left, right),
@@ -291,8 +296,8 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
                 )
             )
         elif isinstance(expr, Divide):
-            numerator = plan_expr(expr.numerator)
-            denominator = plan_expr(expr.denominator)
+            numerator = plan_numeric(expr.numerator)
+            denominator = plan_numeric(expr.denominator)
             current = add_node(
                 EvaluationNode(
                     node_id=node_id(EvaluationNodeKind.DIVIDE, numerator, denominator),
@@ -326,13 +331,33 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
         expression_cache[cache_key] = current
         return current
 
-    root = plan_expr(definition.metric)
+    def plan_numeric(expr: Expr) -> str:
+        """Plan an expression that must yield a number.
+
+        The AST types a bare ``TransactionSet`` as MONEY, so a set appearing as an
+        arithmetic or comparison operand means the sum of that set. The planner
+        materialises that implied SUM instead of handing a set node to arithmetic,
+        which keeps both spellings of the same metric on one node.
+        """
+        node = plan_expr(expr)
+        if nodes[node].kind in _SET_NODE_KINDS:
+            node = add_node(
+                EvaluationNode(
+                    node_id=node_id(EvaluationNodeKind.SUM, node),
+                    kind=EvaluationNodeKind.SUM,
+                    dependencies=(node,),
+                    quantity_type=QuantityType.MONEY,
+                )
+            )
+        return node
+
+    root = plan_numeric(definition.metric)
 
     activation_root: str | None = None
     activation_comparator = None
     activation_threshold = None
     if definition.activation_condition is not None:
-        activation_root = plan_expr(definition.activation_condition.metric)
+        activation_root = plan_numeric(definition.activation_condition.metric)
         activation_comparator = definition.activation_condition.comparator
         activation_threshold = definition.activation_condition.threshold
 
@@ -382,7 +407,9 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
 
 def plan_definitions_partial(
     definitions: Iterable[CovenantDefinition],
-) -> tuple[tuple[EvaluationPlan, ...], tuple[tuple[CovenantDefinition, EvaluationPlanningError], ...]]:
+) -> tuple[
+    tuple[EvaluationPlan, ...], tuple[tuple[CovenantDefinition, EvaluationPlanningError], ...]
+]:
     """Plan what can be planned; return per-cell blockers instead of aborting.
 
     One covenant the evaluator cannot yet execute must not suppress every other
