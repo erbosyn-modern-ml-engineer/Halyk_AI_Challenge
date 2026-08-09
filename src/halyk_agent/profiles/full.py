@@ -14,9 +14,9 @@ from halyk_agent.profiles.types import (
 
 FULL_PROFILE = ExecutionProfile(
     name=ProfileName.FULL,
-    storage_backend=StorageBackend.LOCAL,
-    job_backend=JobBackend.ASYNCIO,
+    storage_backend=StorageBackend.POSTGRES,
+    job_backend=JobBackend.REDIS_LEASE,
     parser_mode=ParserMode.QUALITY,
-    retrieval_mode=RetrievalMode.LOCAL,
+    retrieval_mode=RetrievalMode.POSTGRES_HYBRID,
     evidence_depth=EvidenceDepth.DEEP,
 )
