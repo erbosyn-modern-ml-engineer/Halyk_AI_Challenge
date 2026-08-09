@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -22,8 +23,10 @@ from halyk_agent.adapters.transactions.io import (
     verify_fact_artifact_hashes,
     write_taxonomy_outputs,
 )
+from halyk_agent.config import Settings, get_settings
 from halyk_agent.domain.transaction_taxonomy.engine import run_transaction_taxonomy
 from halyk_agent.domain.transaction_taxonomy.models import TaxonomyReport
+from halyk_agent.domain.transaction_taxonomy.semantic_classifier import classify_unresolved_rows
 
 
 class TransactionServiceError(Exception):
@@ -98,6 +101,7 @@ def transactions_from_paths(
     ledger_path: Path,
     output_dir: Path,
     overwrite: bool = False,
+    settings: Settings | None = None,
 ) -> TaxonomyReport:
     for path in (routing_dir, covenants_dir, facts_dir, ledger_path, output_dir):
         assert_no_gt_access(path)
@@ -182,6 +186,9 @@ def transactions_from_paths(
             code="FACTS_SCENARIO_MISMATCH",
         )
 
+    resolved_settings = settings or get_settings()
+    semantic = classify_unresolved_rows(ledger_rows, links, settings=resolved_settings)
+
     report = run_transaction_taxonomy(
         ledger_rows=ledger_rows,
         transaction_links=links,
@@ -192,6 +199,8 @@ def transactions_from_paths(
         covenant_manifest_hash=manifest_file_hash(covenant_manifest_path),
         facts_manifest_hash=manifest_file_hash(facts_manifest_path),
         fact_requirement_results=requirement_results,
+        classification_overrides=semantic.overrides,
+        semantic_model_calls=semantic.model_calls,
     )
 
     stage_parent = output_dir.parent
@@ -199,6 +208,13 @@ def transactions_from_paths(
     stage_dir = Path(tempfile.mkdtemp(prefix=".txn-stage-", dir=str(stage_parent)))
     try:
         write_taxonomy_outputs(report, stage_dir)
+        semantic_path = stage_dir / "semantic_classification.jsonl"
+        semantic_text = "\n".join(
+            json.dumps(item, ensure_ascii=False, sort_keys=True) for item in semantic.diagnostics
+        )
+        if semantic_text:
+            semantic_text += "\n"
+        semantic_path.write_text(semantic_text, encoding="utf-8", newline="\n")
         if output_dir.exists() and any(output_dir.iterdir()):
             _replace_published_outputs(stage_dir, output_dir)
         else:

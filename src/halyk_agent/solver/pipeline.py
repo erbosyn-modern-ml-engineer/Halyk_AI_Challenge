@@ -374,6 +374,7 @@ def run_competition_pipeline(
             ledger_path=materialized.ledger_path,
             output_dir=transactions_dir,
             overwrite=False,
+            settings=resolved_settings,
         )
     except Exception as exc:
         raise CompetitionPipelineError(str(exc), stage="transactions") from exc

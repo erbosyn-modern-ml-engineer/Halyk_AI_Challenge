@@ -29,6 +29,7 @@ class ClassificationStatus(StrEnum):
 class ClassificationMethod(StrEnum):
     LEDGER_DESCRIPTION_RULE = "LEDGER_DESCRIPTION_RULE"
     AUTHORITATIVE_RECLASSIFICATION = "AUTHORITATIVE_RECLASSIFICATION"
+    SEMANTIC_FALLBACK = "SEMANTIC_FALLBACK"
     UNRESOLVED = "UNRESOLVED"
     CONFLICT = "CONFLICT"
     ROUTING_NOISE = "ROUTING_NOISE"
@@ -399,6 +400,8 @@ class TaxonomyManifest(BaseModel):
     related_party_true_count: int = Field(ge=0)
     related_party_false_count: int = Field(ge=0)
     related_party_unknown_count: int = Field(ge=0)
+    semantic_model_calls: int = Field(ge=0, default=0)
+    semantic_fallback_count: int = Field(ge=0, default=0)
     category_counts: dict[str, int] = Field(default_factory=dict)
     membership_counts: dict[str, int] = Field(default_factory=dict)
     method_counts: dict[str, int] = Field(default_factory=dict)

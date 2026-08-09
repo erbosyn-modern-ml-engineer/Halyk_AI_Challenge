@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -210,6 +211,8 @@ def run_transaction_taxonomy(
     covenant_manifest_hash: str,
     facts_manifest_hash: str,
     fact_requirement_results: tuple[FactRequirementResult, ...] | None = None,
+    classification_overrides: Mapping[str, MetricCategory] | None = None,
+    semantic_model_calls: int = 0,
 ) -> TaxonomyReport:
     """
     Deterministic Stage 5F pipeline.
@@ -297,13 +300,26 @@ def run_transaction_taxonomy(
             continue
 
         hit = classify_description(row.description)
+        semantic_override = (classification_overrides or {}).get(row.txn_id)
+        if hit.status == "UNRESOLVED" and semantic_override is not None:
+            from halyk_agent.domain.transaction_taxonomy.classify import ClassificationHit
+
+            hit = ClassificationHit(
+                status="CLASSIFIED",
+                category=semantic_override,
+                rule="DEEPSEEK_SEMANTIC_FALLBACK",
+            )
         status: ClassificationStatus
         method: ClassificationMethod
         reasons: list[UnresolvedReason] = list(amount_reasons)
         conflict_ids: list[str] = []
         if hit.status == "CLASSIFIED":
             status = ClassificationStatus.CLASSIFIED
-            method = ClassificationMethod.LEDGER_DESCRIPTION_RULE
+            method = (
+                ClassificationMethod.SEMANTIC_FALLBACK
+                if hit.rule == "DEEPSEEK_SEMANTIC_FALLBACK"
+                else ClassificationMethod.LEDGER_DESCRIPTION_RULE
+            )
         elif hit.status == "CONFLICT":
             status = ClassificationStatus.CONFLICT
             method = ClassificationMethod.CONFLICT
@@ -1617,6 +1633,12 @@ def run_transaction_taxonomy(
         related_party_true_count=rp_true,
         related_party_false_count=rp_false,
         related_party_unknown_count=rp_unknown,
+        semantic_model_calls=semantic_model_calls,
+        semantic_fallback_count=sum(
+            1
+            for c in classified_rows
+            if c.classification_method is ClassificationMethod.SEMANTIC_FALLBACK
+        ),
         category_counts=dict(sorted(category_counts.items())),
         membership_counts=dict(sorted(membership_counts.items())),
         method_counts=dict(sorted(method_counts.items())),
