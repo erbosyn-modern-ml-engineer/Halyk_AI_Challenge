@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from halyk_agent.domain.authority.classify import classify_document
+from halyk_agent.domain.authority.classify import classify_document, domains_for_document
 from halyk_agent.domain.authority.constants import (
     AUTHORITY_ALGORITHM_VERSION,
     AUTHORITY_RULE_VERSION,
@@ -21,11 +21,14 @@ from halyk_agent.domain.authority.models import (
     AuthorityManifest,
     AuthorityReport,
     AuthorityStatus,
+    ClassificationConfidence,
     DocumentClassification,
+    DocumentLifecycleStatus,
     DocumentMetadata,
     DocumentType,
 )
 from halyk_agent.domain.authority.resolve import resolve_authority
+from halyk_agent.domain.authority.semantic_classifier import SemanticDocumentOverride
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.ids import deterministic_id, sha256_text
 from halyk_agent.domain.parsing import CanonicalDocument
@@ -137,6 +140,7 @@ def run_authority(
     routing_manifest: RoutingManifest | Mapping[str, Any],
     identity_evidence_hash: str = "",
     parsed_input_identity: Mapping[str, Any] | None = None,
+    semantic_overrides: Mapping[str, SemanticDocumentOverride] | None = None,
 ) -> AuthorityReport:
     """
     Classify routed documents and resolve per-scenario authority domains.
@@ -166,8 +170,39 @@ def run_authority(
         all_spans.extend(meta_bundle.spans)
         link = links_by_doc.get(document.document_id)
         bundle = classify_document(document, metadata=meta, link=link)
-        classifications.append(bundle.classification)
-        all_spans.extend(bundle.spans)
+        classification = bundle.classification
+        spans = list(bundle.spans)
+        override = (semantic_overrides or {}).get(document.document_id)
+        if override is not None:
+            type_unresolved = classification.document_type is DocumentType.UNKNOWN
+            lifecycle_unresolved = (
+                classification.lifecycle_status is DocumentLifecycleStatus.UNKNOWN
+            )
+            type_safe = type_unresolved or override.document_type is classification.document_type
+            lifecycle_safe = (
+                lifecycle_unresolved
+                or override.lifecycle_status is classification.lifecycle_status
+            )
+            if (type_unresolved or lifecycle_unresolved) and type_safe and lifecycle_safe:
+                evidence_ids = tuple(
+                    dict.fromkeys((*classification.evidence_span_ids, override.evidence_span.id))
+                )
+                classification = classification.model_copy(
+                    update={
+                        "document_type": override.document_type,
+                        "lifecycle_status": override.lifecycle_status,
+                        "authority_domains": domains_for_document(
+                            override.document_type, override.lifecycle_status
+                        ),
+                        "confidence": ClassificationConfidence.DERIVED,
+                        "rule_id": "DEEPSEEK_SEMANTIC_FALLBACK",
+                        "reason_code": "SEMANTIC_ENUM_WITH_EXACT_SOURCE_QUOTE",
+                        "evidence_span_ids": evidence_ids,
+                    }
+                )
+                spans.append(override.evidence_span)
+        classifications.append(classification)
+        all_spans.extend(spans)
 
     metadata_by_id = {m.document_id: m for m in metadata_list}
 

@@ -28,6 +28,8 @@ from halyk_agent.domain.datasets import (
     DatasetManifest,
 )
 from halyk_agent.domain.ids import sha256_text
+from halyk_agent.domain.models_gateway.budget import ExternalAttemptBudget
+from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 from halyk_agent.domain.transaction_taxonomy.models import TaxonomyReport
 from halyk_agent.preflight.models import AllowedInputRef, SanitizedDatasetManifest
 from halyk_agent.solver.audit import RunFileAudit
@@ -244,6 +246,26 @@ def run_competition_pipeline(
         audit=audit,
     )
 
+    max_model_attempts = (
+        resolved_settings.llm_max_calls
+        if resolved_settings.llm_max_calls is not None
+        else resolved_settings.llm_max_external_attempts
+    )
+    model_budget = (
+        ExternalAttemptBudget(max_attempts=max_model_attempts)
+        if resolved_settings.semantic_fallback_enabled
+        else None
+    )
+    semantic_gateway = (
+        SemanticJsonGateway(
+            settings=resolved_settings,
+            cache_dir=workspace / ".semantic_model_cache",
+            budget=model_budget,
+        )
+        if resolved_settings.semantic_fallback_enabled
+        else None
+    )
+
     parsed_fast = workspace / "parsed_fast"
     try:
         parse_report = parse_competition_documents_parallel(
@@ -336,6 +358,8 @@ def run_competition_pipeline(
             output_dir=authority_dir,
             overwrite=False,
             strict=False,
+            settings=resolved_settings,
+            semantic_gateway=semantic_gateway,
         )
     except Exception as exc:
         raise CompetitionPipelineError(str(exc), stage="authority") from exc
@@ -347,6 +371,8 @@ def run_competition_pipeline(
             template_path=materialized.template_path,
             output_dir=covenants_dir,
             overwrite=False,
+            settings=resolved_settings,
+            semantic_gateway=semantic_gateway,
         )
     except Exception as exc:
         raise CompetitionPipelineError(str(exc), stage="covenants") from exc
@@ -362,6 +388,7 @@ def run_competition_pipeline(
             overwrite=False,
             allow_network_models=resolved_settings.semantic_fallback_enabled,
             settings=resolved_settings,
+            model_budget=model_budget,
         )
     except Exception as exc:
         raise CompetitionPipelineError(str(exc), stage="facts") from exc
@@ -375,6 +402,7 @@ def run_competition_pipeline(
             output_dir=transactions_dir,
             overwrite=False,
             settings=resolved_settings,
+            semantic_gateway=semantic_gateway,
         )
     except Exception as exc:
         raise CompetitionPipelineError(str(exc), stage="transactions") from exc

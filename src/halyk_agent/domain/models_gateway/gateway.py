@@ -80,6 +80,7 @@ class StructuredModelGateway:
     primary: StructuredExtractionProvider | None = None
     escalation: StructuredExtractionProvider | None = None
     mock: MockStructuredProvider | None = None
+    shared_budget: ExternalAttemptBudget | None = None
     _budget: ExternalAttemptBudget = field(init=False)
     _thinking_escalations: int = 0
     _records: list[ModelCallRecord] = field(default_factory=list)
@@ -88,7 +89,9 @@ class StructuredModelGateway:
     _cache: DiskExtractionCache = field(init=False)
 
     def __post_init__(self) -> None:
-        self._budget = ExternalAttemptBudget(max_attempts=self.config.max_external_attempts)
+        self._budget = self.shared_budget or ExternalAttemptBudget(
+            max_attempts=self.config.max_external_attempts
+        )
         self._cache = DiskExtractionCache(self.config.cache_dir)
         self._sem = threading.Semaphore(max(1, self.config.max_concurrency))
         if self.primary is None and self.mock is None:

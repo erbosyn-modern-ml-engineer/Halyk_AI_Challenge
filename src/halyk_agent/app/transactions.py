@@ -24,6 +24,7 @@ from halyk_agent.adapters.transactions.io import (
     write_taxonomy_outputs,
 )
 from halyk_agent.config import Settings, get_settings
+from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 from halyk_agent.domain.transaction_taxonomy.engine import run_transaction_taxonomy
 from halyk_agent.domain.transaction_taxonomy.models import TaxonomyReport
 from halyk_agent.domain.transaction_taxonomy.semantic_classifier import classify_unresolved_rows
@@ -102,6 +103,7 @@ def transactions_from_paths(
     output_dir: Path,
     overwrite: bool = False,
     settings: Settings | None = None,
+    semantic_gateway: SemanticJsonGateway | None = None,
 ) -> TaxonomyReport:
     for path in (routing_dir, covenants_dir, facts_dir, ledger_path, output_dir):
         assert_no_gt_access(path)
@@ -187,7 +189,12 @@ def transactions_from_paths(
         )
 
     resolved_settings = settings or get_settings()
-    semantic = classify_unresolved_rows(ledger_rows, links, settings=resolved_settings)
+    semantic = classify_unresolved_rows(
+        ledger_rows,
+        links,
+        settings=resolved_settings,
+        gateway=semantic_gateway,
+    )
 
     report = run_transaction_taxonomy(
         ledger_rows=ledger_rows,

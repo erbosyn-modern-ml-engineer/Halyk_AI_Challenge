@@ -217,3 +217,83 @@ def test_public_authority_compile_smoke() -> None:
     assert report.manifest.failure_count == 0
     # unused import guard
     _ = RoutingManifest
+
+
+def test_unseen_formula_uses_bounded_semantic_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from halyk_agent.config import Settings
+    from halyk_agent.domain.covenants.ast import MetricCategory, Subtract, money_sum
+    from halyk_agent.domain.covenants.formulas import FormulaMatch, match_formula
+    from halyk_agent.domain.covenants.semantic_formula import SemanticFormulaResult
+
+    clause = (
+        "Пункт 6.1 Operating contribution floor. Заёмщик обязуется поддерживать операционный "
+        "вклад за период с 2025-01-01 по 2025-12-31 на уровне не менее $100.00. "
+        "Операционный вклад определяется отдельной договорной формулой."
+    )
+    assert match_formula(clause) is None
+    doc = make_document(raw_text=clause, sha="9" * 64)
+    proposed = FormulaMatch(
+        family_id="DEEPSEEK_TYPED_AST_V1",
+        metric=Subtract(
+            left=money_sum(MetricCategory.REVENUE),
+            right=money_sum(MetricCategory.OPEX),
+        ),
+    )
+
+    def fake_propose(*args: object, **kwargs: object) -> SemanticFormulaResult:
+        _ = args, kwargs
+        return SemanticFormulaResult(
+            formula=proposed,
+            diagnostic={"status": "ACCEPTED"},
+            model_called=True,
+        )
+
+    monkeypatch.setattr("halyk_agent.domain.covenants.compiler.propose_formula", fake_propose)
+    definition, failure, spans = compile_covenant_cell(
+        scenario_id="SX",
+        clause_id="6.1",
+        document=doc,
+        settings=Settings(semantic_fallback_enabled=True),
+    )
+    assert failure is None
+    assert definition is not None
+    assert definition.family_id == "DEEPSEEK_TYPED_AST_V1"
+    assert definition.metric_quantity_type.value == "MONEY"
+    assert {selector.category for selector in definition.selectors} == {
+        MetricCategory.REVENUE,
+        MetricCategory.OPEX,
+    }
+    assert spans
+
+
+def test_semantic_formula_fallback_remains_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_propose(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        from halyk_agent.domain.covenants.semantic_formula import SemanticFormulaResult
+
+        return SemanticFormulaResult(
+            formula=None,
+            diagnostic={"reason": "DISABLED"},
+            model_called=False,
+        )
+
+    monkeypatch.setattr("halyk_agent.domain.covenants.compiler.propose_formula", fake_propose)
+    odd = (
+        "Пункт 6.1 Mystery Metric. The borrower shall maintain quantum flux below 3 bananas "
+        "for period from 2025-01-01 to 2025-12-31."
+    )
+    doc = make_document(raw_text=odd, sha="8" * 64)
+    definition, failure, _ = compile_covenant_cell(
+        scenario_id="SX",
+        clause_id="6.1",
+        document=doc,
+    )
+    assert calls == 0
+    assert definition is None
+    assert failure is not None
+    assert failure.status is CompileStatus.UNSUPPORTED_FORMULA

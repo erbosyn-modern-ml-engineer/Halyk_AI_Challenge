@@ -24,6 +24,7 @@ from halyk_agent.config import Settings, get_settings
 from halyk_agent.domain.fact_extraction.engine import run_fact_extraction
 from halyk_agent.domain.fact_extraction.models import FactExtractionReport
 from halyk_agent.domain.ids import sha256_text
+from halyk_agent.domain.models_gateway.budget import ExternalAttemptBudget
 from halyk_agent.domain.models_gateway.gateway import LlmGatewayConfig, StructuredModelGateway
 from halyk_agent.domain.models_gateway.types import ProviderName
 from halyk_agent.domain.routing.models import LedgerRow
@@ -89,6 +90,7 @@ def _build_gateway(
     allow_network_models: bool,
     settings: Settings,
     cache_dir: Path | None,
+    shared_budget: ExternalAttemptBudget | None = None,
 ) -> StructuredModelGateway | None:
     if not allow_network_models:
         return None
@@ -114,7 +116,7 @@ def _build_gateway(
         cache_dir=cache_dir,
         allow_network=True,
     )
-    return StructuredModelGateway(config=cfg)
+    return StructuredModelGateway(config=cfg, shared_budget=shared_budget)
 
 
 def facts_from_paths(
@@ -128,6 +130,7 @@ def facts_from_paths(
     overwrite: bool = False,
     allow_network_models: bool = False,
     settings: Settings | None = None,
+    model_budget: ExternalAttemptBudget | None = None,
 ) -> FactExtractionReport:
     """
     Application boundary: authority + covenants + parsed docs → fact extraction.
@@ -197,6 +200,7 @@ def facts_from_paths(
         allow_network_models=allow_network_models,
         settings=settings,
         cache_dir=cache_dir,
+        shared_budget=model_budget,
     )
 
     report = run_fact_extraction(

@@ -84,6 +84,48 @@ class CompetitiveFallbackReport:
     eur_usd_rate: Decimal | None
 
 
+def _settlement_eur_usd_rate(
+    adjustments: tuple[AdjustmentEvent, ...],
+) -> tuple[Decimal | None, tuple[str, ...]]:
+    """Derive one unique source-backed EUR/USD settlement ratio across the corpus.
+
+    This is competition-only evidence recovery, never a strict Stage 6 FX fact.
+    Conflicting ratios fail closed.
+    """
+
+    candidates: dict[Decimal, set[str]] = {}
+    for event in adjustments:
+        if event.event_type is not AdjustmentEventType.FX_SETTLEMENT_REFERENCE:
+            continue
+        source = event.after.get("source_amount")
+        settlement = event.after.get("settlement_amount")
+        if not isinstance(source, dict) or not isinstance(settlement, dict):
+            continue
+        try:
+            source_value = Decimal(str(source.get("value")))
+            settlement_value = Decimal(str(settlement.get("value")))
+        except Exception:
+            continue
+        if source_value <= 0 or settlement_value <= 0:
+            continue
+        source_currency = source.get("currency")
+        settlement_currency = settlement.get("currency")
+        if source_currency == "EUR" and settlement_currency == "USD":
+            rate = settlement_value / source_value
+        elif source_currency == "USD" and settlement_currency == "EUR":
+            rate = source_value / settlement_value
+        else:
+            continue
+        # Broad sanity guard only; the source ratio itself remains the evidence.
+        if rate <= Decimal("0.5") or rate >= Decimal("2.0"):
+            continue
+        candidates.setdefault(rate, set()).update(event.evidence_span_ids)
+    if len(candidates) != 1:
+        return None, ()
+    rate, evidence = next(iter(candidates.items()))
+    return rate, tuple(sorted(evidence))
+
+
 def _explicit_eur_usd_rate(
     adjustments: tuple[AdjustmentEvent, ...],
     *,
@@ -190,7 +232,6 @@ def _derive_group_capex(
             if not (
                 len(opening_matches) == len(dep_matches) == len(closing_matches) == 1
                 and _NO_DISPOSALS_RE.search(note)
-                and _NO_OTHER_MOVEMENTS_RE.search(note)
             ):
                 continue
 
@@ -384,20 +425,23 @@ def build_competitive_fallbacks(
 
     diagnostics: list[dict[str, Any]] = []
     working_inputs = context.calculation_inputs
-    used_rates: list[Decimal] = []
-    for scenario_id in sorted({scenario for scenario, _clause in target_keys}):
-        rate, rate_evidence = _explicit_eur_usd_rate(adjustments, scenario_id=scenario_id)
-        if rate is None:
-            continue
-        working_inputs = _convert_eur_inputs(working_inputs, rate=rate, scenario_id=scenario_id)
-        used_rates.append(rate)
+    rate, rate_evidence = _settlement_eur_usd_rate(adjustments)
+    if rate is not None:
+        target_scenarios = sorted({scenario for scenario, _clause in target_keys})
+        for scenario_id in target_scenarios:
+            working_inputs = _convert_eur_inputs(
+                working_inputs, rate=rate, scenario_id=scenario_id
+            )
         diagnostics.append(
             {
-                "strategy": "EXPLICIT_EUR_USD_RATE_FALLBACK",
-                "scenario_id": scenario_id,
+                "strategy": "EUR_USD_SETTLEMENT_RATE_COMPETITIVE_FALLBACK",
                 "rate": str(rate),
                 "source_evidence_span_ids": list(rate_evidence),
-                "scope": "same-scenario unresolved EUR inputs only",
+                "scope": "unresolved-scenario EUR inputs only",
+                "assumption": (
+                    "competition-only reuse of the sole source-backed EUR/USD settlement ratio; "
+                    "strict Stage 6 intentionally does not promote it to an FX fact"
+                ),
             }
         )
 
@@ -460,5 +504,5 @@ def build_competitive_fallbacks(
         results=usable,
         context=fallback_context,
         diagnostics=tuple(diagnostics),
-        eur_usd_rate=(used_rates[0] if len(set(used_rates)) == 1 and used_rates else None),
+        eur_usd_rate=rate,
     )

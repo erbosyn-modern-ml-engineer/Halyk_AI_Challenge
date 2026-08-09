@@ -180,71 +180,6 @@ _STRONG_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
     ),
 )
 
-_MULTILINGUAL_RULES: tuple[tuple[str, MetricCategory, re.Pattern[str]], ...] = (
-    (
-        "LABOR_RU_KZ",
-        MetricCategory.LABOR,
-        re.compile(r"заработн\w*\s+плат|зарплат|оплат\w*\s+труд|жалақ|еңбекақ", re.IGNORECASE),
-    ),
-    (
-        "RENT_RU_KZ",
-        MetricCategory.RENT,
-        re.compile(r"аренд|арендн\w*\s+плат|жалға\s+алу|жалдау", re.IGNORECASE),
-    ),
-    (
-        "TAX_RU_KZ",
-        MetricCategory.TAXES,
-        re.compile(r"налог|кпн|ндс|салық|ққс|корпоративн\w*\s+подоход", re.IGNORECASE),
-    ),
-    (
-        "UTILITIES_RU_KZ",
-        MetricCategory.UTILITIES,
-        re.compile(
-            r"коммунал|электроэнерг|водоснаб|теплоснаб|электр\s+энерг|су\s+жабдық|телеком",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "REVENUE_RU_KZ",
-        MetricCategory.REVENUE,
-        re.compile(r"выручк|доход\w*\s+от\s+реализац|түсім|сатудан\s+түскен", re.IGNORECASE),
-    ),
-    (
-        "CAPEX_RU_KZ",
-        MetricCategory.CAPEX,
-        re.compile(
-            r"капитальн\w*\s+затрат|приобретени\w*\s+(?:оборудован|основн)|"
-            r"жабдық\w*\s+сатып|негізгі\s+құрал",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "OPEX_RU_KZ",
-        MetricCategory.OPEX,
-        re.compile(
-            r"операционн\w*\s+расход|эксплуатационн\w*\s+расход|операциялық\s+шығын", re.IGNORECASE
-        ),
-    ),
-    (
-        "INTEREST_RU_KZ",
-        MetricCategory.INTEREST_EXPENSE,
-        re.compile(
-            r"процентн\w*\s+расход|процент\w*\s+по\s+(?:кредит|займ)|сыйақы\w*\s+шығын",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "INSURANCE_RU_KZ",
-        MetricCategory.INSURANCE_PREMIUMS,
-        re.compile(r"страхов|сақтандыру", re.IGNORECASE),
-    ),
-    (
-        "FINANCING_RU_KZ",
-        MetricCategory.FINANCING_INFLOWS,
-        re.compile(r"получен\w*\s+(?:кредит|займ)|кредитн\w*\s+транш|қаржыландыру", re.IGNORECASE),
-    ),
-)
-
 _WEAK_OPEX = (
     "OTHER_EXPENSE_WEAK",
     MetricCategory.OTHER_EXPENSE,
@@ -389,7 +324,7 @@ def classify_description(description: str) -> ClassificationHit:
             return credit_hit
 
     strong_hits: list[tuple[str, MetricCategory]] = []
-    for rule_id, category, pattern in (*_STRONG_RULES, *_MULTILINGUAL_RULES):
+    for rule_id, category, pattern in _STRONG_RULES:
         if not pattern.search(text):
             continue
         if rule_id == "REVENUE" and (_CREDIT_MARKERS.search(text) or _INTEREST_INCOME.search(text)):

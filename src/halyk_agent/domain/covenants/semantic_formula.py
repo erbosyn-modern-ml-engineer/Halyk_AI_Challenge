@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,6 +12,8 @@ from halyk_agent.config import Settings
 from halyk_agent.domain.covenants.ast import EXPR_ADAPTER, MetricCategory, infer_quantity_type
 from halyk_agent.domain.covenants.formulas import FormulaMatch
 from halyk_agent.domain.covenants.quantity import CovenantTypeError
+from halyk_agent.domain.ids import sha256_text
+from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway, SemanticJsonState
 
 
 class _FormulaCandidate(BaseModel):
@@ -47,41 +48,13 @@ def propose_formula(
     scenario_id: str,
     clause_id: str,
     settings: Settings,
+    gateway: SemanticJsonGateway | None = None,
 ) -> SemanticFormulaResult:
     """Return a typed formula only when a high-confidence exact-quote proposal validates locally."""
     if not settings.semantic_fallback_enabled:
         return SemanticFormulaResult(
             formula=None,
             diagnostic={"scenario_id": scenario_id, "clause_id": clause_id, "reason": "DISABLED"},
-            model_called=False,
-        )
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        return SemanticFormulaResult(
-            formula=None,
-            diagnostic={
-                "scenario_id": scenario_id,
-                "clause_id": clause_id,
-                "reason": "MISSING_DEEPSEEK_API_KEY",
-            },
-            model_called=False,
-        )
-    if settings.llm_primary_provider.casefold() != "deepseek":
-        return SemanticFormulaResult(
-            formula=None,
-            diagnostic={
-                "scenario_id": scenario_id,
-                "clause_id": clause_id,
-                "reason": "PRIMARY_PROVIDER_NOT_DEEPSEEK",
-            },
-            model_called=False,
-        )
-    try:
-        import httpx
-    except ImportError:
-        return SemanticFormulaResult(
-            formula=None,
-            diagnostic={"scenario_id": scenario_id, "clause_id": clause_id, "reason": "HTTPX_MISSING"},
             model_called=False,
         )
 
@@ -116,36 +89,38 @@ def propose_formula(
         "clause_text": clause_text,
         "dsl": schema_hint,
     }
-    body = {
-        "model": settings.llm_primary_model,
-        "temperature": 0.0,
-        "max_tokens": min(settings.llm_max_tokens, 1400),
-        "messages": [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
-        ],
-        "response_format": {"type": "json_object"},
-        "thinking": {"type": "disabled"},
-    }
-    try:
-        response = httpx.post(
-            "https://api.deepseek.com/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=body,
-            timeout=settings.llm_timeout_seconds,
-        )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        candidate = _FormulaCandidate.model_validate_json(content)
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
+    semantic_gateway = gateway or SemanticJsonGateway(settings=settings)
+    response = semantic_gateway.propose(
+        task_id=f"covenant-formula:{scenario_id}:{clause_id}",
+        prompt_version="covenant-semantic-formula-v1",
+        schema_version="covenant-ast-v1",
+        source_sha256=sha256_text(clause_text),
+        system_prompt=_SYSTEM,
+        request_payload=request,
+        max_tokens=1400,
+    )
+    if response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT} or response.payload is None:
         return SemanticFormulaResult(
             formula=None,
             diagnostic={
                 "scenario_id": scenario_id,
                 "clause_id": clause_id,
-                "reason": f"PROVIDER_OR_SCHEMA_ERROR:{exc.__class__.__name__}",
+                "reason": response.reason_code,
+                "gateway_state": response.state.value,
             },
-            model_called=True,
+            model_called=response.model_called,
+        )
+    try:
+        candidate = _FormulaCandidate.model_validate(response.payload)
+    except ValidationError as exc:
+        return SemanticFormulaResult(
+            formula=None,
+            diagnostic={
+                "scenario_id": scenario_id,
+                "clause_id": clause_id,
+                "reason": f"CANDIDATE_SCHEMA_INVALID:{exc.__class__.__name__}",
+            },
+            model_called=response.model_called,
         )
 
     if candidate.confidence != "HIGH":
@@ -156,7 +131,7 @@ def propose_formula(
                 "clause_id": clause_id,
                 "reason": "MODEL_NOT_HIGH_CONFIDENCE",
             },
-            model_called=True,
+            model_called=response.model_called,
         )
     if not candidate.source_quote or candidate.source_quote not in clause_text:
         return SemanticFormulaResult(
@@ -166,7 +141,7 @@ def propose_formula(
                 "clause_id": clause_id,
                 "reason": "SOURCE_QUOTE_NOT_EXACT",
             },
-            model_called=True,
+            model_called=response.model_called,
         )
     try:
         metric = EXPR_ADAPTER.validate_python(candidate.metric)
@@ -179,7 +154,7 @@ def propose_formula(
                 "clause_id": clause_id,
                 "reason": f"AST_VALIDATION_FAILED:{exc.__class__.__name__}",
             },
-            model_called=True,
+            model_called=response.model_called,
         )
 
     formula = FormulaMatch(family_id="DEEPSEEK_TYPED_AST_V1", metric=metric)

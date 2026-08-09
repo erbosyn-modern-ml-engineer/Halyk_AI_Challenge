@@ -22,6 +22,7 @@ from halyk_agent.solver.errors import SubmissionSchemaError
 from halyk_agent.solver.evidence import competition_verdict, select_causal_evidence
 from halyk_agent.solver.submission.models import CovenantCell, SubmissionDocument
 from halyk_agent.solver.submission.status_policy import (
+    SubmissionStatusPolicy,
     configured_submission_status_policy,
     resolve_submission_status,
     status_policy_manifest,
@@ -170,12 +171,18 @@ def build_final_submission(
                 )
                 continue
 
+            # Competitive fallbacks are already explicitly bounded exceptions to
+            # strict Stage 6 resolution. Never stack the optional near-threshold
+            # publication calibration on top of a fallback result.
+            effective_status_policy = (
+                SubmissionStatusPolicy.STRICT if used_fallback else status_policy
+            )
             verdict = resolve_submission_status(
                 strict_verdict=strict_verdict,
                 comparator=plan.comparator,
                 actual=result.actual,
                 threshold=plan.threshold,
-                policy=status_policy,
+                policy=effective_status_policy,
             )
             if verdict is None:
                 raise SubmissionSchemaError(

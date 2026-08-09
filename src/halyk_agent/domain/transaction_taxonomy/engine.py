@@ -65,6 +65,7 @@ from halyk_agent.domain.transaction_taxonomy.models import (
     RelatedPartyBasis,
     RelatedPartyStatus,
     SelectorReadinessStatus,
+    SignRule,
     SubsidiaryStatusKind,
     TaxonomyConflict,
     TaxonomyManifest,
@@ -619,17 +620,27 @@ def run_transaction_taxonomy(
         assert isinstance(payload, AmountCorrectionPayload)
         state = classified_mutable[tid]
         before = state["effective_amount"]
-        # Preserve sign from ledger when original negative and correction positive magnitude.
+        # Amount-correction facts usually state a positive magnitude. When the ledger
+        # source sign exists, preserve it. If the source amount is missing, recover
+        # the signed-flow direction from the already-resolved category contract.
+        # This is deterministic bookkeeping semantics, not an LLM/heuristic guess.
         corrected = payload.amount.value
         if before is not None and before < 0 and corrected > 0:
             corrected = -corrected
         elif before is None and corrected > 0:
-            state["unresolved_reasons"].append(UnresolvedReason.SIGN_DIRECTION_UNRESOLVED)
-            for f in facts:
-                _mark_fact(
-                    f, "UNUSED", "positive correction has no source-backed debit/credit direction"
-                )
-            continue
+            category = state["effective_category"]
+            if category is None:
+                state["unresolved_reasons"].append(UnresolvedReason.SIGN_DIRECTION_UNRESOLVED)
+                for f in facts:
+                    _mark_fact(
+                        f,
+                        "UNUSED",
+                        "positive correction has no classified category for sign recovery",
+                    )
+                continue
+            _semantics, sign_rule = sign_contract_for_category(category)
+            if sign_rule is SignRule.EXPENSE_NEGATE_SOURCE:
+                corrected = -corrected
         state["effective_amount"] = corrected
         state["effective_currency"] = payload.amount.currency
         state["evidence_refs"].extend(list(fact.evidence_span_ids))
@@ -994,11 +1005,7 @@ def run_transaction_taxonomy(
         assert isinstance(payload, OneTimeAddBackPayload)
         # Prefer unique ledger attachment by amount+counterparty; else fact-derived.
         ledger_matches: list[str] = []
-        if (
-            payload.counterparty
-            and payload.period_start is not None
-            and payload.period_end is not None
-        ):
+        if payload.counterparty:
             cp_key = normalize_legal_name_keys(payload.counterparty).identity_key
             target_abs = abs(payload.amount.value)
             for tid, state in classified_mutable.items():
@@ -1008,9 +1015,19 @@ def run_transaction_taxonomy(
                     continue
                 amt = state["effective_amount"]
                 txn_date = state["original_date"]
-                if amt is None or txn_date is None:
+                if amt is None:
                     continue
-                if not (payload.period_start <= txn_date <= payload.period_end):
+                # A source-backed service period narrows attachment when present,
+                # but its absence must not prevent an otherwise unique exact
+                # counterparty+amount match.
+                if (
+                    payload.period_start is not None
+                    and payload.period_end is not None
+                    and (
+                        txn_date is None
+                        or not (payload.period_start <= txn_date <= payload.period_end)
+                    )
+                ):
                     continue
                 if abs(amt) == target_abs:
                     ledger_matches.append(tid)

@@ -16,9 +16,11 @@ from halyk_agent.adapters.covenants.io import (
 )
 from halyk_agent.adapters.routing.io import load_template_answers
 from halyk_agent.app.ocr import load_parsed_documents
+from halyk_agent.config import Settings, get_settings
 from halyk_agent.domain.covenants.engine import run_covenant_compile
 from halyk_agent.domain.covenants.models import CovenantReport
 from halyk_agent.domain.ids import sha256_text
+from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 
 
 class CovenantServiceError(Exception):
@@ -72,11 +74,14 @@ def covenant_from_paths(
     template_path: Path,
     output_dir: Path,
     overwrite: bool = False,
+    settings: Settings | None = None,
+    semantic_gateway: SemanticJsonGateway | None = None,
 ) -> CovenantReport:
     """
     Application boundary: authority + template + parsed docs → covenant definitions.
 
-    Does not open ground-truth files. Does not call LLMs. Does not calculate actuals.
+    Does not open ground-truth files or calculate actuals. Optional semantic model calls are
+    allowed only when HALYK_SEMANTIC_FALLBACK_ENABLED is explicitly enabled.
     """
     output_dir = output_dir.resolve()
     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
@@ -98,11 +103,15 @@ def covenant_from_paths(
     except Exception as exc:
         raise CovenantServiceError(str(exc), code="COVENANT_INPUT") from exc
 
+    resolved_settings = settings or get_settings()
+
     report = run_covenant_compile(
         template_answers=template_answers,
         decisions=decisions,
         documents=tuple(documents),
         authority_manifest_hash=authority_hash,
+        settings=resolved_settings,
+        semantic_gateway=semantic_gateway,
     )
 
     stage_dir = Path(tempfile.mkdtemp(prefix=".covenant-stage-", dir=str(output_dir.parent)))

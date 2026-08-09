@@ -19,8 +19,13 @@ from halyk_agent.adapters.authority.io import (
 )
 from halyk_agent.app.ocr import load_parsed_documents
 from halyk_agent.app.parsed_identity import semantic_parsed_input_identity
+from halyk_agent.config import Settings, get_settings
+from halyk_agent.domain.authority.classify import classify_document
 from halyk_agent.domain.authority.engine import run_authority
+from halyk_agent.domain.authority.metadata import extract_metadata_bundle
+from halyk_agent.domain.authority.semantic_classifier import classify_unresolved_documents
 from halyk_agent.domain.authority.models import AuthorityReport, AuthorityStatus
+from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 
 
 class AuthorityServiceError(Exception):
@@ -80,6 +85,8 @@ def authority_from_paths(
     output_dir: Path,
     overwrite: bool = False,
     strict: bool = False,
+    settings: Settings | None = None,
+    semantic_gateway: SemanticJsonGateway | None = None,
 ) -> AuthorityReport:
     """
     Application boundary: Stage 5B routing outputs + OCR-enriched parses → authority.
@@ -106,17 +113,49 @@ def authority_from_paths(
     except Exception as exc:
         raise AuthorityServiceError(str(exc), code="INPUT_LOAD") from exc
 
+    resolved_settings = settings or get_settings()
+    semantic = None
+    if resolved_settings.semantic_fallback_enabled:
+        links_by_doc = {link.document_id: link for link in document_links}
+        deterministic = {}
+        metadata_by_id = {}
+        for document in documents:
+            meta = extract_metadata_bundle(document).metadata
+            metadata_by_id[document.document_id] = meta
+            deterministic[document.document_id] = classify_document(
+                document,
+                metadata=meta,
+                link=links_by_doc.get(document.document_id),
+            ).classification
+        semantic = classify_unresolved_documents(
+            documents=tuple(documents),
+            deterministic=deterministic,
+            metadata=metadata_by_id,
+            settings=resolved_settings,
+            gateway=semantic_gateway,
+        )
+
     report = run_authority(
         documents=tuple(documents),
         document_links=document_links,
         routing_manifest=routing_manifest,
         identity_evidence_hash=identity_hash,
         parsed_input_identity=parsed_identity,
+        semantic_overrides=semantic.overrides if semantic is not None else None,
     )
 
     stage_dir = Path(tempfile.mkdtemp(prefix=".authority-", dir=str(output_dir.parent)))
     try:
         write_authority_outputs(report, stage_dir)
+        if semantic is not None:
+            semantic_path = stage_dir / "semantic_document_classification.jsonl"
+            semantic_text = "\n".join(
+                json.dumps(item, ensure_ascii=False, sort_keys=True)
+                for item in semantic.diagnostics
+            )
+            if semantic_text:
+                semantic_text += "\n"
+            semantic_path.write_text(semantic_text, encoding="utf-8", newline="\n")
         _replace_published_outputs(stage_dir, output_dir)
     except Exception:
         shutil.rmtree(stage_dir, ignore_errors=True)

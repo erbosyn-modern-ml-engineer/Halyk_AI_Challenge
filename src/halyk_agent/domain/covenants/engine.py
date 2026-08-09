@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from halyk_agent.config import Settings
 from halyk_agent.domain.authority.models import (
     AuthorityDecision,
     AuthorityDomain,
@@ -33,6 +34,7 @@ from halyk_agent.domain.covenants.modifiers import extract_modifier_matches
 from halyk_agent.domain.covenants.render import render_covenant_definition
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.ids import deterministic_id, sha256_text
+from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 from halyk_agent.domain.parsing import CanonicalDocument
 from halyk_agent.domain.routing.scenarios import discover_scenarios, template_cell_count
 
@@ -161,6 +163,8 @@ def run_covenant_compile(
     decisions: tuple[AuthorityDecision, ...] | list[AuthorityDecision],
     documents: tuple[CanonicalDocument, ...] | list[CanonicalDocument],
     authority_manifest_hash: str,
+    settings: Settings | None = None,
+    semantic_gateway: SemanticJsonGateway | None = None,
 ) -> CovenantReport:
     """
     Compile typed CovenantDefinitions for every template covenant cell.
@@ -222,6 +226,8 @@ def run_covenant_compile(
                 scenario_id=scenario.scenario_id,
                 clause_id=clause_id,
                 document=document,
+                settings=settings,
+                semantic_gateway=semantic_gateway,
             )
             spans.extend(cell_spans)
             if definition is not None and fa_document is not None:

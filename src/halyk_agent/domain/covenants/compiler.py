@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from halyk_agent.config import Settings, get_settings
 from halyk_agent.domain.covenants.ast import infer_quantity_type
 from halyk_agent.domain.covenants.formulas import collect_selectors, match_formula
 from halyk_agent.domain.covenants.locate import (
@@ -30,8 +31,10 @@ from halyk_agent.domain.covenants.parse import (
 )
 from halyk_agent.domain.covenants.quantity import CovenantTypeError, QuantityType
 from halyk_agent.domain.covenants.render import render_covenant_definition
+from halyk_agent.domain.covenants.semantic_formula import propose_formula
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.ids import deterministic_id
+from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
 from halyk_agent.domain.parsing import CanonicalDocument
 
 
@@ -40,6 +43,8 @@ def compile_covenant_cell(
     scenario_id: str,
     clause_id: str,
     document: CanonicalDocument,
+    settings: Settings | None = None,
+    semantic_gateway: SemanticJsonGateway | None = None,
 ) -> tuple[CovenantDefinition | None, CovenantCompileFailure | None, tuple[EvidenceSpan, ...]]:
     """Compile one template cell against one authoritative loan agreement."""
     spans: list[EvidenceSpan] = []
@@ -77,6 +82,17 @@ def compile_covenant_cell(
     spans.append(located.span)
 
     formula = match_formula(located.text)
+    if formula is None:
+        resolved_settings = settings or get_settings()
+        if resolved_settings.semantic_fallback_enabled:
+            semantic = propose_formula(
+                located.text,
+                scenario_id=scenario_id,
+                clause_id=clause_id,
+                settings=resolved_settings,
+                gateway=semantic_gateway,
+            )
+            formula = semantic.formula
     if formula is None:
         return (
             None,
