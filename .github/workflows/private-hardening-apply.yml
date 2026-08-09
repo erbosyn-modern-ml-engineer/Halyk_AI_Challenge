@@ -20,12 +20,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Repair transformer match
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/apply_private_hardening.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    "    FACT_LINK_AMBIGUOUS = \\"FACT_LINK_AMBIGUOUS\\"\\n",\n    "    FACT_LINK_AMBIGUOUS = \\"FACT_LINK_AMBIGUOUS\\"\\n"\n    "    FACT_TXN_SCENARIO_MISMATCH = \\"FACT_TXN_SCENARIO_MISMATCH\\"\\n"\n    "    SIGN_DIRECTION_UNRESOLVED = \\"SIGN_DIRECTION_UNRESOLVED\\"\\n",\n'''
+          new = '''    "    FACT_LINK_AMBIGUOUS = \\"FACT_LINK_AMBIGUOUS\\"\\n\\n\\nclass ConflictKind",\n    "    FACT_LINK_AMBIGUOUS = \\"FACT_LINK_AMBIGUOUS\\"\\n"\n    "    FACT_TXN_SCENARIO_MISMATCH = \\"FACT_TXN_SCENARIO_MISMATCH\\"\\n"\n    "    SIGN_DIRECTION_UNRESOLVED = \\"SIGN_DIRECTION_UNRESOLVED\\"\\n\\n\\nclass ConflictKind",\n'''
+          if old not in text:
+              raise SystemExit('transformer repair anchor not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
       - name: Apply hardening transforms
         run: python scripts/apply_private_hardening.py
       - name: Commit transformed sources
         run: |
-          if git diff --quiet; then
-            echo "No changes"
+          if git diff --quiet -- src; then
+            echo "No source changes"
             exit 0
           fi
           git config user.name "github-actions[bot]"
