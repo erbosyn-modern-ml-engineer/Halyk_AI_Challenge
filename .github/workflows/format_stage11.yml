@@ -28,6 +28,23 @@ jobs:
           set -euo pipefail
           ruff check . --fix --exit-zero
           ruff format .
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src/halyk_agent/domain/covenants/semantic_formula.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              '    "do not invent transaction data, FX, dates, thresholds, comparator semantics, or missing facts. "\n',
+              '    "do not invent transaction data, FX, dates, thresholds, comparator semantics, "\n'
+              '    "or missing facts. "\n',
+          )
+          text = text.replace(
+              '    "source_quote must be an exact contiguous quote copied from the clause that supports the metric. "\n',
+              '    "source_quote must be an exact contiguous quote copied from the clause that "\n'
+              '    "supports the metric. "\n',
+          )
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          ruff format .
           ruff check .
           git diff --check
           rm -f .github/format-stage11.ready
