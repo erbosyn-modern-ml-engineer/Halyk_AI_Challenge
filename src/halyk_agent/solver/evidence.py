@@ -1,11 +1,4 @@
-"""Causal transaction evidence selection for competition submissions.
-
-Evidence is intentionally conservative. A ledger transaction is publishable only
-when an executable counterfactual intervention changes the final binary verdict.
-Authoritative Stage 5F treatments are replayed first; otherwise the engine performs
-a fixed-context leave-one-contributing-transaction-out replay. Mere size, recency
-or threshold-crossing order is never evidence.
-"""
+"""Pick transaction evidence by replaying the covenant calculation."""
 
 from __future__ import annotations
 
@@ -51,7 +44,7 @@ _CAUSAL_EVENT_TYPES = frozenset(
 
 
 def competition_verdict(result: CovenantEvaluationResult) -> CovenantStatus | None:
-    """Map a fully evaluable internal result to the binary competition verdict."""
+    """Convert an evaluable Stage 6 result to the submission status."""
 
     if result.status is EvaluationStatus.NOT_ACTIVATED and result.actual is not None:
         return CovenantStatus.COMPLIANT
@@ -120,10 +113,9 @@ def _invert_event(
     description: str,
     classified_row: ClassifiedTransaction | None = None,
 ) -> CalculationInput | None:
-    """Undo one authoritative treatment using the event's explicit before-state.
+    """Put one input back into the state it had before an adjustment.
 
-    The inversion is intentionally bounded to Stage 5F fields that Stage 6 consumes.
-    If the before-state is insufficient, return ``None`` rather than inventing it.
+    If the event does not carry enough old state, stop instead of guessing it.
     """
 
     if event.event_type is AdjustmentEventType.CATEGORY_RECLASSIFICATION_ACCEPTED:
@@ -283,7 +275,7 @@ def _scope_context_to_plan(
     context: EvaluationContext,
     plan: EvaluationPlan,
 ) -> EvaluationContext:
-    """Bind a shared competition context to one covenant's Stage 6 universe."""
+    """Keep only the scenario and definition this plan can see."""
 
     return context.model_copy(
         update={
@@ -311,12 +303,7 @@ def _remove_transaction_context(
     *,
     transaction_id: str,
 ) -> EvaluationContext | None:
-    """Apply the exact fixed-context intervention ``transaction absent``.
-
-    This is used only after authoritative treatment replay finds no unique causal
-    treatment. Every Stage 6 input backed by the transaction is removed together;
-    all unrelated inputs and facts remain frozen.
-    """
+    """Drop every calculation input backed by one transaction."""
 
     if not any(item.transaction_id == transaction_id for item in context.calculation_inputs):
         return None
@@ -337,20 +324,7 @@ def select_causal_evidence(
     adjustments: tuple[AdjustmentEvent, ...],
     classified: tuple[ClassifiedTransaction, ...],
 ) -> str | None:
-    """Return the unique transaction that causally determines the verdict.
-
-    Evidence is resolved in two deterministic layers:
-
-    1. Authoritative-treatment replay. Undo source-backed Stage 5F
-       reclassification/inclusion/exclusion/correction events. If exactly one
-       transaction flips the verdict, that treatment-causal transaction wins.
-    2. Fixed-context leave-one-transaction-out replay. If no authoritative
-       treatment is uniquely causal, remove each currently contributing ledger
-       transaction and replay the same plan. Exactly one verdict-flipping
-       transaction is publishable; zero or multiple flips remain ``None``.
-
-    No largest/latest/threshold-crossing heuristic is used.
-    """
+    """Return one transaction only when its removal changes the verdict."""
 
     current_verdict = competition_verdict(result)
     if current_verdict is None:
@@ -359,6 +333,8 @@ def select_causal_evidence(
     executor = EvaluationExecutor()
     classified_map = {row.transaction_id: row for row in classified}
 
+    # First undo explicit document-backed treatments. They are stronger evidence
+    # than simply dropping a ledger row that happened to contribute to the total.
     treatment_ids = sorted(
         {
             event.transaction_id
@@ -391,6 +367,7 @@ def select_causal_evidence(
     if len(treatment_flips) > 1:
         return None
 
+    # No unique treatment flip, so try the actual contributing rows one by one.
     candidate_ids = sorted(set(result.contributing_transaction_ids))
     absence_flips: list[str] = []
     for transaction_id in candidate_ids:
