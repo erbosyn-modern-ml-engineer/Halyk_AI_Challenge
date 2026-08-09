@@ -558,7 +558,9 @@ def run_transaction_taxonomy(
             continue
         link = links.get(raw_tid)
         if link is None or link.scenario_id != fact.scenario_id:
-            cid = deterministic_id("txn-conflict", ConflictKind.FACT_SCENARIO_MISMATCH.value, fact.fact_id, raw_tid)
+            cid = deterministic_id(
+                "txn-conflict", ConflictKind.FACT_SCENARIO_MISMATCH.value, fact.fact_id, raw_tid
+            )
             conflicts.append(
                 TaxonomyConflict(
                     conflict_id=cid,
@@ -608,7 +610,9 @@ def run_transaction_taxonomy(
         elif before is None and corrected > 0:
             state["unresolved_reasons"].append(UnresolvedReason.SIGN_DIRECTION_UNRESOLVED)
             for f in facts:
-                _mark_fact(f, "UNUSED", "positive correction has no source-backed debit/credit direction")
+                _mark_fact(
+                    f, "UNUSED", "positive correction has no source-backed debit/credit direction"
+                )
             continue
         state["effective_amount"] = corrected
         state["effective_currency"] = payload.amount.currency
@@ -656,12 +660,17 @@ def run_transaction_taxonomy(
             continue
         link = links.get(tid)
         if link is None or link.scenario_id != fact.scenario_id:
-            cid = deterministic_id("txn-conflict", ConflictKind.FACT_SCENARIO_MISMATCH.value, fact.fact_id, tid)
+            cid = deterministic_id(
+                "txn-conflict", ConflictKind.FACT_SCENARIO_MISMATCH.value, fact.fact_id, tid
+            )
             conflicts.append(
                 TaxonomyConflict(
-                    conflict_id=cid, kind=ConflictKind.FACT_SCENARIO_MISMATCH,
-                    scenario_id=fact.scenario_id, transaction_id=tid,
-                    fact_ids=(fact.fact_id,), reason="period fact transaction belongs to another scenario",
+                    conflict_id=cid,
+                    kind=ConflictKind.FACT_SCENARIO_MISMATCH,
+                    scenario_id=fact.scenario_id,
+                    transaction_id=tid,
+                    fact_ids=(fact.fact_id,),
+                    reason="period fact transaction belongs to another scenario",
                 )
             )
             _mark_fact(fact, "UNUSED", "FACT_TXN_SCENARIO_MISMATCH")
@@ -670,8 +679,10 @@ def run_transaction_taxonomy(
     for tid, facts in sorted(period_by_txn.items()):
         assignments = {
             (
-                f.payload.disposition, f.payload.period_label,
-                f.payload.service_start, f.payload.service_end,
+                f.payload.disposition,
+                f.payload.period_label,
+                f.payload.service_start,
+                f.payload.service_end,
             )
             for f in facts
             if isinstance(f.payload, TransactionPeriodPayload)
@@ -756,12 +767,17 @@ def run_transaction_taxonomy(
             _mark_fact(fact, "UNUSED", "treatment target missing")
             continue
         if link is None or link.scenario_id != fact.scenario_id:
-            cid = deterministic_id("txn-conflict", ConflictKind.FACT_SCENARIO_MISMATCH.value, fact.fact_id, tid)
+            cid = deterministic_id(
+                "txn-conflict", ConflictKind.FACT_SCENARIO_MISMATCH.value, fact.fact_id, tid
+            )
             conflicts.append(
                 TaxonomyConflict(
-                    conflict_id=cid, kind=ConflictKind.FACT_SCENARIO_MISMATCH,
-                    scenario_id=fact.scenario_id, transaction_id=tid,
-                    fact_ids=(fact.fact_id,), reason="treatment transaction belongs to another scenario",
+                    conflict_id=cid,
+                    kind=ConflictKind.FACT_SCENARIO_MISMATCH,
+                    scenario_id=fact.scenario_id,
+                    transaction_id=tid,
+                    fact_ids=(fact.fact_id,),
+                    reason="treatment transaction belongs to another scenario",
                 )
             )
             _mark_fact(fact, "UNUSED", "FACT_TXN_SCENARIO_MISMATCH")
@@ -779,8 +795,10 @@ def run_transaction_taxonomy(
             cid = deterministic_id("txn-conflict", ConflictKind.TREATMENT_CONFLICT.value, tid)
             conflicts.append(
                 TaxonomyConflict(
-                    conflict_id=cid, kind=ConflictKind.TREATMENT_CONFLICT,
-                    scenario_id=state["scenario_id"], transaction_id=tid,
+                    conflict_id=cid,
+                    kind=ConflictKind.TREATMENT_CONFLICT,
+                    scenario_id=state["scenario_id"],
+                    transaction_id=tid,
                     fact_ids=tuple(f.fact_id for f in facts),
                     reason="conflicting transaction include/exclude treatments",
                 )
@@ -791,7 +809,11 @@ def run_transaction_taxonomy(
                 _mark_fact(fact, "UNUSED", "conflicting transaction treatments")
             continue
         disposition = next(iter(dispositions))
-        flag = "TREATMENT_EXCLUDED" if disposition is TreatmentDisposition.EXCLUDE else "TREATMENT_INCLUDED"
+        flag = (
+            "TREATMENT_EXCLUDED"
+            if disposition is TreatmentDisposition.EXCLUDE
+            else "TREATMENT_INCLUDED"
+        )
         if flag not in state["flags"]:
             state["flags"].append(flag)
         event_type = (
@@ -805,10 +827,15 @@ def run_transaction_taxonomy(
             adjustments.append(
                 AdjustmentEvent(
                     event_id=deterministic_id("adj", event_type.value, fact.fact_id, tid),
-                    event_type=event_type, scenario_id=fact.scenario_id, fact_id=fact.fact_id,
-                    transaction_id=tid, before={}, after={"disposition": disposition.value},
+                    event_type=event_type,
+                    scenario_id=fact.scenario_id,
+                    fact_id=fact.fact_id,
+                    transaction_id=tid,
+                    before={},
+                    after={"disposition": disposition.value},
                     evidence_span_ids=fact.evidence_span_ids,
-                    authority_domain=fact.authority_domain.value, reason_code=event_type.value,
+                    authority_domain=fact.authority_domain.value,
+                    reason_code=event_type.value,
                 )
             )
             _mark_fact(fact, "CONSUMED", "transaction treatment applied before Stage 6")
@@ -820,12 +847,20 @@ def run_transaction_taxonomy(
         if payload.transaction_id is not None:
             link = links.get(payload.transaction_id)
             if link is None or link.scenario_id != fact.scenario_id:
-                cid = deterministic_id("txn-conflict", ConflictKind.FACT_SCENARIO_MISMATCH.value, fact.fact_id, payload.transaction_id)
+                cid = deterministic_id(
+                    "txn-conflict",
+                    ConflictKind.FACT_SCENARIO_MISMATCH.value,
+                    fact.fact_id,
+                    payload.transaction_id,
+                )
                 conflicts.append(
                     TaxonomyConflict(
-                        conflict_id=cid, kind=ConflictKind.FACT_SCENARIO_MISMATCH,
-                        scenario_id=fact.scenario_id, transaction_id=payload.transaction_id,
-                        fact_ids=(fact.fact_id,), reason="FX transaction belongs to another scenario",
+                        conflict_id=cid,
+                        kind=ConflictKind.FACT_SCENARIO_MISMATCH,
+                        scenario_id=fact.scenario_id,
+                        transaction_id=payload.transaction_id,
+                        fact_ids=(fact.fact_id,),
+                        reason="FX transaction belongs to another scenario",
                     )
                 )
                 _mark_fact(fact, "UNUSED", "FACT_TXN_SCENARIO_MISMATCH")
@@ -943,7 +978,11 @@ def run_transaction_taxonomy(
         assert isinstance(payload, OneTimeAddBackPayload)
         # Prefer unique ledger attachment by amount+counterparty; else fact-derived.
         ledger_matches: list[str] = []
-        if payload.counterparty and payload.period_start is not None and payload.period_end is not None:
+        if (
+            payload.counterparty
+            and payload.period_start is not None
+            and payload.period_end is not None
+        ):
             cp_key = normalize_legal_name_keys(payload.counterparty).identity_key
             target_abs = abs(payload.amount.value)
             for tid, state in classified_mutable.items():
@@ -1136,11 +1175,15 @@ def run_transaction_taxonomy(
             if isinstance(fact.payload, SubsidiaryStatusPayload)
         }
         if len(sub_values) > 1:
-            cid = deterministic_id("txn-conflict", ConflictKind.SUBSIDIARY_STATUS_CONFLICT.value, tid)
+            cid = deterministic_id(
+                "txn-conflict", ConflictKind.SUBSIDIARY_STATUS_CONFLICT.value, tid
+            )
             conflicts.append(
                 TaxonomyConflict(
-                    conflict_id=cid, kind=ConflictKind.SUBSIDIARY_STATUS_CONFLICT,
-                    scenario_id=scenario_id, transaction_id=tid,
+                    conflict_id=cid,
+                    kind=ConflictKind.SUBSIDIARY_STATUS_CONFLICT,
+                    scenario_id=scenario_id,
+                    transaction_id=tid,
                     fact_ids=tuple(f.fact_id for f in matching_sub_facts),
                     reason="conflicting subsidiary statuses for counterparty",
                 )
