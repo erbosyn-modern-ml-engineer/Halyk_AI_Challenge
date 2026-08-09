@@ -1,0 +1,294 @@
+--- a/docs/stage11_semantic_donors.md	1970-01-01 00:00:00.000000000 +0000
++++ b/docs/stage11_semantic_donors.md	2026-08-09 05:50:29.965653547 +0000
+@@ -0,0 +1,50 @@
++# Stage 11 semantic fallback donor review
++
++Stage 11 uses external repositories as design donors only. No donor is vendored and no donor runtime dependency is introduced by this hardening pass.
++
++## Adopted patterns
++
++### google/langextract — Apache-2.0
++
++Pinned review revision: `b5fe0baf807ac35ec95b968a71e4d03f198a1b60`.
++
++Useful pattern: model output is not trusted as source coordinates; extracted text is aligned back to the source by deterministic code. Halyk adopts the stricter subset: **exact contiguous source quote only**. Fuzzy alignment is intentionally not used for authority, covenant, or fact evidence.
++
++Applied to:
++
++- covenant semantic AST proposals;
++- document type/lifecycle semantic proposals;
++- existing Stage 5E fact validation.
++
++### sebastienrousseau/bankstatementparser — Apache-2.0
++
++Pinned review revision: `f3b159aed8bfe97d06f77ca6c95633593c448466`.
++
++Useful pattern: cheapest deterministic path first, LLM/vision only as a fallback, explicit `source_method`, then deterministic verification. Halyk adopts the orchestration principle rather than its bank-statement schema.
++
++Applied to:
++
++- deterministic transaction classification before semantic classification;
++- semantic fallback only for `UNRESOLVED` transaction descriptions;
++- semantic document fallback only for unresolved type/lifecycle states;
++- deterministic Stage 5F/Stage 6 verification after any accepted proposal.
++
++### Future-House/paper-qa — Apache-2.0
++
++Existing project donor. Useful pattern: evidence/citation is first-class output rather than narrative decoration. Halyk keeps evidence as typed source spans and causal transaction replay rather than free-form citations.
++
++### JerBouma/FinanceToolkit — MIT
++
++Existing Stage 10.4 donor. Useful pattern: ratios consume explicit financial components. Halyk keeps covenant arithmetic deterministic and does not let an LLM broaden financial categories or compute the final ratio.
++
++## Reviewed but not imported
++
++- `pydantic/pydantic-ai` and Instructor: strong structured-output/retry patterns, but adding another agent/model framework would duplicate the existing typed gateway and expand the dependency surface.
++- `deepset-ai/haystack`: useful conditional routing concepts, but too broad for a competition runtime whose semantic fallback is only a few bounded tasks.
++- legal RAG repositories: useful evidence discipline, but they do not replace the project's deterministic authority, accounting, and causal-evidence contracts.
++
++## Stage 11 invariant
++
++The LLM can propose semantics. It cannot publish financial truth.
++
++Accepted proposals must still pass enum/Pydantic validation, exact source grounding, scenario ownership, conflict/readiness checks, deterministic Stage 5F normalization, deterministic Stage 6 arithmetic, and causal-evidence replay where applicable.
+--- a/src/halyk_agent/app/authority.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/app/authority.py	2026-08-09 05:45:26.721679544 +0000
+@@ -19,8 +19,13 @@
+ )
+ from halyk_agent.app.ocr import load_parsed_documents
+ from halyk_agent.app.parsed_identity import semantic_parsed_input_identity
++from halyk_agent.config import Settings, get_settings
++from halyk_agent.domain.authority.classify import classify_document
+ from halyk_agent.domain.authority.engine import run_authority
++from halyk_agent.domain.authority.metadata import extract_metadata_bundle
++from halyk_agent.domain.authority.semantic_classifier import classify_unresolved_documents
+ from halyk_agent.domain.authority.models import AuthorityReport, AuthorityStatus
++from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
+ 
+ 
+ class AuthorityServiceError(Exception):
+@@ -80,6 +85,8 @@
+     output_dir: Path,
+     overwrite: bool = False,
+     strict: bool = False,
++    settings: Settings | None = None,
++    semantic_gateway: SemanticJsonGateway | None = None,
+ ) -> AuthorityReport:
+     """
+     Application boundary: Stage 5B routing outputs + OCR-enriched parses → authority.
+@@ -106,17 +113,49 @@
+     except Exception as exc:
+         raise AuthorityServiceError(str(exc), code="INPUT_LOAD") from exc
+ 
++    resolved_settings = settings or get_settings()
++    semantic = None
++    if resolved_settings.semantic_fallback_enabled:
++        links_by_doc = {link.document_id: link for link in document_links}
++        deterministic = {}
++        metadata_by_id = {}
++        for document in documents:
++            meta = extract_metadata_bundle(document).metadata
++            metadata_by_id[document.document_id] = meta
++            deterministic[document.document_id] = classify_document(
++                document,
++                metadata=meta,
++                link=links_by_doc.get(document.document_id),
++            ).classification
++        semantic = classify_unresolved_documents(
++            documents=tuple(documents),
++            deterministic=deterministic,
++            metadata=metadata_by_id,
++            settings=resolved_settings,
++            gateway=semantic_gateway,
++        )
++
+     report = run_authority(
+         documents=tuple(documents),
+         document_links=document_links,
+         routing_manifest=routing_manifest,
+         identity_evidence_hash=identity_hash,
+         parsed_input_identity=parsed_identity,
++        semantic_overrides=semantic.overrides if semantic is not None else None,
+     )
+ 
+     stage_dir = Path(tempfile.mkdtemp(prefix=".authority-", dir=str(output_dir.parent)))
+     try:
+         write_authority_outputs(report, stage_dir)
++        if semantic is not None:
++            semantic_path = stage_dir / "semantic_document_classification.jsonl"
++            semantic_text = "\n".join(
++                json.dumps(item, ensure_ascii=False, sort_keys=True)
++                for item in semantic.diagnostics
++            )
++            if semantic_text:
++                semantic_text += "\n"
++            semantic_path.write_text(semantic_text, encoding="utf-8", newline="\n")
+         _replace_published_outputs(stage_dir, output_dir)
+     except Exception:
+         shutil.rmtree(stage_dir, ignore_errors=True)
+--- a/src/halyk_agent/app/covenant.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/app/covenant.py	2026-08-09 05:43:56.939714924 +0000
+@@ -16,9 +16,11 @@
+ )
+ from halyk_agent.adapters.routing.io import load_template_answers
+ from halyk_agent.app.ocr import load_parsed_documents
++from halyk_agent.config import Settings, get_settings
+ from halyk_agent.domain.covenants.engine import run_covenant_compile
+ from halyk_agent.domain.covenants.models import CovenantReport
+ from halyk_agent.domain.ids import sha256_text
++from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
+ 
+ 
+ class CovenantServiceError(Exception):
+@@ -72,11 +74,14 @@
+     template_path: Path,
+     output_dir: Path,
+     overwrite: bool = False,
++    settings: Settings | None = None,
++    semantic_gateway: SemanticJsonGateway | None = None,
+ ) -> CovenantReport:
+     """
+     Application boundary: authority + template + parsed docs → covenant definitions.
+ 
+-    Does not open ground-truth files. Does not call LLMs. Does not calculate actuals.
++    Does not open ground-truth files or calculate actuals. Optional semantic model calls are
++    allowed only when HALYK_SEMANTIC_FALLBACK_ENABLED is explicitly enabled.
+     """
+     output_dir = output_dir.resolve()
+     if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
+@@ -98,11 +103,15 @@
+     except Exception as exc:
+         raise CovenantServiceError(str(exc), code="COVENANT_INPUT") from exc
+ 
++    resolved_settings = settings or get_settings()
++
+     report = run_covenant_compile(
+         template_answers=template_answers,
+         decisions=decisions,
+         documents=tuple(documents),
+         authority_manifest_hash=authority_hash,
++        settings=resolved_settings,
++        semantic_gateway=semantic_gateway,
+     )
+ 
+     stage_dir = Path(tempfile.mkdtemp(prefix=".covenant-stage-", dir=str(output_dir.parent)))
+--- a/src/halyk_agent/app/facts.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/app/facts.py	2026-08-09 05:50:46.637075277 +0000
+@@ -24,6 +24,7 @@
+ from halyk_agent.domain.fact_extraction.engine import run_fact_extraction
+ from halyk_agent.domain.fact_extraction.models import FactExtractionReport
+ from halyk_agent.domain.ids import sha256_text
++from halyk_agent.domain.models_gateway.budget import ExternalAttemptBudget
+ from halyk_agent.domain.models_gateway.gateway import LlmGatewayConfig, StructuredModelGateway
+ from halyk_agent.domain.models_gateway.types import ProviderName
+ from halyk_agent.domain.routing.models import LedgerRow
+@@ -89,6 +90,7 @@
+     allow_network_models: bool,
+     settings: Settings,
+     cache_dir: Path | None,
++    shared_budget: ExternalAttemptBudget | None = None,
+ ) -> StructuredModelGateway | None:
+     if not allow_network_models:
+         return None
+@@ -114,7 +116,7 @@
+         cache_dir=cache_dir,
+         allow_network=True,
+     )
+-    return StructuredModelGateway(config=cfg)
++    return StructuredModelGateway(config=cfg, shared_budget=shared_budget)
+ 
+ 
+ def facts_from_paths(
+@@ -128,6 +130,7 @@
+     overwrite: bool = False,
+     allow_network_models: bool = False,
+     settings: Settings | None = None,
++    model_budget: ExternalAttemptBudget | None = None,
+ ) -> FactExtractionReport:
+     """
+     Application boundary: authority + covenants + parsed docs → fact extraction.
+@@ -197,6 +200,7 @@
+         allow_network_models=allow_network_models,
+         settings=settings,
+         cache_dir=cache_dir,
++        shared_budget=model_budget,
+     )
+ 
+     report = run_fact_extraction(
+--- a/src/halyk_agent/app/transactions.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/app/transactions.py	2026-08-09 05:43:56.939898127 +0000
+@@ -24,6 +24,7 @@
+     write_taxonomy_outputs,
+ )
+ from halyk_agent.config import Settings, get_settings
++from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway
+ from halyk_agent.domain.transaction_taxonomy.engine import run_transaction_taxonomy
+ from halyk_agent.domain.transaction_taxonomy.models import TaxonomyReport
+ from halyk_agent.domain.transaction_taxonomy.semantic_classifier import classify_unresolved_rows
+@@ -102,6 +103,7 @@
+     output_dir: Path,
+     overwrite: bool = False,
+     settings: Settings | None = None,
++    semantic_gateway: SemanticJsonGateway | None = None,
+ ) -> TaxonomyReport:
+     for path in (routing_dir, covenants_dir, facts_dir, ledger_path, output_dir):
+         assert_no_gt_access(path)
+@@ -187,7 +189,12 @@
+         )
+ 
+     resolved_settings = settings or get_settings()
+-    semantic = classify_unresolved_rows(ledger_rows, links, settings=resolved_settings)
++    semantic = classify_unresolved_rows(
++        ledger_rows,
++        links,
++        settings=resolved_settings,
++        gateway=semantic_gateway,
++    )
+ 
+     report = run_transaction_taxonomy(
+         ledger_rows=ledger_rows,
+--- a/src/halyk_agent/domain/authority/classify.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/domain/authority/classify.py	2026-08-09 05:45:12.029535103 +0000
+@@ -182,6 +182,18 @@
+             return DocumentLifecycleStatus.DRAFT, draft, "EXPLICIT_DRAFT"
+         if strong_final is not None:
+             return DocumentLifecycleStatus.FINAL, strong_final, "STRONG_FINAL_STATUS"
++        if doc_type is DocumentType.AUDITOR_REPORT:
++            audit_finalish = require_span_or_none(
++                document,
++                patterns=(
++                    "АУДИТОРСКОЕ ДЕЛО",
++                    "Независимый аудитор",
++                    "Independent Auditor",
++                    "independent auditor",
++                ),
++            )
++            if audit_finalish is not None:
++                return DocumentLifecycleStatus.FINAL, audit_finalish, "AUDITOR_ENGAGEMENT_FINAL"
+         return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
+ 
+     if doc_type is DocumentType.TREASURY_MEMO:
+@@ -203,7 +215,7 @@
+                 strong_executed or strong_final,
+                 "KYC_CURRENT",
+             )
+-        return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
++        return DocumentLifecycleStatus.CURRENT, None, "KYC_DEFAULT_CURRENT"
+ 
+     if working_doc is not None:
+         return DocumentLifecycleStatus.WORKING_PAPER, working_doc, "EXPLICIT_WORKING_DOCUMENT"
+@@ -266,6 +278,14 @@
+     return mapping.get(doc_type, (AuthorityDomain.NONE,))
+ 
+ 
++def domains_for_document(
++    doc_type: DocumentType,
++    lifecycle: DocumentLifecycleStatus,
++) -> tuple[AuthorityDomain, ...]:
++    """Public deterministic domain mapping used after a validated semantic proposal."""
++    return _domains_for(doc_type, lifecycle)
++
++
+ def _classify_type(
+     document: CanonicalDocument,
+     *:
