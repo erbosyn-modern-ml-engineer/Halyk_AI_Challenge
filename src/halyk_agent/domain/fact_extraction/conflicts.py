@@ -81,7 +81,7 @@ def _conflict_identity_and_value(fact: FactRecord) -> tuple[str, str] | None:
         if payload.transaction_id is None:
             return None
         identity = f"txn:{payload.transaction_id}"
-        value = {
+        value: dict[str, Any] = {
             "disposition": payload.disposition.value,
             "from": (payload.from_category or "").strip().casefold() or None,
             "to": (payload.to_category or "").strip().casefold() or None,

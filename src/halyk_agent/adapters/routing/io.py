@@ -6,7 +6,7 @@ import csv
 import io
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +51,7 @@ def _header_key(value: object) -> str:
     return re.sub(r"[\s\-]+", "_", text).strip("_")
 
 
-def _header_mapping(header: list[object]) -> dict[str, int]:
+def _header_mapping(header: Sequence[object]) -> dict[str, int]:
     normalized = [_header_key(value) for value in header]
     mapping: dict[str, int] = {}
     for canonical, aliases in _FIELD_ALIASES.items():
@@ -70,7 +70,7 @@ def _header_mapping(header: list[object]) -> dict[str, int]:
     return mapping
 
 
-def _row_value(row: list[object], mapping: dict[str, int], name: str) -> str:
+def _row_value(row: Sequence[object], mapping: dict[str, int], name: str) -> str:
     index = mapping.get(name)
     if index is None or index >= len(row) or row[index] is None:
         return ""
@@ -78,7 +78,7 @@ def _row_value(row: list[object], mapping: dict[str, int], name: str) -> str:
 
 
 def _rows_from_matrix(
-    rows: Iterable[list[object]],
+    rows: Iterable[Sequence[object]],
     *,
     source_file: str,
 ) -> tuple[LedgerRow, ...]:
@@ -145,6 +145,8 @@ def load_ledger_xlsx_bytes(data: bytes, *, source_file: str) -> tuple[LedgerRow,
         raise RoutingIOError(f"invalid XLSX ledger: {exc}", code="LEDGER_SCHEMA") from exc
     try:
         sheet = workbook.active
+        if sheet is None:
+            raise RoutingIOError("XLSX ledger has no active worksheet", code="LEDGER_SCHEMA")
         rows = [list(row) for row in sheet.iter_rows(values_only=True)]
     finally:
         workbook.close()

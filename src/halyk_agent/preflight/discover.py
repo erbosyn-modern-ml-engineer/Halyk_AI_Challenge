@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,7 @@ def _clean_header(value: object) -> str:
     return text.strip("_")
 
 
-def _canonical_header(header: list[object]) -> set[str]:
+def _canonical_header(header: Sequence[object]) -> set[str]:
     cleaned = {_clean_header(value) for value in header}
     canonical: set[str] = set()
     for target, aliases in _LEDGER_ALIASES.items():
@@ -73,7 +74,7 @@ def _canonical_header(header: list[object]) -> set[str]:
     return canonical
 
 
-def _csv_header(data: bytes) -> list[str] | None:
+def _csv_header(data: bytes) -> Sequence[object] | None:
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -89,13 +90,15 @@ def _csv_header(data: bytes) -> list[str] | None:
         return None
 
 
-def _xlsx_header(data: bytes) -> list[object] | None:
+def _xlsx_header(data: bytes) -> Sequence[object] | None:
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception:
         return None
     try:
         sheet = workbook.active
+        if sheet is None:
+            return None
         row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
         return list(row) if row is not None else None
     finally:
@@ -104,6 +107,7 @@ def _xlsx_header(data: bytes) -> list[object] | None:
 
 def _looks_like_ledger(path: Path, data: bytes) -> bool:
     suffix = path.suffix.casefold()
+    header: Sequence[object] | None
     if suffix in {".csv", ".txt", ".tsv"}:
         header = _csv_header(data)
     elif suffix in {".xlsx", ".xlsm"}:
