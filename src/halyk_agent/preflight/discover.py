@@ -297,8 +297,6 @@ def discover_and_sanitize(
         raise DatasetAdapterError("primary ledger not found")
     if not case_descriptions:
         raise DatasetAdapterError("case description not found")
-    if not document_files:
-        raise DatasetAdapterError("document files not found")
 
     root_templates = [item for item in templates if Path(item.path).parent.resolve() == root]
     if len(root_templates) > 1:
