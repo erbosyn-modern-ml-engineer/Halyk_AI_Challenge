@@ -1,0 +1,289 @@
+
++            if audit_finalish is not None:
++                return DocumentLifecycleStatus.FINAL, audit_finalish, "AUDITOR_ENGAGEMENT_FINAL"
+         return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
+ 
+     if doc_type is DocumentType.TREASURY_MEMO:
+@@ -203,7 +215,7 @@
+                 strong_executed or strong_final,
+                 "KYC_CURRENT",
+             )
+-        return DocumentLifecycleStatus.UNKNOWN, None, "NO_LIFECYCLE_SIGNAL"
++        return DocumentLifecycleStatus.CURRENT, None, "KYC_DEFAULT_CURRENT"
+ 
+     if working_doc is not None:
+         return DocumentLifecycleStatus.WORKING_PAPER, working_doc, "EXPLICIT_WORKING_DOCUMENT"
+@@ -266,6 +278,14 @@
+     return mapping.get(doc_type, (AuthorityDomain.NONE,))
+ 
+ 
++def domains_for_document(
++    doc_type: DocumentType,
++    lifecycle: DocumentLifecycleStatus,
++) -> tuple[AuthorityDomain, ...]:
++    """Public deterministic domain mapping used after a validated semantic proposal."""
++    return _domains_for(doc_type, lifecycle)
++
++
+ def _classify_type(
+     document: CanonicalDocument,
+     *,
+--- a/src/halyk_agent/domain/authority/engine.py	2026-08-09 05:18:00.000000000 +0000
++++ b/src/halyk_agent/domain/authority/engine.py	2026-08-09 05:45:12.029784436 +0000
+@@ -6,7 +6,7 @@
+ from collections.abc import Mapping
+ from typing import Any
+ 
+-from halyk_agent.domain.authority.classify import classify_document
++from halyk_agent.domain.authority.classify import classify_document, domains_for_document
+ from halyk_agent.domain.authority.constants import (
+     AUTHORITY_ALGORITHM_VERSION,
+     AUTHORITY_RULE_VERSION,
+@@ -21,11 +21,14 @@
+     AuthorityManifest,
+     AuthorityReport,
+     AuthorityStatus,
++    ClassificationConfidence,
+     DocumentClassification,
++    DocumentLifecycleStatus,
+     DocumentMetadata,
+     DocumentType,
+ )
+ from halyk_agent.domain.authority.resolve import resolve_authority
++from halyk_agent.domain.authority.semantic_classifier import SemanticDocumentOverride
+ from halyk_agent.domain.evidence import EvidenceSpan
+ from halyk_agent.domain.ids import deterministic_id, sha256_text
+ from halyk_agent.domain.parsing import CanonicalDocument
+@@ -137,6 +140,7 @@
+     routing_manifest: RoutingManifest | Mapping[str, Any],
+     identity_evidence_hash: str = "",
+     parsed_input_identity: Mapping[str, Any] | None = None,
++    semantic_overrides: Mapping[str, SemanticDocumentOverride] | None = None,
+ ) -> AuthorityReport:
+     """
+     Classify routed documents and resolve per-scenario authority domains.
+@@ -166,8 +170,39 @@
+         all_spans.extend(meta_bundle.spans)
+         link = links_by_doc.get(document.document_id)
+         bundle = classify_document(document, metadata=meta, link=link)
+-        classifications.append(bundle.classification)
+-        all_spans.extend(bundle.spans)
++        classification = bundle.classification
++        spans = list(bundle.spans)
++        override = (semantic_overrides or {}).get(document.document_id)
++        if override is not None:
++            type_unresolved = classification.document_type is DocumentType.UNKNOWN
++            lifecycle_unresolved = (
++                classification.lifecycle_status is DocumentLifecycleStatus.UNKNOWN
++            )
++            type_safe = type_unresolved or override.document_type is classification.document_type
++            lifecycle_safe = (
++                lifecycle_unresolved
++                or override.lifecycle_status is classification.lifecycle_status
++            )
++            if (type_unresolved or lifecycle_unresolved) and type_safe and lifecycle_safe:
++                evidence_ids = tuple(
++                    dict.fromkeys((*classification.evidence_span_ids, override.evidence_span.id))
++                )
++                classification = classification.model_copy(
++                    update={
++                        "document_type": override.document_type,
++                        "lifecycle_status": override.lifecycle_status,
++                        "authority_domains": domains_for_document(
++                            override.document_type, override.lifecycle_status
++                        ),
++                        "confidence": ClassificationConfidence.DERIVED,
++                        "rule_id": "DEEPSEEK_SEMANTIC_FALLBACK",
++                        "reason_code": "SEMANTIC_ENUM_WITH_EXACT_SOURCE_QUOTE",
++                        "evidence_span_ids": evidence_ids,
++                    }
++                )
++                spans.append(override.evidence_span)
++        classifications.append(classification)
++        all_spans.extend(spans)
+ 
+     metadata_by_id = {m.document_id: m for m in metadata_list}
+ 
+--- a/src/halyk_agent/domain/authority/semantic_classifier.py	1970-01-01 00:00:00.000000000 +0000
++++ b/src/halyk_agent/domain/authority/semantic_classifier.py	2026-08-09 05:44:52.501653547 +0000
+@@ -0,0 +1,242 @@
++"""Bounded semantic fallback for unresolved document taxonomy/lifecycle.
++
++The model may propose only enum values plus one exact source quote.  It never
++chooses authority winners or resolves conflicts; the existing deterministic
++resolver remains authoritative.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Literal
++
++from pydantic import BaseModel, ConfigDict, ValidationError
++
++from halyk_agent.config import Settings
++from halyk_agent.domain.authority.evidence import require_span_or_none
++from halyk_agent.domain.authority.models import (
++    DocumentClassification,
++    DocumentLifecycleStatus,
++    DocumentMetadata,
++    DocumentType,
++)
++from halyk_agent.domain.evidence import EvidenceSpan
++from halyk_agent.domain.models_gateway.semantic_json import SemanticJsonGateway, SemanticJsonState
++from halyk_agent.domain.parsing import CanonicalDocument
++
++
++class _DocumentCandidate(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    document_type: str
++    lifecycle_status: str
++    confidence: Literal["HIGH", "MEDIUM", "LOW"]
++    source_quote: str
++    reason: str
++
++
++@dataclass(frozen=True, slots=True)
++class SemanticDocumentOverride:
++    document_type: DocumentType
++    lifecycle_status: DocumentLifecycleStatus
++    evidence_span: EvidenceSpan
++    reason: str
++
++
++@dataclass(frozen=True, slots=True)
++class SemanticDocumentBatch:
++    overrides: dict[str, SemanticDocumentOverride]
++    diagnostics: tuple[dict[str, str], ...]
++    model_calls: int
++
++
++_SYSTEM = (
++    "You are a bounded document-taxonomy parser. Deterministic rules could not fully classify "
++    "the supplied banking document. Choose only from the supplied document_type and lifecycle "
++    "enums. Do not decide authority, do not choose between conflicting documents, and do not "
++    "infer a lifecycle without explicit textual support. source_quote must be one exact contiguous "
++    "quote from source_text that directly supports the proposed type/lifecycle. If uncertain, use "
++    "UNKNOWN and/or LOW confidence. Return one JSON object only."
++)
++
++
++def _source_text(document: CanonicalDocument, *, max_chars: int = 12_000) -> str:
++    parts: list[str] = []
++    remaining = max_chars
++    for page in document.pages:
++        raw = page.raw_text or ""
++        if not raw:
++            continue
++        piece = raw[:remaining]
++        parts.append(piece)
++        remaining -= len(piece)
++        if remaining <= 0:
++            break
++    return "\n".join(parts)
++
++
++def classify_unresolved_documents(
++    *,
++    documents: tuple[CanonicalDocument, ...],
++    deterministic: dict[str, DocumentClassification],
++    metadata: dict[str, DocumentMetadata],
++    settings: Settings,
++    gateway: SemanticJsonGateway | None = None,
++) -> SemanticDocumentBatch:
++    """Propose type/lifecycle only for deterministic UNKNOWN states."""
++    if not settings.semantic_fallback_enabled:
++        return SemanticDocumentBatch(overrides={}, diagnostics=(), model_calls=0)
++
++    semantic_gateway = gateway or SemanticJsonGateway(settings=settings)
++    overrides: dict[str, SemanticDocumentOverride] = {}
++    diagnostics: list[dict[str, str]] = []
++    model_calls = 0
++    allowed_types = [item.value for item in DocumentType]
++    allowed_lifecycle = [item.value for item in DocumentLifecycleStatus]
++
++    for document in sorted(documents, key=lambda item: item.document_id):
++        current = deterministic[document.document_id]
++        needs_type = current.document_type is DocumentType.UNKNOWN
++        needs_lifecycle = current.lifecycle_status is DocumentLifecycleStatus.UNKNOWN
++        if not (needs_type or needs_lifecycle):
++            continue
++        text = _source_text(document)
++        if not text.strip():
++            continue
++        meta = metadata[document.document_id]
++        request = {
++            "document_id": document.document_id,
++            "source_text": text,
++            "deterministic_document_type": current.document_type.value,
++            "deterministic_lifecycle_status": current.lifecycle_status.value,
++            "metadata": {
++                "title": meta.title,
++                "document_date": meta.document_date,
++                "effective_date": meta.effective_date,
++                "report_date": meta.report_date,
++                "version_indicator": meta.version_indicator,
++            },
++            "allowed_document_types": allowed_types,
++            "allowed_lifecycle_statuses": allowed_lifecycle,
++            "constraints": {
++                "preserve_known_type": not needs_type,
++                "preserve_known_lifecycle": not needs_lifecycle,
++                "unknown_is_allowed": True,
++            },
++            "output_schema": {
++                "document_type": "one allowed document type",
++                "lifecycle_status": "one allowed lifecycle status",
++                "confidence": "HIGH|MEDIUM|LOW",
++                "source_quote": "exact contiguous source quote",
++                "reason": "short semantic reason",
++            },
++        }
++        response = semantic_gateway.propose(
++            task_id=f"document-taxonomy:{document.document_id}",
++            prompt_version="authority-semantic-document-v1",
++            schema_version="authority-document-enums-v1",
++            source_sha256=document.source_sha256,
++            system_prompt=_SYSTEM,
++            request_payload=request,
++            max_tokens=700,
++        )
++        model_calls += int(response.model_called)
++        if response.state not in {SemanticJsonState.RESOLVED, SemanticJsonState.CACHE_HIT} or response.payload is None:
++            diagnostics.append(
++                {
++                    "document_id": document.document_id,
++                    "status": "UNRESOLVED",
++                    "reason": response.reason_code,
++                }
++            )
++            continue
++        try:
++            candidate = _DocumentCandidate.model_validate(response.payload)
++            doc_type = DocumentType(candidate.document_type)
++            lifecycle = DocumentLifecycleStatus(candidate.lifecycle_status)
++        except (ValidationError, ValueError) as exc:
++            diagnostics.append(
++                {
++                    "document_id": document.document_id,
++                    "status": "UNRESOLVED",
++                    "reason": f"CANDIDATE_SCHEMA_INVALID:{exc.__class__.__name__}",
++                }
++            )
++            continue
++        if candidate.confidence != "HIGH":
++            diagnostics.append(
++                {
++                    "document_id": document.document_id,
++                    "status": "UNRESOLVED",
++                    "reason": "MODEL_NOT_HIGH_CONFIDENCE",
++                }
++            )
++            continue
++        if not needs_type and doc_type is not current.document_type:
++            diagnostics.append(
++                {
++                    "document_id": document.document_id,
++                    "status": "UNRESOLVED",
++                    "reason":
