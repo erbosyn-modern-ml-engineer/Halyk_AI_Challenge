@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+
+from openpyxl import load_workbook
 
 from halyk_agent.domain.evidence import EvidenceSpan
 from halyk_agent.domain.routing.models import (
@@ -15,6 +19,17 @@ from halyk_agent.domain.routing.models import (
     LedgerRow,
     RoutingReport,
 )
+
+_FIELD_ALIASES = {
+    "txn_id": {"txn_id", "transaction_id", "transaction id", "txn id", "transactionid"},
+    "date": {"date", "transaction_date", "transaction date", "txn_date", "posting_date"},
+    "account_id": {"account_id", "account id", "account", "account_code", "account code"},
+    "counterparty": {"counterparty", "counter_party", "vendor", "customer", "контрагент"},
+    "description": {"description", "details", "narrative", "memo", "описание", "назначение"},
+    "amount": {"amount", "value", "transaction_amount", "transaction amount", "сумма"},
+    "currency": {"currency", "ccy", "currency_code", "currency code", "валюта"},
+}
+_REQUIRED = {"txn_id", "date", "account_id", "counterparty", "amount", "currency"}
 
 
 class RoutingIOError(Exception):
@@ -31,53 +46,109 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+def _header_key(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    return re.sub(r"[\s\-]+", "_", text).strip("_")
+
+
+def _header_mapping(header: list[object]) -> dict[str, int]:
+    normalized = [_header_key(value) for value in header]
+    mapping: dict[str, int] = {}
+    for canonical, aliases in _FIELD_ALIASES.items():
+        accepted = {_header_key(alias) for alias in aliases}
+        matches = [index for index, name in enumerate(normalized) if name in accepted]
+        if len(matches) > 1:
+            raise RoutingIOError(
+                f"ledger has multiple columns for {canonical}: {matches}",
+                code="LEDGER_SCHEMA",
+            )
+        if matches:
+            mapping[canonical] = matches[0]
+    if not _REQUIRED.issubset(mapping):
+        missing = sorted(_REQUIRED - set(mapping))
+        raise RoutingIOError(f"ledger missing required columns: {missing}", code="LEDGER_SCHEMA")
+    return mapping
+
+
+def _row_value(row: list[object], mapping: dict[str, int], name: str) -> str:
+    index = mapping.get(name)
+    if index is None or index >= len(row) or row[index] is None:
+        return ""
+    return str(row[index]).strip()
+
+
+def _rows_from_matrix(
+    rows: Iterable[list[object]],
+    *,
+    source_file: str,
+) -> tuple[LedgerRow, ...]:
+    iterator = iter(rows)
+    header = next(iterator, None)
+    if header is None:
+        raise RoutingIOError("ledger has no header row", code="LEDGER_SCHEMA")
+    mapping = _header_mapping(header)
+    out: list[LedgerRow] = []
+    for index, row in enumerate(iterator):
+        if not any(str(value or "").strip() for value in row):
+            continue
+        out.append(
+            LedgerRow(
+                row_index=index,
+                txn_id=_row_value(row, mapping, "txn_id"),
+                date=_row_value(row, mapping, "date"),
+                account_id=_row_value(row, mapping, "account_id"),
+                counterparty=_row_value(row, mapping, "counterparty"),
+                description=_row_value(row, mapping, "description"),
+                amount=_row_value(row, mapping, "amount"),
+                currency=_row_value(row, mapping, "currency"),
+                ledger_source_file=source_file,
+            )
+        )
+    return tuple(out)
+
+
 def load_ledger_csv(path: Path) -> tuple[LedgerRow, ...]:
-    """Load primary transaction ledger into typed rows."""
+    """Load a supported primary ledger into typed rows."""
     if not path.is_file():
         raise RoutingIOError(f"ledger not found: {path}", code="MISSING_LEDGER")
-    return load_ledger_csv_bytes(path.read_bytes(), source_file=path.name)
+    data = path.read_bytes()
+    suffix = path.suffix.casefold()
+    if suffix in {".xlsx", ".xlsm"}:
+        return load_ledger_xlsx_bytes(data, source_file=path.name)
+    return load_ledger_csv_bytes(data, source_file=path.name)
 
 
 def load_ledger_csv_bytes(data: bytes, *, source_file: str) -> tuple[LedgerRow, ...]:
-    """Parse ledger CSV bytes into typed rows with path-independent provenance."""
+    """Parse delimited ledger bytes with BOM and common header aliases."""
     stable_source_file = source_file.replace("\\", "/").rsplit("/", 1)[-1]
     if not stable_source_file:
         raise RoutingIOError("ledger source_file has no basename", code="LEDGER_SOURCE")
     try:
-        text = data.decode("utf-8")
+        text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise RoutingIOError(f"ledger is not UTF-8: {exc}", code="LEDGER_ENCODING") from exc
-    rows: list[LedgerRow] = []
-    reader = csv.DictReader(text.splitlines())
-    required = {
-        "txn_id",
-        "date",
-        "account_id",
-        "counterparty",
-        "description",
-        "amount",
-        "currency",
-    }
-    if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
-        raise RoutingIOError(
-            f"ledger missing required columns: {sorted(required)}",
-            code="LEDGER_SCHEMA",
-        )
-    for index, raw in enumerate(reader):
-        rows.append(
-            LedgerRow(
-                row_index=index,
-                txn_id=str(raw["txn_id"]),
-                date=str(raw["date"]),
-                account_id=str(raw["account_id"]),
-                counterparty=str(raw["counterparty"]),
-                description=str(raw.get("description") or ""),
-                amount=str(raw["amount"]),
-                currency=str(raw["currency"]),
-                ledger_source_file=stable_source_file,
-            )
-        )
-    return tuple(rows)
+    sample = text[:65536]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+    matrix = [list(row) for row in csv.reader(io.StringIO(text), dialect=dialect)]
+    return _rows_from_matrix(matrix, source_file=stable_source_file)
+
+
+def load_ledger_xlsx_bytes(data: bytes, *, source_file: str) -> tuple[LedgerRow, ...]:
+    """Parse the active worksheet of an XLSX ledger without formula evaluation."""
+    stable_source_file = source_file.replace("\\", "/").rsplit("/", 1)[-1]
+    try:
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as exc:
+        raise RoutingIOError(f"invalid XLSX ledger: {exc}", code="LEDGER_SCHEMA") from exc
+    try:
+        sheet = workbook.active
+        rows = [list(row) for row in sheet.iter_rows(values_only=True)]
+    finally:
+        workbook.close()
+    return _rows_from_matrix(rows, source_file=stable_source_file)
 
 
 def load_template_answers(path: Path) -> dict[str, Any]:
@@ -91,7 +162,7 @@ def load_template_answers_bytes(data: bytes) -> dict[str, Any]:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RoutingIOError(
             f"invalid submission template JSON: {exc}", code="TEMPLATE_SCHEMA"
-        ) from (exc)
+        ) from exc
     return _template_answers_from_payload(payload)
 
 
@@ -142,10 +213,7 @@ def write_routing_outputs(report: RoutingReport, output_dir: Path) -> dict[str, 
         "identity_evidence": output_dir / "identity_evidence.jsonl",
         "summary": output_dir / "routing_summary.md",
     }
-    _atomic_write(
-        paths["manifest"],
-        report.manifest.model_dump_json(indent=2) + "\n",
-    )
+    _atomic_write(paths["manifest"], report.manifest.model_dump_json(indent=2) + "\n")
     _atomic_write(paths["scenario_routes"], _jsonl(report.scenario_routes))
     _atomic_write(paths["document_links"], _jsonl(report.document_links))
     _atomic_write(paths["transaction_links"], _jsonl(report.transaction_links))
@@ -156,22 +224,22 @@ def write_routing_outputs(report: RoutingReport, output_dir: Path) -> dict[str, 
 
 
 def render_summary_markdown(report: RoutingReport) -> str:
-    m = report.manifest
+    manifest = report.manifest
     account_dist = {route.scenario_id: len(route.account_ids) for route in report.scenario_routes}
     lines = [
         "# Routing summary (Stage 5B)",
         "",
-        f"- scenarios: {m.scenario_count}",
-        f"- template_cells: {m.template_cell_count}",
-        f"- ledger_rows: {m.ledger_row_count}",
-        f"- scenario_transactions: {m.scenario_transaction_count}",
-        f"- transaction_links: {m.transaction_link_count}",
-        f"- documents_resolved: {m.resolved_document_count}",
-        f"- documents_unresolved: {m.unresolved_document_count}",
-        f"- multi_scenario_documents: {m.multi_scenario_document_count}",
-        f"- conflicts: {m.conflict_count}",
-        f"- routing_algorithm_version: `{m.routing_algorithm_version}`",
-        f"- normalization_version: `{m.normalization_version}`",
+        f"- scenarios: {manifest.scenario_count}",
+        f"- template_cells: {manifest.template_cell_count}",
+        f"- ledger_rows: {manifest.ledger_row_count}",
+        f"- scenario_transactions: {manifest.scenario_transaction_count}",
+        f"- transaction_links: {manifest.transaction_link_count}",
+        f"- documents_resolved: {manifest.resolved_document_count}",
+        f"- documents_unresolved: {manifest.unresolved_document_count}",
+        f"- multi_scenario_documents: {manifest.multi_scenario_document_count}",
+        f"- conflicts: {manifest.conflict_count}",
+        f"- routing_algorithm_version: `{manifest.routing_algorithm_version}`",
+        f"- normalization_version: `{manifest.normalization_version}`",
         "",
         "## Accounts per scenario",
         "",
