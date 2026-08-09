@@ -115,7 +115,10 @@ class ContextValidator:
                 code="DUPLICATE_DEFINITION_PLAN",
             )
         plan_id_set = set(plan_ids)
-        if set(readiness_ids) != plan_id_set:
+        # Definitions that fail closed at planning time have no plan, so readiness
+        # may legitimately cover more definitions than there are plans. Every plan
+        # must still have readiness; extra readiness entries are the blocked cells.
+        if not plan_id_set.issubset(set(readiness_ids)):
             raise EvaluationValidationError(
                 "definition readiness universe differs from evaluation plans",
                 code="DEFINITION_READINESS_UNIVERSE_MISMATCH",
@@ -132,7 +135,10 @@ class ContextValidator:
         plan_owner = {plan.definition_id: plan.scenario_id for plan in plans}
         for entry in context.selector_coverage:
             expected_scenario = plan_owner.get(entry.definition_id)
-            if expected_scenario is None or entry.scenario_id != expected_scenario:
+            if expected_scenario is None:
+                # Coverage for a definition that failed closed at planning time.
+                continue
+            if entry.scenario_id != expected_scenario:
                 raise EvaluationValidationError(
                     "selector coverage contains an unknown or wrongly owned definition",
                     code="SELECTOR_COVERAGE_UNIVERSE_MISMATCH",

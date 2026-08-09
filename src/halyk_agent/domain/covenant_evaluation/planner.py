@@ -380,6 +380,27 @@ def plan_definition(definition: CovenantDefinition) -> EvaluationPlan:
     )
 
 
+def plan_definitions_partial(
+    definitions: Iterable[CovenantDefinition],
+) -> tuple[tuple[EvaluationPlan, ...], tuple[tuple[CovenantDefinition, EvaluationPlanningError], ...]]:
+    """Plan what can be planned; return per-cell blockers instead of aborting.
+
+    One covenant the evaluator cannot yet execute must not suppress every other
+    covenant's result. Each unplannable definition is reported with its own
+    fail-closed reason and simply produces no plan.
+    """
+    plans: list[EvaluationPlan] = []
+    blocked: list[tuple[CovenantDefinition, EvaluationPlanningError]] = []
+    for definition in sorted(
+        definitions, key=lambda item: (item.scenario_id, item.clause_id, item.definition_id)
+    ):
+        try:
+            plans.append(plan_definition(definition))
+        except EvaluationPlanningError as exc:
+            blocked.append((definition, exc))
+    return tuple(plans), tuple(blocked)
+
+
 def plan_definitions(definitions: Iterable[CovenantDefinition]) -> tuple[EvaluationPlan, ...]:
     """Plan definitions in deterministic identity order."""
 

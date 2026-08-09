@@ -34,7 +34,7 @@ from halyk_agent.domain.covenant_evaluation import (
     EvaluationManifest,
     EvaluationReport,
     EvaluationStatus,
-    plan_definitions,
+    plan_definitions_partial,
 )
 from halyk_agent.domain.covenant_evaluation.structure_validation import (
     EvaluationValidationError,
@@ -190,10 +190,17 @@ def evaluate_from_paths(
             code="COVENANT_DEFINITION_COUNT_MISMATCH",
         )
 
-    plans = plan_definitions(definitions)
+    # A covenant the evaluator cannot yet execute fails closed on its own cell;
+    # it must not suppress every other scenario's result.
+    plans, blocked_plans = plan_definitions_partial(definitions)
+    blocked_scenarios = {definition.scenario_id for definition, _ in blocked_plans}
     plan_scenarios = {plan.scenario_id for plan in plans}
     extra_scenarios = sorted(
-        {item.scenario_id for item in calculation_inputs if item.scenario_id not in plan_scenarios}
+        {
+            item.scenario_id
+            for item in calculation_inputs
+            if item.scenario_id not in plan_scenarios and item.scenario_id not in blocked_scenarios
+        }
     )
     if extra_scenarios:
         raise EvaluationServiceError(

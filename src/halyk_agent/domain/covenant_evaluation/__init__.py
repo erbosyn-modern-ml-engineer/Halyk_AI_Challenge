@@ -18,7 +18,12 @@ from .models import (
     EvaluationStatus,
     EvaluationTrace,
 )
-from .planner import EvaluationPlanningError, plan_definition, plan_definitions
+from .planner import (
+    EvaluationPlanningError,
+    plan_definition,
+    plan_definitions,
+    plan_definitions_partial,
+)
 from .structure_validation import EvaluationValidationError, PlanStructureValidator
 
 __all__ = [
@@ -43,4 +48,5 @@ __all__ = [
     "PlanStructureValidator",
     "plan_definition",
     "plan_definitions",
+    "plan_definitions_partial",
 ]
