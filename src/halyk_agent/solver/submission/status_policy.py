@@ -1,10 +1,4 @@
-"""Explicit submission-only status policies.
-
-The strict Stage 6 evaluator remains the source-faithful calculation kernel.
-Benchmark calibration is intentionally isolated at the final submission boundary
-and must be explicitly enabled. It is an empirical competition policy, not a
-claim about contractual covenant grace semantics.
-"""
+"""Status rules used when the final submission is built."""
 
 from __future__ import annotations
 
@@ -27,7 +21,7 @@ class SubmissionStatusPolicy(StrEnum):
 
 
 def configured_submission_status_policy() -> SubmissionStatusPolicy:
-    """Read the explicit submission policy; strict is always the default."""
+    """Read the requested policy. No env var means strict mode."""
 
     raw = os.environ.get(_STATUS_POLICY_ENV, SubmissionStatusPolicy.STRICT.value)
     try:
@@ -66,12 +60,7 @@ def resolve_submission_status(
     threshold: TypedQuantity,
     policy: SubmissionStatusPolicy,
 ) -> CovenantStatus | None:
-    """Apply a narrow opt-in benchmark boundary policy to a strict verdict.
-
-    V1 changes only an otherwise-BREACH inclusive upper-bound ratio/percent
-    whose positive raw actual is above its positive threshold by no more than 5%.
-    All other quantity kinds, comparators and unresolved states are untouched.
-    """
+    """Optionally soften a very small LTE ratio/percent breach at publication time."""
 
     if policy is SubmissionStatusPolicy.STRICT:
         return strict_verdict
@@ -86,6 +75,7 @@ def resolve_submission_status(
     if actual.value <= threshold_value:
         return strict_verdict
 
+    # Keep this at the submission edge. Stage 6 still owns the raw financial verdict.
     upper_bound = threshold_value * (Decimal("1") + _NEAR_THRESHOLD_RELATIVE_BAND)
     if actual.value <= upper_bound:
         return CovenantStatus.COMPLIANT
@@ -93,7 +83,7 @@ def resolve_submission_status(
 
 
 def status_policy_manifest(policy: SubmissionStatusPolicy) -> dict[str, object]:
-    """Stable disclosure artifact written next to the final submission."""
+    """Describe the policy used for this submission."""
 
     return {
         "schema_version": "halyk.submission_status_policy.v1",

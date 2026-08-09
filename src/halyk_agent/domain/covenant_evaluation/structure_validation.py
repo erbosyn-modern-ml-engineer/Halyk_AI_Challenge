@@ -1,4 +1,4 @@
-"""Fail-closed structural validation for Stage 6 evaluation plans."""
+"""Structural checks for Stage 6 evaluation plans."""
 
 from __future__ import annotations
 
@@ -55,11 +55,10 @@ def _numeric_type(node: EvaluationNode) -> QuantityType:
 
 
 class PlanStructureValidator:
-    """Validate plan topology, payloads and AST-derived type contracts.
+    """Reject broken plan graphs before execution.
 
-    The topological ordering intentionally differs from the donor helpers:
-    every declared dependency must exist.  Dependencies outside the supplied
-    node set are never silently treated as external inputs.
+    Missing dependencies are errors here. Treating them as outside inputs would
+    make a bad plan look valid and produce a result we cannot explain later.
     """
 
     def validate(self, plan: EvaluationPlan) -> tuple[str, ...]:

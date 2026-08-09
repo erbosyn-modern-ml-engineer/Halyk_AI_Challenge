@@ -1,9 +1,4 @@
-"""Fixed, source-faithful competition pipeline for Stages 3 -> 6.
-
-The orchestration is intentionally smaller than DVC/Kedro.  Halyk has one fixed
-competition path, so the useful donor ideas are explicit stage inputs/outputs,
-fail-fast ordering, and deterministic lineage rather than a new framework runtime.
-"""
+"""Competition pipeline from sanitized inputs through Stage 6."""
 
 from __future__ import annotations
 
@@ -115,7 +110,7 @@ def materialize_allowlisted_inputs(
     opener: FileOpener,
     audit: RunFileAudit,
 ) -> MaterializedInputs:
-    """Copy only sanitized allowlisted inputs into an isolated runtime workspace."""
+    """Copy allowlisted inputs into the run workspace."""
 
     input_dir = workspace / "input"
     inspection_dir = workspace / "inspection"
@@ -239,7 +234,7 @@ def run_competition_pipeline(
     audit: RunFileAudit,
     settings: Settings | None = None,
 ) -> CompetitionPipelineRun:
-    """Run the deterministic public competition path from allowlisted sources to Stage 6."""
+    """Run the normal competition path up to covenant evaluation."""
 
     resolved_settings = settings or get_settings()
     materialized = materialize_allowlisted_inputs(
