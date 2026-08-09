@@ -162,7 +162,8 @@ def _check_input_limits(root: Path, files: list[Path], settings: Settings) -> No
         size = path.stat().st_size
         if size > settings.max_single_file_bytes:
             raise DatasetAdapterError(
-                f"dataset file exceeds size limit: {path.name} ({size} > {settings.max_single_file_bytes})"
+                "dataset file exceeds size limit: "
+                f"{path.name} ({size} > {settings.max_single_file_bytes})"
             )
         total += size
         if total > settings.max_total_uncompressed_bytes:
