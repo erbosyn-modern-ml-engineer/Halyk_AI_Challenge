@@ -106,6 +106,12 @@ def _xlsx_header(data: bytes) -> Sequence[object] | None:
 
 
 def _looks_like_ledger(path: Path, data: bytes) -> bool:
+    """Identify a ledger candidate from a minimal stable header fingerprint.
+
+    Preflight discovery should identify candidates without duplicating the strict
+    runtime ledger schema. The routing loader performs the full required-column
+    validation before any candidate is used by the solver.
+    """
     suffix = path.suffix.casefold()
     header: Sequence[object] | None
     if suffix in {".csv", ".txt", ".tsv"}:
@@ -116,8 +122,8 @@ def _looks_like_ledger(path: Path, data: bytes) -> bool:
         return False
     if header is None:
         return False
-    required = {"txn_id", "date", "account_id", "counterparty", "amount", "currency"}
-    return required.issubset(_canonical_header(header))
+    required_fingerprint = {"txn_id", "amount", "currency"}
+    return required_fingerprint.issubset(_canonical_header(header))
 
 
 def _looks_like_submission_template(obj: Any) -> bool:
@@ -149,20 +155,19 @@ def _looks_like_case_markdown(path: Path, data: bytes) -> bool:
 def _check_input_limits(root: Path, files: list[Path], settings: Settings) -> None:
     if len(files) > settings.max_archive_files:
         raise DatasetAdapterError(
-            f"dataset contains {len(files)} files; limit is {settings.max_archive_files}"
+            f"dataset contains {len(files)} files, exceeding limit {settings.max_archive_files}"
         )
     total = 0
     for path in files:
-        relative = path.relative_to(root).as_posix()
-        if len(relative) > settings.max_path_length:
-            raise DatasetAdapterError(f"dataset path exceeds limit: {relative}")
         size = path.stat().st_size
         if size > settings.max_single_file_bytes:
-            raise DatasetAdapterError(f"dataset file exceeds size limit: {relative} ({size} bytes)")
+            raise DatasetAdapterError(
+                f"dataset file exceeds size limit: {path.name} ({size} > {settings.max_single_file_bytes})"
+            )
         total += size
         if total > settings.max_total_uncompressed_bytes:
             raise DatasetAdapterError(
-                "dataset total size exceeds max_total_uncompressed_bytes before content scan"
+                "dataset total bytes exceed configured uncompressed-size limit"
             )
 
 
@@ -290,30 +295,34 @@ def discover_and_sanitize(
     if not ledgers:
         raise DatasetAdapterError("primary ledger not found")
     if not case_descriptions:
-        raise DatasetAdapterError("case description files not found")
+        raise DatasetAdapterError("case description not found")
+    if not document_files:
+        raise DatasetAdapterError("document files not found")
 
-    root_ledgers = [item for item in ledgers if Path(item.path).parent == root]
-    ledger_candidates = root_ledgers or ledgers
-    if len(ledger_candidates) != 1:
-        paths = sorted(item.path for item in ledger_candidates)
-        raise DatasetAdapterError(f"ambiguous primary ledgers: {paths}")
-    primary_ledger = ledger_candidates[0]
+    root_templates = [item for item in templates if Path(item.path).parent.resolve() == root]
+    if len(root_templates) > 1:
+        raise DatasetAdapterError("ambiguous submission templates at dataset root")
+    if root_templates:
+        submission_template = root_templates[0]
+    elif len(templates) == 1:
+        submission_template = templates[0]
+    else:
+        raise DatasetAdapterError("ambiguous submission templates")
 
-    root_templates = [item for item in templates if Path(item.path).parent == root]
-    template_candidates = root_templates or templates
-    if len(template_candidates) != 1:
-        paths = sorted(item.path for item in template_candidates)
-        raise DatasetAdapterError(f"ambiguous submission templates: {paths}")
-    submission_template = template_candidates[0]
+    if len(ledgers) != 1:
+        raise DatasetAdapterError(f"expected exactly one primary ledger, found {len(ledgers)}")
+
+    if documents_dir is None:
+        documents_dir = root
 
     manifest = SanitizedDatasetManifest(
-        case_descriptions=sorted(case_descriptions, key=lambda item: item.path),
-        primary_ledger=primary_ledger,
+        case_descriptions=case_descriptions,
+        primary_ledger=ledgers[0],
         submission_template=submission_template,
-        documents_dir=str(documents_dir.as_posix()) if documents_dir else None,
-        document_files=sorted(document_files, key=lambda item: item.path),
-        technical_noise=sorted(technical_noise, key=lambda item: item.path),
-        ignored=sorted(ignored, key=lambda item: item.path),
-        quarantined=sorted(quarantined, key=lambda item: item.path),
+        documents_dir=documents_dir.resolve().as_posix(),
+        document_files=document_files,
+        technical_noise=technical_noise,
+        ignored=ignored,
+        quarantined=quarantined,
     )
     return manifest, inspected
