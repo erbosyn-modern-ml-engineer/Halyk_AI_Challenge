@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -37,7 +38,7 @@ def _quote_inside_fragments(
     document: CanonicalDocument,
     window: EvidenceWindow,
 ) -> tuple[int, int, int] | None:
-    """Locate quote strictly inside supplied fragment text intervals (no doc-wide fallback)."""
+    """Locate quote strictly inside supplied fragment text intervals."""
     by_id = {f.fragment_id: f for f in window.fragments}
     quote = candidate.quote
     for frag_id in candidate.fragment_ids:
@@ -48,24 +49,19 @@ def _quote_inside_fragments(
         if page is None:
             continue
         page_text = page.raw_text or ""
-        # Fragment interval on the page
         frag_start, frag_end = frag.char_start, frag.char_end
         if not (0 <= frag_start < frag_end <= len(page_text)):
-            # Fall back to searching within fragment.text only, then map if unique.
             idx = frag.text.find(quote)
             if idx < 0:
                 continue
-            # Prefer declared offsets when they match inside the fragment interval.
             if (
                 candidate.page_number == frag.page_number
                 and frag_start <= candidate.char_start < candidate.char_end <= frag_end
                 and page_text[candidate.char_start : candidate.char_end] == quote
             ):
                 return frag.page_number, candidate.char_start, candidate.char_end
-            # Without reliable page mapping, require exact offset match inside fragment text.
             continue
         interval = page_text[frag_start:frag_end]
-        # Prefer candidate offsets when they lie inside the fragment and match.
         if (
             candidate.page_number == frag.page_number
             and frag_start <= candidate.char_start < candidate.char_end <= frag_end
@@ -87,11 +83,7 @@ def validate_evidence(
     requirement: FactRequirement | None = None,
     window: EvidenceWindow | None = None,
 ) -> tuple[FactValidatorStatus, EvidenceSpan | None, str]:
-    """
-    Validate quote alignment and authority domain source.
-
-    Returns (status, span_or_none, reason_code).
-    """
+    """Validate quote alignment and authority domain source."""
     if candidate.source_document_id not in authoritative_doc_ids:
         return FactValidatorStatus.REJECTED_EVIDENCE, None, "NON_AUTHORITATIVE_DOC"
 
@@ -115,8 +107,6 @@ def validate_evidence(
         return FactValidatorStatus.REJECTED_EVIDENCE, None, "PAGE_MISSING"
 
     page_text = page.raw_text or ""
-
-    # Fragment-bound: when fragment_ids are supplied, quote MUST occur inside fragment text.
     if candidate.fragment_ids:
         if window is None:
             return FactValidatorStatus.REJECTED_EVIDENCE, None, "FRAGMENTS_WITHOUT_WINDOW"
@@ -131,7 +121,6 @@ def validate_evidence(
         start, end = candidate.char_start, candidate.char_end
         page_number = candidate.page_number
     else:
-        # Deterministic path may relocate within the document when no fragments supplied.
         located = find_quote_offsets(document, quote)
         if located is None:
             return FactValidatorStatus.REJECTED_EVIDENCE, None, "QUOTE_NOT_FOUND"
@@ -145,12 +134,41 @@ def validate_evidence(
     return FactValidatorStatus.ACCEPTED, span, "EVIDENCE_OK"
 
 
+def _payload_transaction_id(payload: FactPayload) -> str | None:
+    if isinstance(
+        payload,
+        (
+            FxRatePayload,
+            TransactionReclassificationPayload,
+            TransactionPeriodPayload,
+            TransactionTreatmentPayload,
+            AmountCorrectionPayload,
+        ),
+    ):
+        return payload.transaction_id
+    return None
+
+
 def semantic_validate(
     payload: FactPayload,
     ledger_txn_ids: set[str] | None = None,
+    *,
+    scenario_id: str | None = None,
+    ledger_txn_scenarios: Mapping[str, str | None] | None = None,
 ) -> tuple[FactValidatorStatus, str]:
     """Semantic checks independent of document evidence."""
     try:
+        transaction_id = _payload_transaction_id(payload)
+        if transaction_id is not None and ledger_txn_ids is not None:
+            if transaction_id not in ledger_txn_ids:
+                return FactValidatorStatus.REJECTED_SEMANTIC, "UNKNOWN_TXN"
+            if ledger_txn_scenarios is not None and scenario_id is not None:
+                if ledger_txn_scenarios.get(transaction_id) != scenario_id:
+                    return (
+                        FactValidatorStatus.REJECTED_SEMANTIC,
+                        "FACT_TXN_SCENARIO_MISMATCH",
+                    )
+
         if isinstance(payload, OwnershipPayload):
             if payload.ownership_percent < 0 or payload.ownership_percent > Decimal("100"):
                 return FactValidatorStatus.REJECTED_SEMANTIC, "OWNERSHIP_OUT_OF_RANGE"
@@ -170,12 +188,6 @@ def semantic_validate(
                     return FactValidatorStatus.REJECTED_SEMANTIC, "FX_NON_POSITIVE"
             elif payload.explicit_rate is not None:
                 return FactValidatorStatus.REJECTED_SEMANTIC, "FX_RATE_INVENTED"
-            if (
-                payload.transaction_id is not None
-                and ledger_txn_ids is not None
-                and payload.transaction_id not in ledger_txn_ids
-            ):
-                return FactValidatorStatus.REJECTED_SEMANTIC, "UNKNOWN_TXN"
         elif isinstance(payload, TransactionReclassificationPayload):
             from_cat = (payload.from_category or "").strip()
             to_cat = (payload.to_category or "").strip()
@@ -183,24 +195,9 @@ def semantic_validate(
                 return FactValidatorStatus.REJECTED_SEMANTIC, "RECLASS_SAME_CATEGORY"
             if payload.amount is not None and not payload.amount.currency.strip():
                 return FactValidatorStatus.REJECTED_SEMANTIC, "CURRENCY_EMPTY"
-            if (
-                payload.transaction_id is not None
-                and ledger_txn_ids is not None
-                and payload.transaction_id not in ledger_txn_ids
-            ):
-                return FactValidatorStatus.REJECTED_SEMANTIC, "UNKNOWN_TXN"
-        elif isinstance(payload, TransactionPeriodPayload | TransactionTreatmentPayload):
-            if ledger_txn_ids is not None and payload.transaction_id not in ledger_txn_ids:
-                return FactValidatorStatus.REJECTED_SEMANTIC, "UNKNOWN_TXN"
         elif isinstance(payload, AmountCorrectionPayload):
             if not payload.amount.currency.strip():
                 return FactValidatorStatus.REJECTED_SEMANTIC, "CURRENCY_EMPTY"
-            if (
-                payload.transaction_id is not None
-                and ledger_txn_ids is not None
-                and payload.transaction_id not in ledger_txn_ids
-            ):
-                return FactValidatorStatus.REJECTED_SEMANTIC, "UNKNOWN_TXN"
         elif isinstance(payload, OffLedgerAmountPayload | OneTimeAddBackPayload) and (
             not payload.amount.currency.strip()
         ):
@@ -218,6 +215,7 @@ def validate_candidate(
     authoritative_doc_ids: set[str],
     requirement: FactRequirement | None = None,
     ledger_txn_ids: set[str] | None = None,
+    ledger_txn_scenarios: Mapping[str, str | None] | None = None,
     window: EvidenceWindow | None = None,
 ) -> tuple[FactValidatorStatus, EvidenceSpan | None, str]:
     """Run evidence then semantic validation."""
@@ -230,7 +228,12 @@ def validate_candidate(
     )
     if status is not FactValidatorStatus.ACCEPTED:
         return status, None, reason
-    sem_status, sem_reason = semantic_validate(candidate.payload, ledger_txn_ids)
+    sem_status, sem_reason = semantic_validate(
+        candidate.payload,
+        ledger_txn_ids,
+        scenario_id=candidate.scenario_id,
+        ledger_txn_scenarios=ledger_txn_scenarios,
+    )
     if sem_status is not FactValidatorStatus.ACCEPTED:
         return sem_status, span, sem_reason
     return FactValidatorStatus.ACCEPTED, span, reason
