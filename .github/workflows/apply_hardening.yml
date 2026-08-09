@@ -21,9 +21,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/hardening.patch.part-* > /tmp/hardening.patch
+          cat .github/hardening.safe-* > /tmp/hardening.patch
+          patch --dry-run -p1 < /tmp/hardening.patch
           patch -p1 < /tmp/hardening.patch
-          rm -f .github/hardening.patch.part-* .github/hardening.ready
+          rm -f .github/hardening.safe-* .github/hardening.patch.part-* .github/hardening.ready
           rm -f .github/workflows/source_snapshot.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
